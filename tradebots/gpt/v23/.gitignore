@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.venv/
+venv/
+mt5_bot.log
+trading_bot.log
+trade_journal.csv
+backtest_results.csv
+optimizer_results.csv
+.env
+.claude/

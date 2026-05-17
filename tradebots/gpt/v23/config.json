@@ -1,0 +1,100 @@
+{
+  "symbol": "EURUSD",
+  "symbols": [
+    "EURUSD",
+    "USDJPY",
+    "GBPUSD",
+    "AUDUSD",
+    "USDCAD",
+    "USDCHF",
+    "EURGBP",
+    "BTCUSD",
+    "ETHUSD",
+    "SOLUSD",
+    "LINKUSD",
+    "XRPUSD",
+    "ADAUSD"
+  ],
+  "timeframe": "M5",
+  "bars": 300,
+  "poll_seconds": 30,
+  "max_bar_age_minutes": 30,
+
+  "fast_ema": 10,
+  "slow_ema": 50,
+  "trend_timeframe": "H1",
+  "trend_ema": 200,
+
+  "rsi_period": 14,
+  "buy_rsi_max": 68,
+  "sell_rsi_min": 32,
+
+  "atr_period": 14,
+  "use_atr_stops": true,
+  "atr_sl_multiplier": 1.5,
+  "atr_tp_multiplier": 2.8,
+  "min_atr_pips": 3.0,
+
+  "use_adx_filter": true,
+  "adx_period": 14,
+  "adx_min_threshold": 20.0,
+
+  "use_macd_confirm": true,
+  "macd_fast": 12,
+  "macd_slow": 26,
+  "macd_signal_period": 9,
+
+  "risk_percent": 0.25,
+  "fixed_lot": null,
+  "stop_loss_pips": 20,
+  "take_profit_pips": 40,
+  "max_spread_pips": 2.0,
+
+  "max_positions": 1,
+  "max_total_positions": 3,
+  "max_total_risk_percent": 3.0,
+  "max_margin_percent": 30.0,
+
+  "daily_loss_limit_percent": 3.0,
+  "weekly_loss_limit_percent": 8.0,
+  "max_consecutive_losses": 3,
+
+  "trailing_stop_pips": 15,
+  "breakeven_after_pips": 12,
+  "partial_tp_enabled": true,
+  "partial_tp_percent": 50.0,
+  "partial_tp_multiplier": 1.5,
+
+  "trade_start_hour": 15,
+  "trade_end_hour": 19,
+  "session_preset": "custom",
+
+  "use_support_resistance": true,
+  "sr_lookback_bars": 80,
+  "sr_min_distance_pips": 8.0,
+
+  "use_fibonacci_filter": true,
+  "fib_lookback_bars": 120,
+  "fib_tolerance_pips": 12.0,
+
+  "news_blackout_file": "news_blackouts.json",
+  "news_blackout_before_minutes": 30,
+  "news_blackout_after_minutes": 30,
+
+  "trade_journal": "trade_journal.csv",
+  "deviation_points": 20,
+  "magic": 230504,
+  "comment": "mt5_python_bot",
+
+  "dry_run": false,
+  "live_trading_confirm": true,
+  "close_on_reverse": true,
+
+  "backtest_slippage_pips": 0.5,
+  "backtest_commission_per_lot": 7.0,
+
+  "mt5_path": null,
+  "login": null,
+  "password": null,
+  "server": null
+}

@@ -1,0 +1,8 @@
+[
+  {
+    "time_utc": "2026-05-08T12:30:00Z",
+    "currency": "USD",
+    "impact": "high",
+    "event": "Example high-impact event"
+  }
+]
