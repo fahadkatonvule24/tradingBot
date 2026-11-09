@@ -220,3 +220,19 @@ def test_symbol_subset_with_shipped_config(tmp_path, monkeypatch):
         str(tmp_path / "out"),
     ]
     assert main(args) == 0
+
+
+def test_output_never_crashes_on_legacy_windows_consoles(monkeypatch):
+    """Regression (found by Windows CI): cp1252 consoles cannot encode '→' and the CLI crashed."""
+    import io
+    import sys
+
+    from tradebot.cli import safe_streams
+
+    raw = io.BytesIO()
+    legacy = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", legacy)
+    safe_streams()
+    legacy.write("2024-01-01 → 2024-02-01")
+    legacy.flush()
+    assert raw.getvalue() == b"2024-01-01 ? 2024-02-01"

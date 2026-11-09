@@ -238,7 +238,7 @@ v23 is kept under the [`v23` tag](https://github.com/fahadkatonvule24/tradingBot
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 80 tests
+pytest --cov=tradebot      # 81 tests
 ruff check . && ruff format --check .
 ```
 

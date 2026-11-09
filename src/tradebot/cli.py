@@ -87,7 +87,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def safe_streams() -> None:
+    """Never crash on output: legacy Windows consoles (cp1252) cannot encode characters like '→'.
+
+    Non-UTF-8 stdout/stderr are switched to errors="replace", so such characters print as '?'.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding and encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    safe_streams()
     args = build_parser().parse_args(argv)
     _setup_logging(args.verbose, args.command in ("run",))
     try:
