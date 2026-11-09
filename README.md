@@ -6,25 +6,30 @@
 
 **A MetaTrader 5 trading bot built around one idea: the backtest must run the same code as live
 trading.** A single decision engine sends orders through MT5 when live and through a realistic
-simulated broker when backtesting. Around it sit layered risk controls, three strategies,
-parallel walk-forward optimisation, and HTML reports. It has been run end to end against a real
-MT5 terminal.
+simulated broker when backtesting, and the same engine powers a **live advisor dashboard** that
+tells a person when to trade, where to put the stop and target, and how much they stand to win or
+lose. Around it sit layered risk controls, three strategies, parallel walk-forward optimisation,
+and HTML reports. It has been run end to end against a real MT5 terminal.
 
-![tradebot check against a MetaQuotes demo terminal](docs/screenshots/terminal-check.png)
+![The tradebot advisor dashboard on live MetaQuotes demo prices](docs/screenshots/dashboard.png)
 
-> `tradebot check` against a live MetaQuotes demo terminal: server-time detection, symbol
-> resolution, closed-bar signals for six instruments, and the trading gate refusing live orders
-> because the config is in dry-run mode.
+> `tradebot ui` on live MetaQuotes demo prices. No symbol has a signal on this bar, so the
+> advice is **WAIT**, with the exact trigger to watch for, the filters that pass or fail, and the
+> plan the bot *would* send if a sell fired now: entry, stop, target, lot size, and the money lost
+> at the stop or made at the target. Orders are off because the config is in dry-run mode.
 
 ## Contents
 
-- [What it does](#what-it-does) · [Quick start](#quick-start) · [Safety model](#safety-model)
+- [What it does](#what-it-does) · [Quick start](#quick-start) · [Advisor dashboard](#advisor-dashboard) · [Safety model](#safety-model)
 - [Architecture](#architecture) · [Strategies](#strategies) · [Risk and trade management](#risk-and-trade-management)
 - [Backtesting model](#backtesting-model) · [Results on real data](#results-on-real-data)
 - [Bugs fixed from v23](#bugs-fixed-from-v23) · [Testing](#testing) · [Limitations](#limitations-and-next-steps)
 
 ## What it does
 
+- **Advises you live** in a browser dashboard: streaming bid/ask, BUY / SELL / WAIT / SKIP per
+  symbol with the reason, entry, stop-loss, take-profit, lot size, and the money at risk and to
+  gain, all priced at the live quote by the same engine that trades.
 - **Trades MT5** (demo or live) on closed bars, across many symbols, resolving broker suffixes
   (`EURUSD` → `EURUSDm`). All timestamps are converted from server time to UTC.
 - **Three strategies** behind one interface: EMA crossover, Donchian breakout, and trend
@@ -54,6 +59,7 @@ python -m venv .venv; .venv\Scripts\activate
 pip install -e ".[mt5]"            # the MetaTrader5 package is Windows-only
 
 tradebot check                     # connect to the open MT5 terminal, show account, symbols, signals
+tradebot ui                        # live advisor dashboard at http://127.0.0.1:8765 (advice only)
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
 tradebot run                       # keep running (dry run); Ctrl+C stops after the current cycle
 
@@ -66,6 +72,44 @@ tradebot journal --days 7          # what the bot did this week
 No MetaTrader terminal? `python scripts/make_demo_data.py --out demo-data`, then run
 `tradebot backtest --data demo-data --timeframe M15 --symbols EURUSD GBPUSD` to try the research tools on
 synthetic data.
+
+## Advisor dashboard
+
+`tradebot ui` connects to the open MT5 terminal and serves a dashboard on `127.0.0.1`. For every
+symbol, once a second:
+
+| It shows | Where it comes from |
+|---|---|
+| Live bid / ask, spread, recent price | `symbol_info_tick` and closed bars, polled on one MT5 thread |
+| **BUY / SELL**: take it now, valid until the forming bar closes | a signal on the last closed bar that passes every engine guard |
+| **SKIP**: signal, but don't | the guard that blocks it (session, news, loss limit, spread, minimum lot, margin…) |
+| **WAIT**: no setup, and what would trigger one | the strategy's trigger, e.g. "a sell triggers when EMA 10 closes below EMA 50 (now 0.93 ATR above it)" |
+| Entry, stop-loss, take-profit, lot size | `Engine.plan_entry`, the bot's own sizing, priced at the live ask (buy) or bid (sell) |
+| Loss if stopped, profit at target | volume × distance × the terminal's own per-tick value |
+| Filter checklist | the strategy's filters (trend, ADX, MACD, RSI, room to S/R) on the last closed bar |
+| Chart | the last 120 bars plus the forming one, both EMAs, profit and loss zones, live price; hover for OHLC |
+| Track record | a backtest of the current config on your downloaded history, per symbol |
+| Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
+
+**The advice is the bot's own decision, not a separate indicator.** `advisor.py` calls the same
+`Engine.entry_blocker` and `Engine.plan_entry` that `Engine.on_bar` runs before every live or
+backtest trade, so the side, lot size, stop and target on the page are exactly the order
+`tradebot run --live` would send at that moment.
+
+**Placing the trade from the page** is possible but off by default. The button is enabled only
+when every [safety gate](#safety-model) is open and the dashboard was started with
+`tradebot ui --live`. On click the server does not trust the browser: it re-reads the quote,
+recomputes the advice and every guard, and sends only the advised side and size, with the stop
+and target attached. Breakeven, partial profit and trailing apply while `tradebot run` manages
+the position.
+
+**The local server is hardened, because one endpoint can place orders.** It binds to `127.0.0.1`
+only, rejects foreign `Host` headers (DNS rebinding), requires a per-session token sent in a
+custom header (other sites can neither read it nor send it cross-origin), refuses cross-origin
+`Origin`s, and serves a strict Content-Security-Policy. All page content is inserted as text,
+never as HTML, and the server uses only the standard library.
+
+![Dashboard in dark mode](docs/screenshots/dashboard-dark.png)
 
 ## Safety model
 
@@ -83,6 +127,12 @@ While running live, creating a file named `STOP` in the working directory pauses
 immediately; open positions keep being managed. Credentials come from environment variables or a
 `.env` file, never from the committed config.
 
+![tradebot check against a MetaQuotes demo terminal](docs/screenshots/terminal-check.png)
+
+> `tradebot check` against a live MetaQuotes demo terminal: server-time detection, symbol
+> resolution, closed-bar signals for six instruments, and the trading gate refusing live orders
+> because the config is in dry-run mode.
+
 ## Architecture
 
 ```mermaid
@@ -98,6 +148,8 @@ flowchart LR
     E -->|backtest| S
     S --> R[metrics · walk-forward · HTML report]
     E --> J[(SQLite journal)]
+    A -->|live ticks| U[advisor + ui<br/>127.0.0.1 dashboard]
+    E -.->|entry_blocker · plan_entry| U
 ```
 
 The engine only knows the `Broker` interface. Live trading passes it `MT5Broker`; the backtester
@@ -111,6 +163,8 @@ src/tradebot/
 ├── indicators.py    EMA, Wilder RSI/ATR/ADX, MACD (vectorised)
 ├── strategy.py      signals for ema_cross / breakout / pullback + shared filters
 ├── engine.py        the decision procedure (live and backtest)
+├── advisor.py       BUY/SELL/WAIT/SKIP advice and a priced trade plan, from the engine's own checks
+├── ui/              `tradebot ui`: MT5 worker thread, hardened local server, dashboard page
 ├── risk.py          position sizing and portfolio risk
 ├── broker/          base.py (interface) · mt5.py (MetaTrader 5) · sim.py (simulation)
 ├── backtest.py      multi-symbol event-driven backtester
@@ -238,14 +292,18 @@ v23 is kept under the [`v23` tag](https://github.com/fahadkatonvule24/tradingBot
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 81 tests
+pytest --cov=tradebot      # 105 tests
 ruff check . && ruff format --check .
 ```
 
 Tests cover indicators against textbook references, strategy causality, every engine guard and
 management rule, the simulated broker's fills and accounting, walk-forward window separation,
-configuration validation, the live-trading gate, and the MT5 adapter. The adapter is tested
-against a fake `MetaTrader5` module, so CI runs on Linux and Windows without a terminal.
+configuration validation, the live-trading gate, and the MT5 adapter. The advisor is tested in
+every state with exact prices and lot sizes. The dashboard's order path is tested to send exactly
+the advised trade and to refuse when the gate is closed, the `--live` flag is missing, or the
+advice has changed. The web server is tested against missing tokens, foreign Host headers and
+cross-origin requests. The adapter is tested against a fake `MetaTrader5` module, so CI runs on
+Linux and Windows without a terminal.
 
 ## Limitations and next steps
 
@@ -255,8 +313,8 @@ against a fake `MetaTrader5` module, so CI runs on Linux and Windows without a t
   they are not enough on their own; the tooling is built to evaluate better ideas honestly.
 - **News calendar is a JSON file you maintain.** An economic-calendar feed would be a natural
   addition.
-- **One process, one terminal.** No remote monitoring or alerting yet (Telegram/email hooks would
-  slot into the journal).
+- **One process, one terminal.** The dashboard is local by design. Alerts (Telegram/email) when
+  advice turns to BUY or SELL would slot into the monitor's activity feed.
 
 ## Disclaimer
 

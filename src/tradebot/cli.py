@@ -54,6 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--live", action="store_true", help="allow real orders (the config must also allow them)"
     )
 
+    ui = sub.add_parser("ui", help="live advisor dashboard in the browser: when, where, and how much")
+    ui.add_argument("--port", type=int, default=8765, help="local port (default: %(default)s)")
+    ui.add_argument(
+        "--live", action="store_true", help="enable the order button (the config must also allow orders)"
+    )
+    ui.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    ui.add_argument("--data", type=Path, default=Path("data"), help="history for the per-symbol track record")
+
     fetch = sub.add_parser("fetch", help="download history from MT5 to CSV")
     fetch.add_argument("--symbols", nargs="+", help="default: symbols from the config")
     fetch.add_argument("--timeframes", nargs="+", help="default: the config timeframe")
@@ -117,7 +125,7 @@ def safe_streams() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     safe_streams()
     args = build_parser().parse_args(argv)
-    _setup_logging(args.verbose, args.command in ("run",))
+    _setup_logging(args.verbose, args.command in ("run", "ui"))
     try:
         config = load_config(args.config)
         if getattr(args, "symbols", None):
@@ -130,7 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config = replace(config, timeframe=args.timeframe)
         config.validate()
         handler = {
-            "check": cmd_check, "run": cmd_run, "fetch": cmd_fetch, "backtest": cmd_backtest,
+            "check": cmd_check, "run": cmd_run, "ui": cmd_ui, "fetch": cmd_fetch, "backtest": cmd_backtest,
             "optimize": cmd_optimize, "journal": cmd_journal,
         }[args.command]  # fmt: skip
         return handler(config, args)
@@ -227,6 +235,44 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
         LiveRunner(config, broker, engine, symbols).run(once=args.once)
     finally:
         journal.close()
+        broker.shutdown()
+    return 0
+
+
+def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
+    import threading
+    import webbrowser
+
+    from tradebot.ui.monitor import Monitor
+    from tradebot.ui.server import DashboardServer
+
+    broker, _, symbols = _connect(config)
+    monitor = Monitor(config, broker, symbols, live_flag=args.live, journal_path=config.journal)
+    names = {broker_name: wanted for wanted in config.symbols if (broker_name := broker.resolve(wanted))}
+    worker = threading.Thread(target=monitor.run, name="mt5", daemon=True)
+    try:
+        server = DashboardServer(monitor, port=args.port)
+    except OSError as exc:
+        broker.shutdown()
+        raise ValueError(f"cannot listen on port {args.port} ({exc}); try --port 8766") from None
+    worker.start()
+    threading.Thread(
+        target=monitor.load_track_record, args=(args.data, names), name="track-record", daemon=True
+    ).start()
+    console.print(
+        f"[bold]tradebot advisor[/] on [link={server.url}]{server.url}[/link]  "
+        f"[grey50](orders {'enabled if the config allows' if args.live else 'off'}; Ctrl+C to stop)[/]"
+    )
+    if not args.no_browser:
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        console.print("stopping…")
+    finally:
+        server.server_close()
+        monitor.stop()
+        worker.join(timeout=10)
         broker.shutdown()
     return 0
 

@@ -3,6 +3,7 @@
     pip install playwright
     python scripts/capture_screenshots.py --data data            # after `tradebot fetch`
     python scripts/capture_screenshots.py --data data --with-mt5 # also capture `tradebot check`
+    python scripts/capture_screenshots.py --dashboard http://127.0.0.1:8765/  # while `tradebot ui` runs
 
 Terminal output is recorded through rich and rendered to PNG; report screenshots are taken from
 the HTML the CLI writes. Nothing is mocked up.
@@ -53,6 +54,29 @@ def shoot(page: Page, selectors: list[str], path: Path, pad: int = 16) -> None:
     print(f"wrote {path.relative_to(ROOT)}")
 
 
+def capture_dashboard(url: str, browser_name: str) -> None:
+    """The live advisor page, exactly as served (needs `tradebot ui` connected to a terminal)."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(**({} if browser_name == "chromium" else {"channel": browser_name}))
+        for scheme, name, selectors in (
+            ("light", "dashboard.png", None),
+            ("dark", "dashboard-dark.png", ["header.top", ".row2"]),
+        ):
+            page = browser.new_page(
+                viewport={"width": 1360, "height": 900}, device_scale_factor=1.5, color_scheme=scheme
+            )
+            page.goto(url)
+            page.wait_for_selector(".sym")
+            page.wait_for_timeout(3000)  # first chart fetch and a few live ticks
+            if selectors:
+                shoot(page, selectors, OUT / name, pad=0)
+            else:
+                page.screenshot(path=str(OUT / name), full_page=True)
+                print(f"wrote {(OUT / name).relative_to(ROOT)}")
+            page.close()
+        browser.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, default=ROOT / "data")
@@ -62,8 +86,12 @@ def main() -> None:
         "--with-mt5", action="store_true", help="also capture `tradebot check` (needs a terminal)"
     )
     parser.add_argument("--browser", default="msedge", help="msedge, chrome, or chromium")
+    parser.add_argument("--dashboard", metavar="URL", help="capture a running `tradebot ui` instead")
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
+    if args.dashboard:
+        capture_dashboard(args.dashboard, args.browser)
+        return
     os.chdir(ROOT)  # relative paths in the output, no local usernames in screenshots
     work = Path("reports")
     data = os.path.relpath(args.data, ROOT)

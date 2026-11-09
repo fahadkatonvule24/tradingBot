@@ -23,10 +23,10 @@ from pathlib import Path
 import pandas as pd
 
 from tradebot.broker.base import BUY, Broker, OrderRequest, Position, SymbolSpec
-from tradebot.config import BotConfig, SymbolParams
+from tradebot.config import BotConfig, RiskParams, SymbolParams
 from tradebot.journal import Journal, JournalEvent
 from tradebot.news import NewsCalendar
-from tradebot.risk import open_risk, position_size, tighter_stop
+from tradebot.risk import loss_per_lot, open_risk, position_size, tighter_stop
 from tradebot.strategy import explain
 
 log = logging.getLogger(__name__)
@@ -41,6 +41,34 @@ class Event:
     side: int = 0
     volume: float = 0.0
     price: float | None = None
+
+
+@dataclass(frozen=True)
+class EntryPlan:
+    """A sized, risk-checked entry: what the engine would send, before it is sent."""
+
+    symbol: str
+    side: int
+    volume: float
+    sl_distance: float
+    tp_distance: float
+    risk_amount: float
+    """Account-currency loss if the stop is hit."""
+    reward_amount: float
+    """Account-currency profit if the target is hit."""
+    equity: float
+    reason: str = ""
+
+    @property
+    def risk_percent(self) -> float:
+        return self.risk_amount / self.equity * 100 if self.equity else 0.0
+
+
+@dataclass(frozen=True)
+class Rejection:
+    key: str
+    """Skip-counter bucket: size, portfolio risk, margin."""
+    message: str
 
 
 @dataclass
@@ -78,7 +106,7 @@ class Engine:
         self._acted_bar[symbol] = bar_time
         if row["signal"] == 0:
             return
-        reason = self._entry_blocker(symbol, spec, params, row, spread, now)
+        reason = self.entry_blocker(symbol, spec, params, row, spread, now)
         if reason:
             self.skips[reason.split(":")[0]] += 1
             self._emit(
@@ -144,7 +172,7 @@ class Engine:
 
     # --- entry guards -------------------------------------------------------------------------
 
-    def _entry_blocker(
+    def entry_blocker(
         self,
         symbol: str,
         spec: SymbolSpec,
@@ -153,6 +181,7 @@ class Engine:
         spread: float,
         now: datetime,
     ) -> str | None:
+        """The first account/schedule guard that forbids a new entry right now, or None."""
         r, sched = params.risk, self.config.schedule
 
         if self.live and Path(self.config.kill_switch_file).exists():
@@ -231,6 +260,46 @@ class Engine:
 
     # --- execution ----------------------------------------------------------------------------
 
+    def plan_entry(
+        self,
+        symbol: str,
+        spec: SymbolSpec,
+        params: SymbolParams,
+        row: pd.Series,
+        spread: float,
+        side: int,
+    ) -> EntryPlan | Rejection:
+        """Stop/target distances, volume and portfolio checks for a new position on ``side``.
+
+        Shared by the engine and the advisor dashboard, so the advice is the trade the bot takes.
+        """
+        r = params.risk
+        sl_distance, tp_distance = stop_distances(spec, r, float(row["atr"]), spread)
+        account = self.broker.account()
+        size = position_size(spec, account.equity, sl_distance, r)
+        if not size.ok:
+            return Rejection("size", size.reason)
+        positions = self.broker.positions(self.config.magic)
+        committed = open_risk(positions, {p.symbol: self.broker.symbol(p.symbol) for p in positions})
+        if (committed + size.risk_amount) / account.equity * 100 > r.max_total_risk_percent + 1e-9:
+            return Rejection("portfolio risk", f"open risk would exceed {r.max_total_risk_percent}%")
+        margin = self.broker.margin_required(symbol, side, size.volume)
+        if r.max_margin_percent and margin is not None and account.equity > 0:
+            projected = (account.margin + margin) / account.equity * 100
+            if projected > r.max_margin_percent:
+                return Rejection("margin", f"margin would reach {projected:.0f}%")
+        return EntryPlan(
+            symbol=symbol,
+            side=side,
+            volume=size.volume,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            risk_amount=size.risk_amount,
+            reward_amount=loss_per_lot(spec, tp_distance) * size.volume,
+            equity=account.equity,
+            reason=explain(row, params.strategy) if row.get("raw_signal", 0) else "",
+        )
+
     def _enter(
         self,
         symbol: str,
@@ -240,65 +309,37 @@ class Engine:
         spread: float,
         now: datetime,
     ) -> None:
-        r = params.risk
         side = int(row["signal"])
-        atr_ = float(row["atr"])
-        min_distance = spec.stops_level * spec.point + spread
-        sl_distance = max(r.sl_atr * atr_, min_distance)
-        tp_distance = max(r.tp_atr * atr_, min_distance)
-
-        account = self.broker.account()
-        size = position_size(spec, account.equity, sl_distance, r)
-        if not size.ok:
-            self.skips["size"] += 1
-            self._emit(now, "skip", symbol, f"signal skipped: {size.reason}")
+        plan = self.plan_entry(symbol, spec, params, row, spread, side)
+        if isinstance(plan, Rejection):
+            self.skips[plan.key] += 1
+            self._emit(now, "skip", symbol, f"signal skipped: {plan.message}")
             return
-        specs = {p.symbol: self.broker.symbol(p.symbol) for p in self.broker.positions(self.config.magic)}
-        committed = open_risk(self.broker.positions(self.config.magic), specs)
-        if (committed + size.risk_amount) / account.equity * 100 > r.max_total_risk_percent + 1e-9:
-            self.skips["portfolio risk"] += 1
-            self._emit(
-                now, "skip", symbol, f"signal skipped: open risk would exceed {r.max_total_risk_percent}%"
-            )
-            return
-        margin = self.broker.margin_required(symbol, side, size.volume)
-        if r.max_margin_percent and margin is not None and account.equity > 0:
-            projected = (account.margin + margin) / account.equity * 100
-            if projected > r.max_margin_percent:
-                self.skips["margin"] += 1
-                self._emit(now, "skip", symbol, f"signal skipped: margin would reach {projected:.0f}%")
-                return
 
-        reason = explain(row, params.strategy)
-        request = OrderRequest(symbol, side, size.volume, sl_distance, tp_distance, self.config.comment)
+        reason, volume = plan.reason, plan.volume
         word = "BUY" if side > 0 else "SELL"
         if not self.execute:
             self._emit(
                 now,
                 "dry_open",
                 symbol,
-                f"DRY RUN {word} {size.volume} · {reason}",
+                f"DRY RUN {word} {volume} · {reason}",
                 side,
-                size.volume,
+                volume,
                 float(row["close"]),
             )
-            self._journal(now, "DRY_OPEN", symbol, side, size.volume, float(row["close"]), None, reason)
+            self._journal(now, "DRY_OPEN", symbol, side, volume, float(row["close"]), None, reason)
             return
+        request = OrderRequest(symbol, side, volume, plan.sl_distance, plan.tp_distance, self.config.comment)
         result = self.broker.open(request, self.config.magic)
         if not result.ok:
-            self._emit(now, "rejected", symbol, f"{word} rejected: {result.message}", side, size.volume)
-            self._journal(now, "REJECTED", symbol, side, size.volume, None, None, result.message)
+            self._emit(now, "rejected", symbol, f"{word} rejected: {result.message}", side, volume)
+            self._journal(now, "REJECTED", symbol, side, volume, None, None, result.message)
             return
         self._emit(
-            now,
-            "open",
-            symbol,
-            f"{word} {size.volume} @ {result.price} · {reason}",
-            side,
-            size.volume,
-            result.price,
+            now, "open", symbol, f"{word} {volume} @ {result.price} · {reason}", side, volume, result.price
         )
-        self._journal(now, "OPEN", symbol, side, size.volume, result.price, result.ticket, reason)
+        self._journal(now, "OPEN", symbol, side, volume, result.price, result.ticket, reason)
 
     def _close(self, position: Position, volume: float | None, now: datetime, why: str) -> None:
         kind = "partial" if volume is not None else "close"
@@ -387,6 +428,12 @@ class Engine:
                     not self.execute,
                 )
             )
+
+
+def stop_distances(spec: SymbolSpec, risk: RiskParams, atr_: float, spread: float) -> tuple[float, float]:
+    """Stop and target distances from the fill price: ATR multiples, never inside the broker minimum."""
+    min_distance = spec.stops_level * spec.point + spread
+    return max(risk.sl_atr * atr_, min_distance), max(risk.tp_atr * atr_, min_distance)
 
 
 def _bar_close(row: pd.Series, config: BotConfig) -> datetime:

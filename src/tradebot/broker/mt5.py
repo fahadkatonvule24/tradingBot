@@ -63,6 +63,7 @@ class MT5Broker:
         self._offset = timedelta(hours=offset_hours) if offset_hours is not None else None
         self._clock = clock
         self._origin: dict[int, tuple[float | None, float | None]] = {}
+        self._warned: set[str] = set()
 
     # --- connection ---------------------------------------------------------------------------
 
@@ -182,7 +183,9 @@ class MT5Broker:
                 self.mt5.ORDER_TYPE_BUY, name, 1.0, tick.ask, tick.ask + ticks * size
             )
             if profit:
-                if info.trade_tick_value and abs(profit / ticks / info.trade_tick_value - 1) > 0.05:
+                mismatch = info.trade_tick_value and abs(profit / ticks / info.trade_tick_value - 1) > 0.05
+                if mismatch and name not in self._warned:
+                    self._warned.add(name)
                     log.warning("%s: broker tick_value %.5g disagrees with the profit calculator (%.5g); using the latter",
                                 name, info.trade_tick_value, profit / ticks)  # fmt: skip
                 return profit / ticks
@@ -207,10 +210,22 @@ class MT5Broker:
             df["spread"] = 0
         return df[["time", "open", "high", "low", "close", "spread"]].tail(count).reset_index(drop=True)
 
-    def positions(self, magic: int) -> list[Position]:
+    def forming_bar(self, name: str, timeframe: str) -> dict[str, Any] | None:
+        """The bar that is still forming (UTC open time), or None when the market is closed."""
+        rates = self.mt5.copy_rates_from_pos(name, getattr(self.mt5, f"TIMEFRAME_{timeframe}"), 0, 1)
+        if rates is None or len(rates) == 0:
+            return None
+        last = rates[-1]
+        opened = self._to_utc(float(last["time"]))
+        if opened + timedelta(minutes=TIMEFRAME_MINUTES[timeframe]) <= self.now():
+            return None
+        return {k: float(last[k]) for k in ("open", "high", "low", "close")} | {"time": opened}
+
+    def positions(self, magic: int | None) -> list[Position]:
+        """Open positions with this magic number (``None``: every position on the account)."""
         out = []
         for p in self.mt5.positions_get() or []:
-            if p.magic != magic:
+            if magic is not None and p.magic != magic:
                 continue
             initial_volume, initial_sl = self._opening(p.ticket)
             out.append(
@@ -227,6 +242,7 @@ class MT5Broker:
                     initial_sl=initial_sl or p.sl or None,
                     profit=p.profit,
                     comment=p.comment,
+                    magic=p.magic,
                 )
             )
         return out
