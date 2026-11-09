@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="tradebot {{ version }}">
+<title>{{ title }} · {{ config.strategy.name }}</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #ffffff; --surface-2: #fcfcfb;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+  --series: #2a78d6; --alert: #d03b3b; --code-bg: #f3f2ee;
+  --good: #006300; --bad: #b4302f;
+  --div-neg-4: #b4302f; --div-neg-3: #e05a57; --div-neg-2: #ee9a96; --div-neg-1: #f9d4d1;
+  --div-mid: #f0efec;
+  --div-pos-1: #cde2fb; --div-pos-2: #86b6ef; --div-pos-3: #3987e5; --div-pos-4: #1c5cab;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #1f1f1e;
+    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+    --series: #3987e5; --code-bg: #232322; --good: #0ca30c; --bad: #e66767;
+    --div-neg-4: #f2a6a3; --div-neg-3: #e05a57; --div-neg-2: #b4302f; --div-neg-1: #7a2a29;
+    --div-mid: #383835;
+    --div-pos-1: #184f95; --div-pos-2: #256abf; --div-pos-3: #5598e7; --div-pos-4: #9ec5f4;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #1f1f1e;
+  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+  --series: #3987e5; --code-bg: #232322; --good: #0ca30c; --bad: #e66767;
+  --div-neg-4: #f2a6a3; --div-neg-3: #e05a57; --div-neg-2: #b4302f; --div-neg-1: #7a2a29;
+  --div-mid: #383835;
+  --div-pos-1: #184f95; --div-pos-2: #256abf; --div-pos-3: #5598e7; --div-pos-4: #9ec5f4;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 32px 24px 56px; }
+header.top { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: flex-end; justify-content: space-between; margin-bottom: 22px; }
+.eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+h1 { font-size: 26px; line-height: 1.2; margin: 0; font-weight: 650; }
+h2 { font-size: 16px; margin: 0 0 4px; font-weight: 650; }
+.sub { color: var(--ink-2); margin: 0 0 14px; font-size: 13px; }
+.meta { color: var(--ink-2); font-size: 13px; text-align: right; margin-left: auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+section { margin-top: 20px; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.kpi .label { color: var(--ink-2); font-size: 13px; }
+.kpi .value { font-size: 24px; font-weight: 650; margin-top: 2px; }
+.kpi .note { color: var(--muted); font-size: 12.5px; }
+.up { color: var(--good); } .down { color: var(--bad); }
+.banner { border-radius: 12px; padding: 14px 18px; margin-bottom: 18px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-2); font-size: 13.5px; }
+.banner strong { color: var(--ink); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 12px; padding: 8px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td { padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.table-scroll { overflow-x: auto; }
+code, pre { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+pre { background: var(--code-bg); padding: 12px; border-radius: 8px; font-size: 12px; overflow-x: auto; }
+details summary { cursor: pointer; color: var(--muted); }
+.key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+svg.chart { width: 100%; height: auto; display: block; overflow: visible; }
+svg .grid { stroke: var(--grid); stroke-width: 1; }
+svg .axis { stroke: var(--axis); stroke-width: 1; }
+svg .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .label { fill: var(--ink-2); font-size: 12px; }
+svg .value { fill: var(--ink-2); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+svg .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+svg .line.series { stroke: var(--series); } svg .line.alert { stroke: var(--alert); }
+svg .area.series { fill: var(--series); opacity: .10; } svg .area.alert { fill: var(--alert); opacity: .12; }
+svg path.series { fill: var(--series); } svg path.alert { fill: var(--alert); }
+svg .dot { opacity: 0; stroke: var(--surface); stroke-width: 2; }
+svg .dot.series { fill: var(--series); } svg .dot.alert { fill: var(--alert); }
+svg .hit:hover .dot { opacity: 1; }
+svg .hit:hover path { opacity: .8; }
+svg .cell.mid { fill: var(--div-mid); }
+svg .cell.neg1 { fill: var(--div-neg-1); } svg .cell.neg2 { fill: var(--div-neg-2); } svg .cell.neg3 { fill: var(--div-neg-3); } svg .cell.neg4 { fill: var(--div-neg-4); }
+svg .cell.pos1 { fill: var(--div-pos-1); } svg .cell.pos2 { fill: var(--div-pos-2); } svg .cell.pos3 { fill: var(--div-pos-3); } svg .cell.pos4 { fill: var(--div-pos-4); }
+svg .cellv { font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .ink-dark { fill: #0b0b0b; } svg .ink-light { fill: #ffffff; }
+footer { color: var(--muted); font-size: 12.5px; margin-top: 28px; text-align: center; }
+@media (max-width: 640px) { .wrap { padding: 20px 16px 40px; } .meta { text-align: left; } h1 { font-size: 22px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div>
+    <p class="eyebrow">tradebot · {{ title }}</p>
+    <h1>{{ config.strategy.name | replace("_", " ") | title }} · {{ config.timeframe }} · {{ result.symbols | join(", ") }}</h1>
+  </div>
+  <div class="meta">
+    <div>{{ start | dt("%d %b %Y") }} → {{ end | dt("%d %b %Y") }} ({{ "%.1f" | format(m.years) }} years)</div>
+    <div>Generated {{ generated | dt }}</div>
+  </div>
+</header>
+
+{% if wf %}
+<div class="banner">
+  <strong>Out-of-sample results only.</strong> History was split into {{ wf.folds | length + 1 }} windows. Parameters were chosen on each window
+  ({{ wf.combos }} combinations, objective: {{ wf.objective }}) and then traded on the <em>next</em> window, which the search never saw.
+  Walk-forward efficiency (out-of-sample ÷ in-sample annual return): <strong>{{ "%.2f" | format(wf.efficiency) if wf.efficiency == wf.efficiency else "n/a" }}</strong>.
+</div>
+{% endif %}
+
+<div class="kpis">
+  <div class="kpi"><div class="label">Net return</div><div class="value {{ 'up' if m.return_pct > 0 else 'down' }}">{{ m.return_pct | pct }}</div><div class="note">{{ m.net_profit | money }} on {{ m.start_balance | money }}</div></div>
+  <div class="kpi"><div class="label">Max drawdown</div><div class="value">{{ "%.2f" | format(m.max_drawdown_pct) }}%</div><div class="note">longest {{ "%.0f" | format(m.max_drawdown_days) }} days under water</div></div>
+  <div class="kpi"><div class="label">Sharpe ratio</div><div class="value">{{ m.sharpe | num }}</div><div class="note">Sortino {{ m.sortino | num }} · daily, annualised</div></div>
+  <div class="kpi"><div class="label">Profit factor</div><div class="value">{{ m.profit_factor | num }}</div><div class="note">gross profit ÷ gross loss</div></div>
+  <div class="kpi"><div class="label">Trades</div><div class="value">{{ m.trades }}</div><div class="note">{{ "%.1f" | format(m.win_rate) }}% winners · avg {{ "%+.2f" | format(m.avg_r) }}R</div></div>
+  <div class="kpi"><div class="label">Annualised return</div><div class="value {{ 'up' if m.cagr_pct > 0 else 'down' }}">{{ m.cagr_pct | pct }}</div><div class="note">Calmar {{ m.calmar | num }}</div></div>
+</div>
+
+<section class="card">
+  <h2>Equity</h2>
+  <p class="sub">Account equity including open positions, marked at each bar close. Hover for values.</p>
+  {{ charts.equity }}
+  <h2 style="margin-top:18px">Drawdown</h2>
+  <p class="sub">Percent below the previous equity peak.</p>
+  {{ charts.drawdown }}
+</section>
+
+<section class="grid-2">
+  <div class="card">
+    <h2>Net profit by symbol</h2>
+    <p class="sub"><i class="key" style="background:var(--series)"></i>profit · <i class="key" style="background:var(--alert)"></i>loss</p>
+    {{ charts.symbols }}
+    <div class="table-scroll" style="margin-top:12px">
+    <table>
+      <thead><tr><th>Symbol</th><th class="num">Trades</th><th class="num">Win %</th><th class="num">Net</th><th class="num">PF</th><th class="num">Avg R</th></tr></thead>
+      <tbody>
+      {% for sym, row in per_symbol.iterrows() %}
+      <tr><td>{{ sym }}</td><td class="num">{{ row.trades | int }}</td><td class="num">{{ "%.1f" | format(row.win_rate) }}</td><td class="num">{{ row.net_profit | money }}</td><td class="num">{{ row.profit_factor | num }}</td><td class="num">{{ "%+.2f" | format(row.avg_r) }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Trade outcomes</h2>
+    <p class="sub">Each trade's net result in R (multiples of the initial risk). <i class="key" style="background:var(--alert)"></i>loss · <i class="key" style="background:var(--series)"></i>gain</p>
+    {{ charts.r_hist }}
+    <table style="margin-top:12px">
+      <tbody>
+        <tr><td>Expectancy per trade</td><td class="num">{{ m.expectancy | money }} ({{ "%+.2f" | format(m.avg_r) }}R)</td></tr>
+        <tr><td>Average win / loss</td><td class="num">{{ m.avg_win | money }} / {{ m.avg_loss | money }}</td></tr>
+        <tr><td>Best / worst trade</td><td class="num">{{ m.best_trade | money }} / {{ m.worst_trade | money }}</td></tr>
+        <tr><td>Longest losing streak</td><td class="num">{{ m.longest_losing_streak }} trades</td></tr>
+        <tr><td>Average holding time</td><td class="num">{{ "%.1f" | format(m.avg_bars_held) }} bars</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Monthly returns</h2>
+  <p class="sub"><i class="key" style="background:var(--div-pos-3)"></i>gain · <i class="key" style="background:var(--div-neg-3)"></i>loss · darker = larger</p>
+  <div class="table-scroll">{{ charts.monthly }}</div>
+</section>
+
+{% if wf %}
+<section class="card">
+  <h2>Walk-forward windows</h2>
+  <p class="sub">In-sample = the window the parameters were tuned on. Out-of-sample = the following window, traded blind.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Tuned on</th><th>Traded on</th><th>Chosen parameters</th><th class="num">IS Sharpe</th><th class="num">IS return</th><th class="num">OOS Sharpe</th><th class="num">OOS return</th><th class="num">OOS trades</th></tr></thead>
+    <tbody>
+    {% for f in wf.folds %}
+    <tr>
+      <td>{{ f.train[0] | dt("%b %Y") }} – {{ f.train[1] | dt("%b %Y") }}</td>
+      <td>{{ f.test[0] | dt("%b %Y") }} – {{ f.test[1] | dt("%b %Y") }}</td>
+      <td><code>{% for k, v in f.params.items() %}{{ k.split(".")[1] }}={{ v }}{{ ", " if not loop.last }}{% endfor %}</code></td>
+      <td class="num">{{ f.in_sample.sharpe | num }}</td><td class="num">{{ f.in_sample.return_pct | pct }}</td>
+      <td class="num">{{ f.out_of_sample.sharpe | num }}</td><td class="num {{ 'up' if f.out_of_sample.return_pct > 0 else 'down' }}">{{ f.out_of_sample.return_pct | pct }}</td>
+      <td class="num">{{ f.out_of_sample.trades }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="sub" style="margin-top:10px">Parameters a re-tune would deploy today (best on the most recent window): <code>{% for k, v in wf.final_params.items() %}{{ k }}={{ v }}{{ ", " if not loop.last }}{% endfor %}</code></p>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Most recent trades</h2>
+  <p class="sub">Showing {{ trades | length }} of {{ trade_count }}.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Symbol</th><th>Side</th><th>Opened</th><th>Closed</th><th class="num">Lots</th><th class="num">Entry</th><th class="num">Exit</th><th>Exit reason</th><th class="num">P/L</th><th class="num">R</th></tr></thead>
+    <tbody>
+    {% for t in trades %}
+    <tr>
+      <td>{{ t.symbol }}</td><td>{{ "Buy" if t.side > 0 else "Sell" }}</td>
+      <td>{{ t.entry_time | dt }}</td><td>{{ t.exit_time | dt }}</td>
+      <td class="num">{{ t.volume }}</td><td class="num">{{ "%.5g" | format(t.entry_price) }}</td><td class="num">{{ "%.5g" | format(t.exit_price) }}</td>
+      <td>{{ t.exit_reason }}</td>
+      <td class="num {{ 'up' if t.pnl > 0 else 'down' }}">{{ t.pnl | money }}</td><td class="num">{{ "%+.2f" | format(t.r_multiple) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="card">
+  <details>
+    <summary>Configuration and cost assumptions used for this run</summary>
+    <p class="sub" style="margin-top:10px">Costs: spread = max(recorded bar spread, {{ config.backtest.min_spread_points }} points), commission {{ config.backtest.commission_per_lot | money }} per lot round trip, slippage {{ config.backtest.slippage_points }} points. Stops gap-fill at the bar open; a bar touching both stop and target counts as a stop.</p>
+    <pre>{{ config_json }}</pre>
+  </details>
+</section>
+
+<footer>Generated by tradebot {{ version }}. Past performance, simulated or real, does not guarantee future results.</footer>
+</div>
+</body>
+</html>

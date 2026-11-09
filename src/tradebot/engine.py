@@ -1,0 +1,393 @@
+"""The trading engine: one decision procedure for live trading and backtests.
+
+Per symbol, once per *closed* bar:
+
+1. Manage open positions: exit on an opposite signal or time stop, take partial profit,
+   move the stop to breakeven, trail it. Stops only ever tighten.
+2. If the bar produced a signal, run it through the guards (kill switch, session, news,
+   loss limits, streaks, trade count, position limits, spread, portfolio risk, margin)
+   and, if everything passes, size the position from the stop distance and open it.
+
+The engine only talks to the ``Broker`` interface, so the backtester drives this exact code
+through ``SimBroker``.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pandas as pd
+
+from tradebot.broker.base import BUY, Broker, OrderRequest, Position, SymbolSpec
+from tradebot.config import BotConfig, SymbolParams
+from tradebot.journal import Journal, JournalEvent
+from tradebot.news import NewsCalendar
+from tradebot.risk import open_risk, position_size, tighter_stop
+from tradebot.strategy import explain
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Event:
+    time: datetime
+    kind: str  # open, close, partial, modify, skip, dry_open, ...
+    symbol: str
+    detail: str
+    side: int = 0
+    volume: float = 0.0
+    price: float | None = None
+
+
+@dataclass
+class Engine:
+    config: BotConfig
+    broker: Broker
+    execute: bool = True
+    """False = dry run: decisions are logged and journalled, nothing is sent."""
+    journal: Journal | None = None
+    live: bool = False
+    """Live mode adds restart-safety checks against broker history and honours the kill switch."""
+    events: list[Event] = field(default_factory=list)
+    skips: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    _acted_bar: dict[str, pd.Timestamp] = field(default_factory=dict)
+    _news: NewsCalendar | None = None
+
+    def __post_init__(self) -> None:
+        self._news = NewsCalendar(self.config.schedule.news_file)
+
+    # --- entry point per closed bar -----------------------------------------------------------
+
+    def on_bar(
+        self,
+        symbol: str,
+        spec: SymbolSpec,
+        params: SymbolParams,
+        row: pd.Series,
+        spread: float,
+        now: datetime,
+    ) -> None:
+        self._manage(symbol, spec, params, row, spread, now)
+        bar_time = row["time"]
+        if self._acted_bar.get(symbol) == bar_time:
+            return  # each bar's signal is acted on once, however often we poll
+        self._acted_bar[symbol] = bar_time
+        if row["signal"] == 0:
+            return
+        reason = self._entry_blocker(symbol, spec, params, row, spread, now)
+        if reason:
+            self.skips[reason.split(":")[0]] += 1
+            self._emit(
+                now, "skip", symbol, f"{'buy' if row['signal'] > 0 else 'sell'} signal skipped: {reason}"
+            )
+            return
+        self._enter(symbol, spec, params, row, spread, now)
+
+    # --- position management ------------------------------------------------------------------
+
+    def _manage(
+        self,
+        symbol: str,
+        spec: SymbolSpec,
+        params: SymbolParams,
+        row: pd.Series,
+        spread: float,
+        now: datetime,
+    ) -> None:
+        m = params.management
+        bid = float(row["close"])
+        bar_minutes = self.config.bar_minutes
+        for position in [p for p in self.broker.positions(self.config.magic) if p.symbol == symbol]:
+            price = bid if position.side == BUY else bid + spread
+            if m.close_on_reverse and row["signal"] == -position.side:
+                self._close(position, None, now, "opposite signal")
+                continue
+            if m.max_hold_bars:
+                held = (now - position.time_open) / timedelta(minutes=bar_minutes)
+                if held >= m.max_hold_bars:
+                    self._close(position, None, now, f"time stop ({m.max_hold_bars} bars)")
+                    continue
+
+            risk = position.initial_risk
+            if not risk:
+                continue  # not opened by this engine, or history unavailable: leave it alone
+            profit_r = (price - position.price_open) * position.side / risk
+
+            if m.partial_tp and not position.partially_closed and profit_r >= m.partial_tp_r:
+                volume = spec.normalize_volume(position.volume * m.partial_tp_fraction)
+                if volume >= spec.volume_min and position.volume - volume >= spec.volume_min - 1e-9:
+                    self._close(position, volume, now, f"partial profit at {profit_r:.1f}R")
+
+            new_sl = position.sl
+            if profit_r >= m.breakeven_r:
+                breakeven = position.price_open + position.side * m.breakeven_buffer_r * risk
+                new_sl = tighter_stop(position.side, new_sl, breakeven)
+            if profit_r >= m.trail_start_r and pd.notna(row["atr"]):
+                trailed = price - position.side * m.trail_atr * float(row["atr"])
+                new_sl = tighter_stop(position.side, new_sl, trailed)
+            new_sl = spec.round_price(new_sl)
+            if abs(new_sl - position.sl) >= spec.point and self._valid_stop(
+                position, new_sl, bid, spread, spec
+            ):
+                self._modify(position, new_sl, now, profit_r)
+
+    @staticmethod
+    def _valid_stop(position: Position, sl: float, bid: float, spread: float, spec: SymbolSpec) -> bool:
+        gap = spec.stops_level * spec.point
+        if position.side == BUY:
+            return sl < bid - gap
+        return sl > bid + spread + gap
+
+    # --- entry guards -------------------------------------------------------------------------
+
+    def _entry_blocker(
+        self,
+        symbol: str,
+        spec: SymbolSpec,
+        params: SymbolParams,
+        row: pd.Series,
+        spread: float,
+        now: datetime,
+    ) -> str | None:
+        r, sched = params.risk, self.config.schedule
+
+        if self.live and Path(self.config.kill_switch_file).exists():
+            return f"kill switch: {self.config.kill_switch_file} exists"
+        if not sched.trade_weekends and now.weekday() >= 5:
+            return "session: weekend"
+        start, end = sched.hours()
+        hour = now.hour
+        in_session = start <= hour < end if start < end else (hour >= start or hour < end)
+        if not in_session:
+            return f"session: {hour:02d}:00 UTC outside {start:02d}-{end:02d}"
+        currencies = {spec.currency_base, spec.currency_profit} - {""}
+        event = (
+            self._news.blackout(now, currencies, sched.news_before_minutes, sched.news_after_minutes)
+            if self._news
+            else None
+        )
+        if event:
+            return f"news: {event.currency} {event.title} at {event.time:%H:%M} UTC"
+
+        account = self.broker.account()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = day_start - timedelta(days=day_start.weekday())
+        week_deals = self.broker.deals(week_start, self.config.magic)
+        today = [d for d in week_deals if d.time >= day_start]
+        for label, deals, limit in (
+            ("daily", today, r.daily_loss_limit_percent),
+            ("weekly", week_deals, r.weekly_loss_limit_percent),
+        ):
+            realized = sum(d.profit for d in deals)
+            starting_balance = account.balance - realized
+            if limit > 0 and starting_balance > 0 and realized <= -starting_balance * limit / 100:
+                return f"{label} loss limit: {realized:,.2f} ({realized / starting_balance:.1%})"
+        if r.max_consecutive_losses and self._losing_streak_today(day_start) >= r.max_consecutive_losses:
+            return f"losing streak: {r.max_consecutive_losses} losses in a row, paused until 00:00 UTC"
+        entries_today = sum(1 for d in today if d.entry == "in")
+        if r.max_trades_per_day and entries_today >= r.max_trades_per_day:
+            return f"trade count: {entries_today} entries today"
+        if self.live and any(
+            d.entry == "in" and d.symbol == symbol for d in today if d.time >= _bar_close(row, self.config)
+        ):
+            return "duplicate: already entered on this bar (restart?)"
+
+        positions = self.broker.positions(self.config.magic)
+        same = [p for p in positions if p.symbol == symbol]
+        if len(same) >= r.max_positions_per_symbol:
+            return f"positions: {len(same)} open on {symbol}"
+        if len(positions) >= r.max_total_positions:
+            return f"positions: {len(positions)} open in total"
+
+        atr_ = float(row["atr"])
+        if spread > r.max_spread_atr * atr_:
+            return f"spread: {spread / atr_:.2f} ATR > {r.max_spread_atr} ATR"
+        return None
+
+    def _losing_streak_today(self, day_start: datetime) -> int:
+        """Losing positions in a row (by close time). Only a streak that ends today pauses trading."""
+        deals = self.broker.deals(day_start - timedelta(days=30), self.config.magic)
+        open_tickets = {p.ticket for p in self.broker.positions(self.config.magic)}
+        net: dict[int, float] = defaultdict(float)
+        closed_at: dict[int, datetime] = {}
+        for d in deals:
+            net[d.position] += d.profit
+            if d.entry == "out":
+                closed_at[d.position] = d.time
+        streak = 0
+        for ticket in sorted(closed_at, key=closed_at.__getitem__, reverse=True):
+            if ticket in open_tickets:
+                continue
+            if net[ticket] >= 0:
+                break
+            if streak == 0 and closed_at[ticket] < day_start:
+                return 0
+            streak += 1
+        return streak
+
+    # --- execution ----------------------------------------------------------------------------
+
+    def _enter(
+        self,
+        symbol: str,
+        spec: SymbolSpec,
+        params: SymbolParams,
+        row: pd.Series,
+        spread: float,
+        now: datetime,
+    ) -> None:
+        r = params.risk
+        side = int(row["signal"])
+        atr_ = float(row["atr"])
+        min_distance = spec.stops_level * spec.point + spread
+        sl_distance = max(r.sl_atr * atr_, min_distance)
+        tp_distance = max(r.tp_atr * atr_, min_distance)
+
+        account = self.broker.account()
+        size = position_size(spec, account.equity, sl_distance, r)
+        if not size.ok:
+            self.skips["size"] += 1
+            self._emit(now, "skip", symbol, f"signal skipped: {size.reason}")
+            return
+        specs = {p.symbol: self.broker.symbol(p.symbol) for p in self.broker.positions(self.config.magic)}
+        committed = open_risk(self.broker.positions(self.config.magic), specs)
+        if (committed + size.risk_amount) / account.equity * 100 > r.max_total_risk_percent + 1e-9:
+            self.skips["portfolio risk"] += 1
+            self._emit(
+                now, "skip", symbol, f"signal skipped: open risk would exceed {r.max_total_risk_percent}%"
+            )
+            return
+        margin = self.broker.margin_required(symbol, side, size.volume)
+        if r.max_margin_percent and margin is not None and account.equity > 0:
+            projected = (account.margin + margin) / account.equity * 100
+            if projected > r.max_margin_percent:
+                self.skips["margin"] += 1
+                self._emit(now, "skip", symbol, f"signal skipped: margin would reach {projected:.0f}%")
+                return
+
+        reason = explain(row, params.strategy)
+        request = OrderRequest(symbol, side, size.volume, sl_distance, tp_distance, self.config.comment)
+        word = "BUY" if side > 0 else "SELL"
+        if not self.execute:
+            self._emit(
+                now,
+                "dry_open",
+                symbol,
+                f"DRY RUN {word} {size.volume} · {reason}",
+                side,
+                size.volume,
+                float(row["close"]),
+            )
+            self._journal(now, "DRY_OPEN", symbol, side, size.volume, float(row["close"]), None, reason)
+            return
+        result = self.broker.open(request, self.config.magic)
+        if not result.ok:
+            self._emit(now, "rejected", symbol, f"{word} rejected: {result.message}", side, size.volume)
+            self._journal(now, "REJECTED", symbol, side, size.volume, None, None, result.message)
+            return
+        self._emit(
+            now,
+            "open",
+            symbol,
+            f"{word} {size.volume} @ {result.price} · {reason}",
+            side,
+            size.volume,
+            result.price,
+        )
+        self._journal(now, "OPEN", symbol, side, size.volume, result.price, result.ticket, reason)
+
+    def _close(self, position: Position, volume: float | None, now: datetime, why: str) -> None:
+        kind = "partial" if volume is not None else "close"
+        if not self.execute:
+            self._emit(now, f"dry_{kind}", position.symbol, f"DRY RUN {kind} #{position.ticket}: {why}")
+            return
+        result = self.broker.close(position, volume, self.config.magic, why)
+        detail = f"{kind} #{position.ticket} ({why})" + ("" if result.ok else f" failed: {result.message}")
+        self._emit(
+            now,
+            kind if result.ok else "rejected",
+            position.symbol,
+            detail,
+            -position.side,
+            volume or position.volume,
+            result.price,
+        )
+        if result.ok:
+            self._journal(
+                now,
+                kind.upper(),
+                position.symbol,
+                -position.side,
+                volume or position.volume,
+                result.price,
+                position.ticket,
+                why,
+            )
+
+    def _modify(self, position: Position, sl: float, now: datetime, profit_r: float) -> None:
+        if not self.execute:
+            self._emit(now, "dry_modify", position.symbol, f"DRY RUN stop #{position.ticket} -> {sl}")
+            return
+        result = self.broker.modify(position, sl, position.tp, self.config.magic)
+        if result.ok:
+            self._emit(
+                now,
+                "modify",
+                position.symbol,
+                f"stop #{position.ticket} {position.sl} -> {sl} at {profit_r:.1f}R",
+            )
+        else:
+            self._emit(
+                now, "rejected", position.symbol, f"stop move #{position.ticket} rejected: {result.message}"
+            )
+
+    def _emit(
+        self,
+        now: datetime,
+        kind: str,
+        symbol: str,
+        detail: str,
+        side: int = 0,
+        volume: float = 0.0,
+        price: float | None = None,
+    ) -> None:
+        self.events.append(Event(now, kind, symbol, detail, side, volume, price))
+        if self.live:
+            log.info("%s %s", symbol, detail)
+
+    def _journal(
+        self,
+        now: datetime,
+        kind: str,
+        symbol: str,
+        side: int,
+        volume: float,
+        price: float | None,
+        ticket: int | None,
+        reason: str,
+    ) -> None:
+        if self.journal:
+            self.journal.record(
+                JournalEvent(
+                    now,
+                    kind,
+                    symbol,
+                    "BUY" if side > 0 else "SELL",
+                    volume,
+                    price,
+                    None,
+                    None,
+                    ticket,
+                    None,
+                    reason,
+                    not self.execute,
+                )
+            )
+
+
+def _bar_close(row: pd.Series, config: BotConfig) -> datetime:
+    return (row["time"] + pd.Timedelta(minutes=config.bar_minutes)).to_pydatetime()

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradebot"
+version = "3.0.0"
+description = "MetaTrader 5 trading bot with one engine for live trading and backtests, walk-forward optimisation and layered risk controls."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kato Fahad Nvule" }]
+keywords = ["metatrader5", "mt5", "algorithmic-trading", "backtesting", "walk-forward", "forex"]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "jinja2>=3.1",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.5"]
+
+[project.scripts]
+tradebot = "tradebot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tradebot = ["report/templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::FutureWarning", "error::DeprecationWarning:tradebot.*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+# Line length is enforced by `ruff format`; long strings and table rows are left intact.
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "B905"]

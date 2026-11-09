@@ -1,0 +1,79 @@
+{
+  "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "XAUUSD"],
+  "timeframe": "H1",
+  "history_bars": 1500,
+  "poll_seconds": 15,
+  "magic": 230504,
+  "comment": "tradebot",
+
+  "dry_run": true,
+  "live_trading_confirm": false,
+  "allow_real_account": false,
+  "kill_switch_file": "STOP",
+  "journal": "trade_journal.sqlite",
+  "server_utc_offset_hours": null,
+
+  "strategy": {
+    "name": "ema_cross",
+    "fast_ema": 10,
+    "slow_ema": 50,
+    "rsi_period": 14,
+    "rsi_buy_max": 68,
+    "rsi_sell_min": 32,
+    "use_adx": true,
+    "adx_min": 20,
+    "use_macd": true,
+    "use_trend_filter": true,
+    "trend_timeframe": "H4",
+    "trend_ema": 200,
+    "use_sr_filter": true,
+    "sr_lookback": 80,
+    "sr_min_atr": 1.0,
+    "use_fib_filter": false
+  },
+
+  "risk": {
+    "risk_percent": 0.25,
+    "sl_atr": 1.5,
+    "tp_atr": 3.0,
+    "max_spread_atr": 0.25,
+    "max_positions_per_symbol": 1,
+    "max_total_positions": 3,
+    "max_total_risk_percent": 1.0,
+    "max_margin_percent": 30,
+    "daily_loss_limit_percent": 2.0,
+    "weekly_loss_limit_percent": 5.0,
+    "max_consecutive_losses": 4,
+    "max_trades_per_day": 8
+  },
+
+  "management": {
+    "breakeven_r": 1.0,
+    "breakeven_buffer_r": 0.1,
+    "trail_start_r": 1.5,
+    "trail_atr": 2.0,
+    "partial_tp": true,
+    "partial_tp_r": 1.5,
+    "partial_tp_fraction": 0.5,
+    "close_on_reverse": true
+  },
+
+  "schedule": {
+    "session": "london_new_york",
+    "news_file": "config/news_blackouts.json",
+    "news_before_minutes": 30,
+    "news_after_minutes": 30
+  },
+
+  "backtest": {
+    "initial_balance": 10000,
+    "commission_per_lot": 7.0,
+    "slippage_points": 0,
+    "min_spread_points": 10
+  },
+
+  "overrides": {
+    "XAUUSD": { "backtest": { "min_spread_points": 25 } },
+    "USDJPY": { "backtest": { "min_spread_points": 12 } }
+  }
+}
