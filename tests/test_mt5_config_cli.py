@@ -200,3 +200,23 @@ def test_config_errors_exit_2(tmp_path, capsys):
     bad.write_text('{"risk": {"risk_percent": 50}}')
     assert main(["-c", str(bad), "backtest"]) == 2
     assert "risk_percent" in capsys.readouterr().out
+
+
+def test_symbol_subset_with_shipped_config(tmp_path, monkeypatch):
+    """Regression: --symbols on the shipped config must not trip over overrides for other symbols."""
+    data = tmp_path / "demo"
+    data.mkdir()
+    synthetic_bars(n=3000, seed=8).to_csv(data / "EURUSD_M15.csv", index=False)
+    monkeypatch.chdir(ROOT)
+    args = [
+        "backtest",
+        "--data",
+        str(data),
+        "--timeframe",
+        "M15",
+        "--symbols",
+        "EURUSD",
+        "-o",
+        str(tmp_path / "out"),
+    ]
+    assert main(args) == 0

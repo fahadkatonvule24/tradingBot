@@ -1,7 +1,7 @@
 """Write synthetic M15 history so the backtester can be tried without a MetaTrader terminal.
 
     python scripts/make_demo_data.py --out demo-data
-    tradebot backtest --data demo-data --symbols EURUSD GBPUSD
+    tradebot backtest --data demo-data --timeframe M15 --symbols EURUSD GBPUSD
 
 The series is a seeded random walk with trending and ranging regimes. It is for trying the
 tool and for CI, not for judging a strategy; use `tradebot fetch` for real broker history.

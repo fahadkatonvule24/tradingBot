@@ -93,12 +93,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = load_config(args.config)
         if getattr(args, "symbols", None):
-            config = replace(config, symbols=tuple(args.symbols))
+            # A command-line subset keeps only the overrides that still apply.
+            keep = {k: v for k, v in config.overrides.items() if k in args.symbols}
+            config = replace(config, symbols=tuple(args.symbols), overrides=keep)
         if getattr(args, "strategy", None):
             config = config.with_strategy(name=args.strategy)
         if getattr(args, "timeframe", None):
             config = replace(config, timeframe=args.timeframe)
-            config.validate()
+        config.validate()
         handler = {
             "check": cmd_check, "run": cmd_run, "fetch": cmd_fetch, "backtest": cmd_backtest,
             "optimize": cmd_optimize, "journal": cmd_journal,

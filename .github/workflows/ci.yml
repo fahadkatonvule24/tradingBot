@@ -34,5 +34,5 @@ jobs:
       - name: Smoke-test backtest and walk-forward CLI on synthetic data
         run: |
           python scripts/make_demo_data.py --out demo-data
-          tradebot backtest --data demo-data --symbols EURUSD GBPUSD -o out
-          tradebot optimize --data demo-data --symbols EURUSD --strategy breakout --folds 2 --jobs 2 -o out
+          tradebot backtest --data demo-data --timeframe M15 --symbols EURUSD GBPUSD -o out
+          tradebot optimize --data demo-data --timeframe M15 --symbols EURUSD --strategy breakout --folds 2 --jobs 2 -o out

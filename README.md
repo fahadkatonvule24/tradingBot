@@ -64,7 +64,7 @@ tradebot journal --days 7          # what the bot did this week
 ```
 
 No MetaTrader terminal? `python scripts/make_demo_data.py --out demo-data`, then run
-`tradebot backtest --data demo-data --symbols EURUSD GBPUSD` to try the research tools on
+`tradebot backtest --data demo-data --timeframe M15 --symbols EURUSD GBPUSD` to try the research tools on
 synthetic data.
 
 ## Safety model
@@ -238,7 +238,7 @@ v23 is kept under the [`v23` tag](https://github.com/fahadkatonvule24/tradingBot
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 79 tests
+pytest --cov=tradebot      # 80 tests
 ruff check . && ruff format --check .
 ```
 
