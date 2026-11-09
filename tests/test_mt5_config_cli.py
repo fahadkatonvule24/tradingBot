@@ -233,6 +233,34 @@ def test_output_never_crashes_on_legacy_windows_consoles(monkeypatch):
     legacy = io.TextIOWrapper(raw, encoding="cp1252")
     monkeypatch.setattr(sys, "stdout", legacy)
     safe_streams()
-    legacy.write("2024-01-01 → 2024-02-01")
+    legacy.write("2024-01-01 → 2024-02-01 · efficiency ≥ 0.5 ✓")
     legacy.flush()
-    assert raw.getvalue() == b"2024-01-01 ? 2024-02-01"
+    # Known symbols become readable ASCII; cp1252 keeps '·'; anything else degrades to '?'.
+    assert raw.getvalue() == b"2024-01-01 -> 2024-02-01 \xb7 efficiency >= 0.5 ?"
+
+
+def test_backtest_output_survives_a_cp1252_pipe(tmp_path):
+    """End to end: the real CLI, stdout encoded as cp1252 (what Windows uses for redirected output)."""
+    import os
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[1]
+    data = tmp_path / "data"
+    subprocess.run(
+        [sys.executable, str(repo / "scripts" / "make_demo_data.py"), "--out", str(data), "--bars", "4000"],
+        check=True,
+        capture_output=True,
+    )
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
+    result = subprocess.run(
+        [sys.executable, "-m", "tradebot.cli", "backtest", "--data", str(data),
+         "--symbols", "EURUSD", "--timeframe", "M15", "-o", str(tmp_path / "reports")],
+        capture_output=True,
+        env=env,
+        cwd=repo,
+    )  # fmt: skip
+    output = result.stdout.decode("cp1252")
+    assert result.returncode == 0, result.stderr.decode("cp1252", errors="replace")
+    assert " -> " in output
+    assert "Traceback" not in output

@@ -11,6 +11,7 @@ tradebot journal --days 7               # summarise the trade journal
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import logging
 import sys
@@ -87,15 +88,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def safe_streams() -> None:
-    """Never crash on output: legacy Windows consoles (cp1252) cannot encode characters like '→'.
+ASCII_FALLBACK = {"→": "->", "≥": ">=", "≤": "<=", "÷": "/", "—": "-", "·": "-", "…": "..."}
 
-    Non-UTF-8 stdout/stderr are switched to errors="replace", so such characters print as '?'.
+
+def _ascii_fallback(error: UnicodeError) -> tuple[str, int]:
+    if not isinstance(error, UnicodeEncodeError):
+        raise error
+    chunk = error.object[error.start : error.end]
+    return "".join(ASCII_FALLBACK.get(ch, "?") for ch in chunk), error.end
+
+
+codecs.register_error("tradebot.ascii_fallback", _ascii_fallback)
+
+
+def safe_streams() -> None:
+    """Never crash on output that the stream's encoding cannot represent.
+
+    On Windows with Python < 3.15, output redirected to a file or pipe (`tradebot backtest >
+    out.txt`, Task Scheduler logs, CI) is encoded as cp1252, which has no '→'. Non-UTF-8
+    stdout/stderr get an error handler that prints readable ASCII ('->', '>=') instead of raising.
     """
     for stream in (sys.stdout, sys.stderr):
         encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
         if encoding and encoding != "utf8" and hasattr(stream, "reconfigure"):
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(errors="tradebot.ascii_fallback")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
