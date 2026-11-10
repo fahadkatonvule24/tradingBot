@@ -28,13 +28,14 @@ from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
 from tradebot.config import BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
-from tradebot.live import latest_features, trading_gate
+from tradebot.live import Link, latest_features, trading_gate
 
 log = logging.getLogger(__name__)
 
 SPARK_BARS = 48
 CHART_BARS = 120
 SPEC_REFRESH = timedelta(minutes=5)
+LOST_LINK = "Lost the connection to MetaTrader 5. Is the terminal open? Prices are frozen; retrying."
 
 
 @dataclass
@@ -69,6 +70,8 @@ class Monitor:
         self._features: dict[str, pd.DataFrame] = {}
         self._fetched: dict[str, float] = {}
         self._recent: dict[str, tuple[Any, dict[str, Any]]] = {}
+        self._link = Link(broker)
+        self._last_error: str | None = None
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
         self._orders: queue.Queue[_Order] = queue.Queue()
@@ -123,12 +126,24 @@ class Monitor:
                 self._journal.close()
 
     def cycle(self) -> None:
+        if not self._link.ok():
+            return self._report(LOST_LINK)
         try:
             self.refresh()
         except Exception as exc:  # keep the page alive and say what went wrong
-            log.exception("dashboard refresh failed")
-            with self._lock:
-                self._state = {**self._state, "error": f"{type(exc).__name__}: {exc}"}
+            if not self._link.ok():
+                return self._report(LOST_LINK)
+            message = f"{type(exc).__name__}: {exc}"
+            if message != self._last_error:  # the same failure every second is logged once
+                log.exception("dashboard refresh failed")
+            self._last_error = message
+            self._report(message)
+        else:
+            self._last_error = None
+
+    def _report(self, error: str) -> None:
+        with self._lock:
+            self._state = {**self._state, "error": error}
 
     def refresh(self) -> None:
         now = self.broker.now()

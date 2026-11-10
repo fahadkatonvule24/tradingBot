@@ -206,3 +206,123 @@ def test_plan_uses_the_terminals_profit_at_the_exact_prices(fake_mt5):
     assert plan.risk_amount == pytest.approx(-converted(1, "EURUSDm", plan.volume, entry, stop), abs=0.02)
     assert plan.reward_amount == pytest.approx(converted(1, "EURUSDm", plan.volume, entry, target), abs=0.02)
     assert plan.risk_percent <= replace(config.risk).risk_percent + 1e-9
+
+
+# --- losing and regaining the terminal ------------------------------------------------------------
+
+
+def break_link(fake) -> None:
+    """What MetaTrader5 does once the terminal is closed: every call fails with an IPC error."""
+    fake.terminal_info = lambda: None
+    fake.account_info = lambda: None
+    fake.last_error = lambda: (-10001, "IPC send failed")
+    fake.initialize = lambda **kwargs: False
+
+
+def restore_link(fake) -> None:
+    for name in ("terminal_info", "account_info", "last_error", "initialize"):
+        delattr(fake, name)
+
+
+def test_link_retries_with_backoff_and_logs_an_outage_once(fake_mt5, caplog):
+    from tradebot.live import Link
+
+    broker = MT5Broker(MT5Login(), offset_hours=2, module=fake_mt5, clock=lambda: fake_mt5.utc_now)
+    now = [0.0]
+    tries = []
+    original = broker.reconnect
+    broker.reconnect = lambda: tries.append(now[0]) or original()
+    link = Link(broker, clock=lambda: now[0])
+    assert link.ok() and tries == []
+
+    break_link(fake_mt5)
+    with caplog.at_level("INFO", logger="tradebot.live"):
+        for second in range(60):
+            now[0] = float(second)
+            assert not link.ok()
+        assert tries == [0.0, 1.0, 3.0, 8.0, 18.0, 48.0]  # after 1, 2, 5, 10, then every 30 seconds
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and "IPC send failed (-10001)" in errors[0].getMessage()
+
+        restore_link(fake_mt5)
+        now[0] = 78.0
+        assert link.ok()
+        assert "reconnected to MetaTrader 5 after 78 s" in caplog.text
+
+
+def test_dashboard_survives_a_terminal_restart(fake_mt5, caplog):
+    """Regression: 'IPC send failed' used to print a traceback every second and never recover."""
+    from tradebot.ui.monitor import LOST_LINK, Monitor
+
+    broker = MT5Broker(MT5Login(), offset_hours=2, module=fake_mt5, clock=lambda: fake_mt5.utc_now)
+    config = BotConfig(
+        symbols=("EURUSDm",), timeframe="M15", schedule=ScheduleParams(session="all", news_file="")
+    )
+    monitor = Monitor(config, broker, ["EURUSDm"])
+    monitor.cycle()
+    assert monitor.snapshot()["ready"] and monitor.snapshot()["error"] is None
+
+    break_link(fake_mt5)
+    with caplog.at_level("ERROR"):
+        for _ in range(5):
+            monitor.cycle()
+    state = monitor.snapshot()
+    assert state["error"] == LOST_LINK and state["symbols"]  # last good data stays on screen
+    assert len(caplog.records) == 1 and "Traceback" not in caplog.text
+
+    restore_link(fake_mt5)
+    monitor._link._next_try = 0.0  # do not wait out the backoff in a test
+    monitor.cycle()
+    assert monitor.snapshot()["error"] is None
+
+
+def test_other_failures_are_logged_once_not_every_second(fake_mt5, caplog):
+    from tradebot.ui.monitor import Monitor
+
+    broker = MT5Broker(MT5Login(), offset_hours=2, module=fake_mt5, clock=lambda: fake_mt5.utc_now)
+    config = BotConfig(
+        symbols=("EURUSDm",), timeframe="M15", schedule=ScheduleParams(session="all", news_file="")
+    )
+    monitor = Monitor(config, broker, ["EURUSDm"])
+    monitor.refresh = lambda: 1 / 0
+    with caplog.at_level("ERROR"):
+        for _ in range(4):
+            monitor.cycle()
+    assert len(caplog.records) == 1
+    assert monitor.snapshot()["error"] == "ZeroDivisionError: division by zero"
+
+
+def test_trading_loop_waits_for_the_terminal(fake_mt5):
+    from tradebot.live import LiveRunner
+
+    broker = MT5Broker(MT5Login(), offset_hours=2, module=fake_mt5, clock=lambda: fake_mt5.utc_now)
+    config = BotConfig(
+        symbols=("EURUSDm",), timeframe="M15", schedule=ScheduleParams(session="all", news_file="")
+    )
+    runner = LiveRunner(config, broker, Engine(config, broker, execute=False, live=True), ["EURUSDm"])
+    processed = []
+    runner._process = processed.append
+    break_link(fake_mt5)
+    runner.cycle()
+    assert processed == []
+    restore_link(fake_mt5)
+    runner._link._next_try = 0.0
+    runner.cycle()
+    assert processed == ["EURUSDm"]
+
+
+def test_connect_waits_for_a_terminal_that_is_still_starting(fake_mt5):
+    """Seen on the real terminal: 'Authorization failed' for the first seconds after it launches."""
+    answers = [False, False, True]
+    fake_mt5.initialize = lambda **kwargs: answers.pop(0)
+    fake_mt5.last_error = lambda: (-6, "Terminal: Authorization failed")
+    broker = MT5Broker(MT5Login(), offset_hours=2, module=fake_mt5, clock=lambda: fake_mt5.utc_now)
+    waits = []
+    broker._sleep = waits.append
+    assert broker.connect().balance == 10_000.0
+    assert waits == [3.0, 3.0]
+
+    fake_mt5.initialize = lambda **kwargs: False
+    with pytest.raises(Exception, match=r"initialize failed \(-6\): Terminal: Authorization failed"):
+        broker.connect(attempts=2)
+    assert not broker.reconnect()  # a reconnect tries once; Link spaces the retries

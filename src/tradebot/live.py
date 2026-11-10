@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -40,20 +41,70 @@ def trading_gate(config: BotConfig, account: Account, live_flag: bool, terminal_
     return Gate(True, "REAL-MONEY account" if account.is_real else "demo account")
 
 
+class Link:
+    """Watches the connection to the terminal and reconnects with a growing delay.
+
+    Found the hard way: when MetaTrader 5 closed or restarted, every call failed with
+    "IPC send failed" and the dashboard logged the same traceback once a second, forever.
+    An outage is now logged once, retried at 1, 2, 5, 10 and then every 30 seconds, and
+    logged once more when the link is back.
+    """
+
+    DELAYS = (1.0, 2.0, 5.0, 10.0, 30.0)
+
+    def __init__(self, broker: Broker, clock=time.monotonic) -> None:
+        self.broker, self._clock = broker, clock
+        self.down_since: float | None = None
+        self.attempts = 0
+        self._next_try = 0.0
+
+    def ok(self) -> bool:
+        """Call before using the broker: True if the link works (reconnecting first if it can)."""
+        connected = getattr(self.broker, "connected", None)
+        if connected is None or connected():
+            self._recovered()
+            return True
+        now = self._clock()
+        if self.down_since is None:
+            self.down_since, self.attempts, self._next_try = now, 0, now
+            detail = getattr(self.broker, "last_error_text", lambda: "no details")()
+            log.error(
+                "lost the connection to MetaTrader 5: %s. Is the terminal open? Retrying until it is back.",
+                detail,
+            )
+        if now >= self._next_try:
+            self._next_try = now + self.DELAYS[min(self.attempts, len(self.DELAYS) - 1)]
+            self.attempts += 1
+            if self.broker.reconnect():
+                self._recovered()
+                return True
+        return False
+
+    def _recovered(self) -> None:
+        if self.down_since is not None:
+            log.info("reconnected to MetaTrader 5 after %.0f s", self._clock() - self.down_since)
+            self.down_since, self.attempts = None, 0
+
+
 class LiveRunner:
     def __init__(self, config: BotConfig, broker: Broker, engine: Engine, symbols: list[str]) -> None:
         self.config, self.broker, self.engine, self.symbols = config, broker, engine, symbols
         self._stop = threading.Event()
+        self._link = Link(broker)
 
     def stop(self, *_: object) -> None:
         log.info("stop requested; finishing the current cycle")
         self._stop.set()
 
     def cycle(self) -> None:
+        if not self._link.ok():
+            return  # terminal unreachable: nothing can be read or managed until it is back
         for symbol in self.symbols:
             try:
                 self._process(symbol)
             except Exception:  # one bad symbol must not stop the others
+                if not self._link.ok():
+                    return
                 log.exception("%s: cycle failed", symbol)
         self.engine.events.clear()
 

@@ -50,6 +50,9 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
 - **Self-contained HTML reports:** equity, drawdown, monthly returns, per-symbol results, R
   distribution, and walk-forward windows. They follow light/dark theme.
 - **Journals** every order, close, stop move and rejection to SQLite.
+- **Survives a terminal restart.** If MetaTrader 5 closes or restarts, the dashboard and the
+  trading loop log the outage once, retry at 1, 2, 5, 10 and then every 30 seconds, and carry on
+  when it is back. Startup also waits for a terminal that is still logging in.
 
 ## Quick start
 
@@ -395,7 +398,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 130 tests
+pytest --cov=tradebot      # 135 tests
 ruff check . && ruff format --check .
 ```
 

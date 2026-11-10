@@ -412,7 +412,7 @@ async function poll() {
     lastGoodUpdate = Date.now();
     if (state.now) clockOffset = parseTime(state.now) - Date.now();
     const banner = $("#banner");
-    if (state.error) { banner.textContent = `MetaTrader 5 error: ${state.error}`; banner.classList.add("show"); }
+    if (state.error) { banner.textContent = state.error; banner.classList.add("show"); }
     else banner.classList.remove("show");
     if (state.ready) render();
   } catch (err) {

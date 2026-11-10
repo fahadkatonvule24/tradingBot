@@ -16,6 +16,7 @@ Differences from v23 worth knowing:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -67,21 +68,57 @@ class MT5Broker:
         self._clock = clock
         self._origin: dict[int, tuple[float | None, float | None]] = {}
         self._warned: set[str] = set()
+        self._sleep = time.sleep
 
     # --- connection ---------------------------------------------------------------------------
 
-    def connect(self) -> Account:
+    def connect(self, attempts: int = 6, wait_seconds: float = 3.0) -> Account:
+        """Open the link to the terminal (the MetaTrader5 package starts the terminal if needed).
+
+        A terminal that has only just started refuses the first calls with "Authorization failed"
+        until it has logged in to the trade server, so a failure is retried for a short while.
+        """
         kwargs = {k: v for k, v in (("path", self.login.path), ("login", self.login.login),
                                     ("password", self.login.password), ("server", self.login.server)) if v}  # fmt: skip
-        if not self.mt5.initialize(**kwargs):
+        for attempt in range(1, attempts + 1):
+            if self.mt5.initialize(**kwargs):
+                return self.account()
             code, message = self.mt5.last_error()
-            raise MT5Error(
-                f"MT5 initialize failed ({code}): {message}. Open the terminal and log in, or set MT5_LOGIN/MT5_PASSWORD/MT5_SERVER."
-            )
-        return self.account()
+            if attempt < attempts:
+                log.info("MT5 is not ready (%s: %s); trying again in %.0f s", code, message, wait_seconds)
+                self._sleep(wait_seconds)
+        raise MT5Error(
+            f"MT5 initialize failed ({code}): {message}. Open the terminal and log in, or set MT5_LOGIN/MT5_PASSWORD/MT5_SERVER."
+        )
 
     def shutdown(self) -> None:
         self.mt5.shutdown()
+
+    def connected(self) -> bool:
+        """True while the link to the terminal answers (it drops if the terminal closes or restarts)."""
+        try:
+            return self.mt5.terminal_info() is not None
+        except Exception:
+            return False
+
+    def reconnect(self) -> bool:
+        """Re-open the link to the terminal. Safe to call repeatedly; False if it is still down."""
+        try:
+            self.mt5.shutdown()
+        except Exception:
+            log.debug("shutdown before reconnect failed", exc_info=True)
+        try:
+            self.connect(attempts=1)  # the caller (Link) does the waiting between tries
+        except MT5Error:
+            return False
+        return True
+
+    def last_error_text(self) -> str:
+        try:
+            code, message = self.mt5.last_error()
+        except Exception:
+            return "unknown error"
+        return f"{message} ({code})"
 
     def terminal_trading_allowed(self) -> bool:
         info = self.mt5.terminal_info()
