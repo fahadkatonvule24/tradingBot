@@ -179,7 +179,11 @@ button { font: inherit; color: inherit; }
 .tooltip .kv span:first-child { color: var(--text-2); }
 
 /* --- plan --- */
-.plan .sub { font-size: 12px; color: var(--text-3); margin: -6px 0 10px; }
+.plan .sub { font-size: 12px; color: var(--text-3); margin: 0 0 10px; }
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px; margin: 0 0 10px; border-radius: 8px; background: var(--surface-2); }
+.seg button { border: 0; border-radius: 6px; padding: 6px 8px; background: transparent; color: var(--text-2); font-weight: 650; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow), inset 0 0 0 1px var(--border); }
+.seg small { display: block; font-weight: 500; font-size: 11px; color: var(--text-3); }
 .kv-list { display: grid; grid-template-columns: auto 1fr auto; gap: 7px 10px; align-items: baseline; }
 .kv-list .k { color: var(--text-2); }
 .kv-list .v { font-weight: 600; text-align: right; }
@@ -327,6 +331,7 @@ let clockOffset = 0;            // server time minus local time, ms
 const charts = {};              // symbol -> {bars, fast, slow, barTime}
 const lastBid = {};
 let hoverIndex = null;
+let planSide = 0;              // 0 = follow the bot; +1 / -1 = the side the user picked
 let lastGoodUpdate = 0;
 
 // --- helpers ---------------------------------------------------------------------------------
@@ -433,8 +438,17 @@ async function loadChart(symbol, force) {
   } catch (e) { /* next poll retries */ }
 }
 
+function planFor(row) {
+  const a = row && row.advice;
+  if (!a) return null;
+  const side = planSide || a.side;
+  return (a.plans && a.plans[side > 0 ? "buy" : "sell"]) || a.plan || null;
+}
+const isBotPlan = (a, plan) => Boolean(a.actionable && plan && plan.side === a.side);
+
 function select(symbol) {
   selected = symbol;
+  planSide = 0;
   hoverIndex = null;
   try { history.replaceState(null, "", `#${encodeURIComponent(symbol)}`); } catch (e) { /* ignore */ }
   render();
@@ -545,7 +559,8 @@ function renderAdvice(row) {
   const parts = [
     el("span", { class: `badge big ${a.action}`, text: a.action }),
     el("div", {}, el("div", { class: "headline", text: a.headline }), el("div", { class: "detail", text: a.detail }),
-      a.direction_note ? el("div", { class: "detail", text: a.direction_note }) : null),
+      a.direction_note ? el("div", { class: "detail", text: a.direction_note }) : null,
+      triggerLine(row)),
     when,
   ];
   if (a.blocker && a.action !== "SKIP") {
@@ -554,18 +569,33 @@ function renderAdvice(row) {
   $("#advice").replaceChildren(...parts);
 }
 
+function triggerLine(row) {
+  const a = row.advice, t = a.last_trigger;
+  if (!t || a.actionable) return null;
+  const word = t.side > 0 ? "BUY" : "SELL";
+  const ago = t.bars_ago === 0 ? "on the last bar" : `${t.bars_ago} bar${t.bars_ago === 1 ? "" : "s"} ago`;
+  const verdict = t.taken ? "it passed the filters" : `the bot did not take it (${t.blocked_by})`;
+  const moved = `${Math.abs(t.r_since).toFixed(1)}R ${t.r_since >= 0 ? "in its favour" : "against it"}`;
+  return el("div", { class: "detail" }, el("strong", { text: `${word} trigger ${ago}` }),
+    ` at ${px(t.price, row.digits)} (${localTime(t.time)}): ${verdict}. Price has since moved ${moved}.`);
+}
+
 function renderPlan(row) {
-  const a = row.advice, p = a.plan;
+  const a = row.advice, p = planFor(row);
   const box = $("#plan");
   if (!p) {
     box.replaceChildren(el("h2", { text: "Trade plan" }), el("div", { class: "empty", text: "No plan while the market is closed." }));
     return;
   }
   const word = p.side > 0 ? "BUY" : "SELL";
-  const live = a.actionable;
-  const title = live ? `Trade plan · ${word}` : a.action === "SKIP" ? `Plan (skipped) · ${word}` : `If a ${word} triggered now`;
-  const subtitle = live ? "Priced at the live quote; this is the order the bot would send." :
-    "Hypothetical: no actionable signal. Shown so you know where the levels would be.";
+  const live = isBotPlan(a, p);
+  const title = live ? `Trade plan · ${word}` : `${word} plan at the live price`;
+  const subtitle = live ? "The bot's signal. Priced at the live quote; this is the order it would send." :
+    "Not a bot signal. These are the levels and size the bot's risk rules give this trade if you take it on your own call.";
+  const pick = (side, label) => el("button", { type: "button", "aria-pressed": p.side === side ? "true" : "false",
+    onclick: () => { planSide = side; render(); } }, label,
+    el("small", { text: a.actionable && a.side === side ? "bot signal" : a.side === side ? "bot is watching" : "your call" }));
+  const toggle = el("div", { class: "seg", role: "group", "aria-label": "Plan direction" }, pick(1, "Buy"), pick(-1, "Sell"));
   const line = (k, v, x, sw) => [el("span", { class: "k" }, sw ? el("i", { class: "swatch", style: `background:${sw}` }) : null, k), el("span", { class: "v", text: v }), el("span", { class: "x", text: x })];
   const list = el("div", { class: "kv-list" },
     ...line("Entry", px(p.entry, row.digits), `market ${p.side > 0 ? "ask" : "bid"}`, css("--text-2")),
@@ -582,16 +612,17 @@ function renderPlan(row) {
   const g = state.gate;
   let label, disabled = true;
   if (!g.execute) label = "Orders are off: advice only";
-  else if (!live) label = "Waiting for an actionable signal";
   else if (p.rejected) label = `Cannot size: ${p.rejected}`;
-  else { label = `Place ${word} ${p.volume} lots`; disabled = false; }
-  const btn = el("button", { class: `order-btn ${disabled ? "" : word}`, type: "button", disabled, text: label, onclick: () => confirmOrder(row) });
+  else if (live) { label = `Place ${word} ${p.volume} lots`; disabled = false; }
+  else if (a.blocker) label = `Blocked by a risk rule: ${a.blocker}`;
+  else { label = `Place ${word} ${p.volume} lots (your call)`; disabled = false; }
+  const btn = el("button", { class: `order-btn ${disabled ? "" : word}`, type: "button", disabled, text: label, onclick: () => confirmOrder(row, p, !live) });
   const notes = [];
   if (p.rejected) notes.push(el("div", { class: "fine", text: `The engine would not take this trade: ${p.rejected}.` }));
   if (!g.execute) notes.push(el("div", { class: "fine" }, "To enable the button: set ", el("code", { text: "dry_run: false" }), " and ", el("code", { text: "live_trading_confirm: true" }), ", then start with ", el("code", { text: "tradebot ui --live" }), "."));
   notes.push(el("div", { class: "fine", text: "Amounts come from MT5's own profit calculator at these exact prices, before commission and swap. A stop is a market order once touched, so a fast market or a weekend gap can fill it worse." }));
   notes.push(el("div", { class: "fine", text: "The stop and target are sent with the order. Breakeven at +1R, half off at +1.5R and the trailing stop apply while `tradebot run` manages the position." }));
-  box.replaceChildren(el("h2", { text: title }), el("div", { class: "sub", text: subtitle }), list, outcome, btn, ...notes);
+  box.replaceChildren(el("h2", { text: title }), toggle, el("div", { class: "sub", text: subtitle }), list, outcome, btn, ...notes);
 }
 
 function renderChecks(row) {
@@ -779,7 +810,7 @@ function drawChart() {
   const slots = bars.length + future;
   const step = (W - pad.l - pad.r) / slots;
   const X = (i) => pad.l + step * (i + 0.5);
-  const a = row.advice, plan = a.plan;
+  const a = row.advice, plan = planFor(row);
   let lo = Infinity, hi = -Infinity;
   for (const b of bars) { lo = Math.min(lo, b.low); hi = Math.max(hi, b.high); }
   const levels = [row.bid];
@@ -819,7 +850,7 @@ function drawChart() {
   // plan zones: from the last closed bar into the future
   if (plan) {
     const x0 = X(bars.length - 1.5), x1 = plotRight;
-    const faint = !a.actionable;
+    const faint = !isBotPlan(a, plan);
     ctx.globalAlpha = faint ? 0.55 : 1;
     ctx.fillStyle = C.upTint;
     ctx.fillRect(x0, Math.min(Y(plan.entry), Y(plan.target)), x1 - x0, Math.abs(Y(plan.target) - Y(plan.entry)));
@@ -934,8 +965,8 @@ canvas.addEventListener("pointerleave", () => { hoverIndex = null; drawChart(); 
 window.addEventListener("resize", () => drawChart());
 
 // --- orders ----------------------------------------------------------------------------------
-function confirmOrder(row) {
-  const p = row.advice.plan, word = p.side > 0 ? "BUY" : "SELL";
+function confirmOrder(row, p, manual) {
+  const word = p.side > 0 ? "BUY" : "SELL";
   $("#confirm-title").textContent = `${word} ${p.volume} lots of ${row.symbol}?`;
   const line = (k, v) => el("div", { class: "kv" }, el("span", { class: "muted", text: k }), el("strong", { text: v }));
   $("#confirm-body").replaceChildren(el("div", { class: "kv-list", style: "grid-template-columns: 1fr auto" },
@@ -944,7 +975,8 @@ function confirmOrder(row) {
     line("Take profit", px(p.target, row.digits)),
     line("Loss if stopped", money(-p.risk_amount, true)),
     line("Profit at target", money(p.reward_amount, true))),
-    el("p", { class: "fine", text: "The server re-checks the signal, every guard and the trading gate before sending. Prices can move between now and the fill." }));
+    manual ? el("p", { class: "fine" }, el("strong", { text: "This is your call, not a bot signal. " }), "The bot has no evidence for this direction; it only sizes the trade and sets the stop and target.") : null,
+    el("p", { class: "fine", text: "The server re-checks every risk rule and the trading gate before sending. Prices can move between now and the fill." }));
   const go = $("#confirm-go");
   go.className = `go order-btn ${word}`;
   go.style.width = "auto"; go.style.marginTop = "0";
@@ -954,7 +986,7 @@ function confirmOrder(row) {
       const res = await fetch("/api/order", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Tradebot-Token": TOKEN },
-        body: JSON.stringify({ symbol: row.symbol, side: p.side }),
+        body: JSON.stringify({ symbol: row.symbol, side: p.side, manual: Boolean(manual) }),
       });
       const out = await res.json();
       toast(out.ok ? `Order placed: ${out.message}` : `Not placed: ${out.message}`, 9000);

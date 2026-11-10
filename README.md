@@ -90,6 +90,8 @@ symbol, once a second:
 | Filter checklist | the strategy's filters (trend, ADX, MACD, RSI, room to S/R) on the last closed bar |
 | Chart | the last 120 bars plus the forming one, both EMAs, profit and loss zones, live price; hover for OHLC |
 | Track record | a backtest of the current config on your downloaded history, per symbol |
+| Buy / Sell switch on the plan | the same priced plan for either side, so a trade you choose yourself gets the bot's sizing, stop and target |
+| Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
 | Recent signals | the last signals across all symbols and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
 | Alerts | optional browser notification and tab title when a BUY or SELL appears |
 | Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
@@ -99,11 +101,20 @@ symbol, once a second:
 backtest trade, so the side, lot size, stop and target on the page are exactly the order
 `tradebot run --live` would send at that moment.
 
+**The bot is the risk manager; direction can be yours.** The research below found no rule that
+predicts direction, and the filters block winners as readily as losers (removing the trend filter
+doubles the trade count and the loss). So the dashboard does not insist on its own side: you can
+switch the plan to Buy or Sell and place that trade on your own call. A manual trade needs no
+strategy signal, but it still passes the trading gate and every entry guard (session, news, loss
+limits, position limits, spread), is sized by the engine from your risk settings, and is sent
+with its stop and target. It is journalled as manual and tagged `tradebot manual` in MT5, so your
+own trades can be told apart from the bot's.
+
 **Placing the trade from the page** is possible but off by default. The button is enabled only
 when every [safety gate](#safety-model) is open and the dashboard was started with
 `tradebot ui --live`. On click the server does not trust the browser: it re-reads the quote,
-recomputes the advice and every guard, and sends only the advised side and size, with the stop
-and target attached. Breakeven, partial profit and trailing apply while `tradebot run` manages
+recomputes the advice and every guard, and sends only the engine's size for that side, with the
+stop and target attached. A bot trade is refused unless it still matches the current advice. Breakeven, partial profit and trailing apply while `tradebot run` manages
 the position.
 
 **The local server is hardened, because one endpoint can place orders.** It binds to `127.0.0.1`
@@ -384,7 +395,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 125 tests
+pytest --cov=tradebot      # 130 tests
 ruff check . && ruff format --check .
 ```
 

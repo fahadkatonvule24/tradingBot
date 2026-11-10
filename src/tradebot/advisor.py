@@ -74,6 +74,10 @@ class Advice:
     entries_from: datetime | None = None
     direction_note: str = ""
     """Why only one direction is being considered, when the chart may look like the other."""
+    plans: dict[str, TradePlan] = field(default_factory=dict)
+    """The plan for each side ("buy", "sell") at the live quote, for a trade the user chooses."""
+    last_trigger: dict | None = None
+    """The most recent entry trigger in the last few bars, taken or filtered, and the move since."""
     """When trading hours are closed: the first bar close at which an entry is allowed again."""
 
 
@@ -159,7 +163,11 @@ def advise(
     side = signal or raw or watch_side(row, p)
     spread = tick.ask - tick.bid
     blocker = engine.entry_blocker(symbol, spec, params, row, spread, now)
-    plan = trade_plan(engine, symbol, spec, params, row, tick, side)
+    plans = {
+        "buy": trade_plan(engine, symbol, spec, params, row, tick, 1),
+        "sell": trade_plan(engine, symbol, spec, params, row, tick, -1),
+    }
+    plan = plans["buy" if side > 0 else "sell"]
     trigger, level = next_trigger(features, p, side, tick, spec, config.timeframe)
     entries_from = None
     if config.schedule.closed(now):
@@ -175,6 +183,8 @@ def advise(
         "plan": plan,
         "entries_from": entries_from,
         "direction_note": direction_note(row, p, side, config.timeframe),
+        "plans": plans,
+        "last_trigger": last_trigger(features, params, tick, config.bar_minutes),
     }
 
     if signal:
@@ -196,6 +206,35 @@ def advise(
     return Advice(symbol, "WAIT", "No setup yet", trigger, actionable=False, **common)
 
 
+TRIGGER_LOOKBACK = 12
+
+
+def last_trigger(features: pd.DataFrame, params: SymbolParams, tick: Tick, bar_minutes: int) -> dict | None:
+    """The latest entry trigger within the last 12 bars, whether the filters passed it or not.
+
+    A filtered trigger used to vanish from the screen after one bar. Keeping it visible, with the
+    filter that blocked it and what price has done since, lets a person judge the filter's call.
+    """
+    recent = features.tail(TRIGGER_LOOKBACK)
+    fired = recent[recent["raw_signal"] != 0]
+    if fired.empty:
+        return None
+    row = fired.iloc[-1]
+    side = int(row["raw_signal"])
+    price = float(row["close"])
+    risk = params.risk.sl_atr * float(row["atr"])
+    now_price = tick.bid if side > 0 else tick.ask  # where the position could be closed
+    return {
+        "time": (row["time"] + pd.Timedelta(minutes=bar_minutes)).to_pydatetime(),
+        "bars_ago": len(features) - 1 - int(fired.index[-1]),
+        "side": side,
+        "price": price,
+        "taken": bool(row["signal"] != 0),
+        "blocked_by": "" if row["signal"] != 0 else BLOCK_LABELS.get(row["block"], str(row["block"])),
+        "r_since": (now_price - price) * side / risk if risk else 0.0,
+    }
+
+
 def direction_note(row: pd.Series, p: StrategyParams, side: int, timeframe: str) -> str:
     """Explain a trend-filtered direction, and say so plainly when the chart is moving against it."""
     if not (p.use_trend_filter and "trend" in FILTERS[p.name]) or int(row["trend"]) != side:
@@ -203,7 +242,7 @@ def direction_note(row: pd.Series, p: StrategyParams, side: int, timeframe: str)
     allowed, other = ("buys", "sell") if side > 0 else ("sells", "buy")
     note = (
         f"Only {allowed} are considered here: the {p.trend_timeframe} trend is {'up' if side > 0 else 'down'} "
-        f"(price is {'above' if side > 0 else 'below'} its {p.trend_timeframe} EMA {p.trend_ema})."
+        f"(the last completed {p.trend_timeframe} bar closed {'above' if side > 0 else 'below'} its EMA {p.trend_ema})."
     )
     chart_up = row["ema_fast"] > row["ema_slow"]
     if chart_up != (side > 0):

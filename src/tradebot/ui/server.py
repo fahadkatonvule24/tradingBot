@@ -112,9 +112,10 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(raw or b"{}")
             symbol, side = str(body["symbol"]), int(body["side"])
+            manual = body.get("manual") is True
         except (ValueError, KeyError, TypeError) as exc:
             return self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": f"bad request: {exc}"})
-        result = self.server.monitor.submit(symbol, side)
+        result = self.server.monitor.submit(symbol, side, manual)
         self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT, result)
 
     def _host_ok(self) -> bool:

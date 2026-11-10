@@ -41,6 +41,7 @@ SPEC_REFRESH = timedelta(minutes=5)
 class _Order:
     symbol: str
     side: int
+    manual: bool = False
     done: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] = field(default_factory=dict)
 
@@ -90,9 +91,9 @@ class Monitor:
         bars = tail[["time", "open", "high", "low", "close", "ema_fast", "ema_slow"]].to_dict("records")
         return clean({"symbol": symbol, "fast": p.fast_ema, "slow": p.slow_ema, "bars": bars})
 
-    def submit(self, symbol: str, side: int, timeout: float = 20.0) -> dict[str, Any]:
+    def submit(self, symbol: str, side: int, manual: bool = False, timeout: float = 20.0) -> dict[str, Any]:
         """Queue an order for the worker thread and wait for its outcome."""
-        order = _Order(symbol, side)
+        order = _Order(symbol, side, manual)
         self._orders.put(order)
         if not order.done.wait(timeout):
             return {"ok": False, "message": "timed out waiting for the MT5 thread"}
@@ -248,13 +249,18 @@ class Monitor:
 
     def _safe_execute(self, order: _Order) -> dict[str, Any]:
         try:
-            return self.execute(order.symbol, order.side)
+            return self.execute(order.symbol, order.side, order.manual)
         except Exception as exc:
             log.exception("order failed")
             return {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
 
-    def execute(self, symbol: str, side: int) -> dict[str, Any]:
-        """Place the advised trade if, right now, the gate is open and the engine would take it."""
+    def execute(self, symbol: str, side: int, manual: bool = False) -> dict[str, Any]:
+        """Place a trade if, right now, the gate is open and the engine's risk rules allow it.
+
+        A bot trade must match the current advice. A manual trade is the user's own call on
+        direction: no strategy signal is required, but the trading gate, every entry guard
+        (session, news, loss limits, positions, spread) and the engine's sizing still apply.
+        """
         if symbol not in self.symbols or side not in WORD:
             return {"ok": False, "message": "unknown symbol or side"}
         now = self.broker.now()
@@ -266,23 +272,29 @@ class Monitor:
         tick = self.broker.tick(symbol)
         features = self._features_for(symbol, now)
         advice = advise(self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now)
-        plan = advice.plan
-        if not advice.actionable or advice.side != side or plan is None or plan.rejected:
-            return {"ok": False, "message": f"not advised any more: {advice.headline}. {advice.detail}"}
+        if manual:
+            plan = advice.plans.get("buy" if side > 0 else "sell")
+            if plan is None:
+                return {"ok": False, "message": f"no plan available: {advice.headline}"}
+            if advice.blocker or plan.rejected:
+                return {"ok": False, "message": f"blocked by a risk rule: {advice.blocker or plan.rejected}"}
+        else:
+            plan = advice.plan
+            if not advice.actionable or advice.side != side or plan is None or plan.rejected:
+                return {"ok": False, "message": f"not advised any more: {advice.headline}. {advice.detail}"}
 
         word = WORD[side]
-        request = OrderRequest(
-            symbol, side, plan.volume, plan.stop_distance, plan.target_distance, self.config.comment
-        )
+        comment = f"{self.config.comment} manual" if manual else self.config.comment
+        request = OrderRequest(symbol, side, plan.volume, plan.stop_distance, plan.target_distance, comment)
         result = self.broker.open(request, self.config.magic)
-        reason = "advisor: " + advice.detail
+        reason = "manual: the user's call from the dashboard" if manual else "advisor: " + advice.detail
         if self._journal:
             self._journal.record(JournalEvent(
                 now, "OPEN" if result.ok else "REJECTED", symbol, word, plan.volume, result.price,
                 plan.stop, plan.target, result.ticket, None, reason if result.ok else result.message, False,
             ))  # fmt: skip
         text = (
-            f"{word} {plan.volume} @ {result.price} · SL {plan.stop} · TP {plan.target}"
+            f"{'Manual ' if manual else ''}{word} {plan.volume} @ {result.price} · SL {plan.stop} · TP {plan.target}"
             if result.ok
             else f"{word} rejected by the broker: {result.message}"
         )

@@ -118,7 +118,7 @@ def test_direction_note_explains_a_chart_that_looks_the_other_way(cfg, broker):
         in against.direction_note
     )
     aligned = advice_for(cfg, broker, features())  # trend up, chart up
-    assert aligned.direction_note.endswith("(price is above its H4 EMA 200).")
+    assert aligned.direction_note.endswith("(the last completed H4 bar closed above its EMA 200).")
     off = replace(cfg, strategy=replace(cfg.strategy, use_trend_filter=False))
     assert advice_for(off, broker, features()).direction_note == ""
 
@@ -160,6 +160,32 @@ def test_pip_size():
 
     assert pip_size(preset_spec("EURUSD")) == pytest.approx(0.0001)
     assert pip_size(preset_spec("XAUUSD")) == pytest.approx(0.01)
+
+
+def test_plans_are_priced_for_both_sides(cfg, broker):
+    a = advice_for(cfg, broker, features())  # the bot is watching buys
+    buy, sell = a.plans["buy"], a.plans["sell"]
+    assert a.plan == buy
+    assert (buy.side, buy.entry, buy.stop, buy.target) == (1, 1.10012, 1.09862, 1.10312)
+    assert (sell.side, sell.entry, sell.stop, sell.target) == (-1, 1.10000, 1.10150, 1.09700)
+    assert sell.volume == 0.16 and sell.risk_amount == pytest.approx(24.0)
+
+
+def test_last_trigger_stays_visible_with_the_filter_that_blocked_it(cfg, broker):
+    frame = features()
+    frame.loc[20, ["raw_signal", "block"]] = [-1, "trend"]  # 9 bars before the last one
+    t = advice_for(cfg, broker, frame).last_trigger
+    assert (t["side"], t["bars_ago"], t["taken"]) == (-1, 9, False)
+    assert t["blocked_by"] == "against higher-timeframe trend"
+    # sold at 1.0994, now 1.10012 to buy back: against it by 0.00072 / (1.5 x 0.0010)
+    assert t["r_since"] == pytest.approx(-0.48)
+
+    old = features()
+    old.loc[5, "raw_signal"] = 1  # outside the 12-bar lookback
+    assert advice_for(cfg, broker, old).last_trigger is None
+
+    taken = advice_for(cfg, broker, features({"signal": 1, "raw_signal": 1})).last_trigger
+    assert taken["taken"] and taken["blocked_by"] == "" and taken["bars_ago"] == 0
 
 
 # --- recent signals -------------------------------------------------------------------------------
@@ -277,6 +303,36 @@ def test_order_refused_when_the_advice_disagrees(cfg, broker, fake):
     assert fake.sent == []
 
 
+def test_manual_order_takes_the_users_side_with_the_engines_sizing(cfg, broker, fake):
+    """No bot signal and the bot is watching buys; the user sells on their own call."""
+    monitor = primed(Monitor(live_cfg(cfg), broker, [SYMBOL], live_flag=True), features())
+    assert "not advised" in monitor.execute(SYMBOL, -1)["message"]  # still refused as a bot trade
+    result = monitor.execute(SYMBOL, -1, manual=True)
+    assert result["ok"] and result["message"].startswith("Manual SELL 0.16")
+    (order,) = fake.sent
+    assert order["type"] == fake.ORDER_TYPE_SELL
+    assert (order["volume"], order["sl"], order["tp"], order["comment"]) == (
+        0.16,
+        1.1015,
+        1.097,
+        "tradebot manual",
+    )
+
+
+def test_manual_orders_still_obey_the_gate_and_the_risk_rules(cfg, broker, fake):
+    dry = primed(Monitor(cfg, broker, [SYMBOL], live_flag=True), features())
+    assert "dry_run" in dry.execute(SYMBOL, 1, manual=True)["message"]
+
+    outside = replace(live_cfg(cfg), schedule=replace(cfg.schedule, session="asia"))
+    blocked = primed(Monitor(outside, broker, [SYMBOL], live_flag=True), features())
+    assert "blocked by a risk rule: session" in blocked.execute(SYMBOL, 1, manual=True)["message"]
+
+    tiny = replace(live_cfg(cfg), risk=replace(cfg.risk, risk_percent=0.01))
+    unsizable = primed(Monitor(tiny, broker, [SYMBOL], live_flag=True), features())
+    assert "minimum lot" in unsizable.execute(SYMBOL, 1, manual=True)["message"]
+    assert fake.sent == []
+
+
 def test_clean_handles_numpy_nan_and_datetimes():
     import numpy as np
 
@@ -304,8 +360,8 @@ class StubMonitor:
     def chart(self, symbol):
         return {"symbol": symbol, "bars": []} if symbol == "EURUSD" else None
 
-    def submit(self, symbol, side):
-        self.orders.append((symbol, side))
+    def submit(self, symbol, side, manual=False):
+        self.orders.append((symbol, side, manual) if manual else (symbol, side))
         return {"ok": True, "message": "placed"}
 
 
@@ -372,6 +428,13 @@ def test_valid_order_reaches_the_monitor(server):
     status, data, _ = call(server, "POST", "/api/order", {"symbol": "EURUSD", "side": -1}, headers)
     assert status == 200 and json.loads(data)["ok"]
     assert server.monitor.orders == [("EURUSD", -1)]
+
+
+def test_manual_flag_reaches_the_monitor_only_when_true(server):
+    headers = {TOKEN_HEADER: server.token}
+    call(server, "POST", "/api/order", {"symbol": "EURUSD", "side": -1, "manual": True}, headers)
+    call(server, "POST", "/api/order", {"symbol": "EURUSD", "side": 1, "manual": "yes"}, headers)
+    assert server.monitor.orders == [("EURUSD", -1, True), ("EURUSD", 1)]
 
 
 def test_malformed_order_is_a_400(server):
