@@ -544,7 +544,8 @@ function renderAdvice(row) {
     : el("div", { class: "when" });
   const parts = [
     el("span", { class: `badge big ${a.action}`, text: a.action }),
-    el("div", {}, el("div", { class: "headline", text: a.headline }), el("div", { class: "detail", text: a.detail })),
+    el("div", {}, el("div", { class: "headline", text: a.headline }), el("div", { class: "detail", text: a.detail }),
+      a.direction_note ? el("div", { class: "detail", text: a.direction_note }) : null),
     when,
   ];
   if (a.blocker && a.action !== "SKIP") {

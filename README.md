@@ -384,7 +384,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 124 tests
+pytest --cov=tradebot      # 125 tests
 ruff check . && ruff format --check .
 ```
 

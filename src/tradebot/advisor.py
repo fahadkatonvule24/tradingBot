@@ -72,6 +72,8 @@ class Advice:
     blocker: str | None = None
     plan: TradePlan | None = None
     entries_from: datetime | None = None
+    direction_note: str = ""
+    """Why only one direction is being considered, when the chart may look like the other."""
     """When trading hours are closed: the first bar close at which an entry is allowed again."""
 
 
@@ -172,6 +174,7 @@ def advise(
         "blocker": blocker,
         "plan": plan,
         "entries_from": entries_from,
+        "direction_note": direction_note(row, p, side, config.timeframe),
     }
 
     if signal:
@@ -191,6 +194,24 @@ def advise(
             actionable=False, **common,
         )  # fmt: skip
     return Advice(symbol, "WAIT", "No setup yet", trigger, actionable=False, **common)
+
+
+def direction_note(row: pd.Series, p: StrategyParams, side: int, timeframe: str) -> str:
+    """Explain a trend-filtered direction, and say so plainly when the chart is moving against it."""
+    if not (p.use_trend_filter and "trend" in FILTERS[p.name]) or int(row["trend"]) != side:
+        return ""
+    allowed, other = ("buys", "sell") if side > 0 else ("sells", "buy")
+    note = (
+        f"Only {allowed} are considered here: the {p.trend_timeframe} trend is {'up' if side > 0 else 'down'} "
+        f"(price is {'above' if side > 0 else 'below'} its {p.trend_timeframe} EMA {p.trend_ema})."
+    )
+    chart_up = row["ema_fast"] > row["ema_slow"]
+    if chart_up != (side > 0):
+        note += (
+            f" The {timeframe} chart is moving {'up' if chart_up else 'down'}, against that trend, so {other} "
+            f"triggers are filtered out until the {p.trend_timeframe} trend turns."
+        )
+    return note
 
 
 def watch_side(row: pd.Series, p: StrategyParams) -> int:
@@ -253,7 +274,8 @@ def filter_checks(features: pd.DataFrame, p: StrategyParams, side: int) -> list[
     if "macd" in applicable and p.use_macd:
         hist = float(row["macd_hist"])
         checks.append(Check("Momentum", bool(np.sign(hist) == side),
-                            f"MACD histogram {'positive' if hist > 0 else 'negative'}"))  # fmt: skip
+                            f"MACD histogram {'positive' if hist > 0 else 'negative'}, "
+                            f"needs {'positive to buy' if side > 0 else 'negative to sell'}"))  # fmt: skip
     if "rsi" in applicable:
         if side > 0:
             ok, need = row["rsi"] <= p.rsi_buy_max, f"≤ {p.rsi_buy_max:g} to buy"

@@ -108,6 +108,21 @@ def test_no_setup_explains_the_next_trigger(cfg, broker):
     assert down.side == -1 and "closes below EMA 50" in down.trigger
 
 
+def test_direction_note_explains_a_chart_that_looks_the_other_way(cfg, broker):
+    """Regression for a real confusion: H1 rising (fast EMA above slow) while the H4 trend is down."""
+    against = advice_for(cfg, broker, features({"trend": -1}))
+    assert against.side == -1
+    assert "Only sells are considered here: the H4 trend is down" in against.direction_note
+    assert (
+        "M15 chart is moving up, against that trend, so buy triggers are filtered out"
+        in against.direction_note
+    )
+    aligned = advice_for(cfg, broker, features())  # trend up, chart up
+    assert aligned.direction_note.endswith("(price is above its H4 EMA 200).")
+    off = replace(cfg, strategy=replace(cfg.strategy, use_trend_filter=False))
+    assert advice_for(off, broker, features()).direction_note == ""
+
+
 def test_stale_bars_mean_market_closed(cfg, broker, fake):
     fake.utc_now = NOW + timedelta(hours=2)
     a = advice_for(cfg, broker, features(), now=fake.utc_now)
