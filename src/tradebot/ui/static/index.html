@@ -111,6 +111,9 @@ button { font: inherit; color: inherit; }
 .row2 { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; }
 .row3 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .bottom { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
+.bottom.single { grid-template-columns: minmax(0, 1fr); padding-top: 0; }
+.result { display: inline-flex; align-items: center; gap: 6px; }
+.icon-btn.text { font-size: 12px; white-space: nowrap; }
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow);
   padding: 14px 16px; min-width: 0;
@@ -266,6 +269,7 @@ dialog .actions .go { border: 0; font-weight: 650; }
   <div class="chips" id="chips"></div>
   <div class="account" id="account"></div>
   <div class="gate" id="gate"><span class="dot"></span><span>Connecting to MetaTrader 5…</span></div>
+  <button class="icon-btn text" id="alerts" type="button" title="Browser notification when a BUY or SELL appears">Alerts off</button>
   <button class="icon-btn" id="theme" type="button" title="Switch theme" aria-label="Switch theme">◐</button>
 </header>
 
@@ -295,8 +299,11 @@ dialog .actions .go { border: 0; font-weight: 650; }
 </main>
 
 <section class="bottom">
-  <div class="card"><h2>Open positions</h2><div id="positions" class="table-scroll"></div></div>
+  <div class="card"><h2>Recent signals</h2><div id="signals"></div></div>
   <div class="card"><h2>Activity</h2><div id="activity"></div></div>
+</section>
+<section class="bottom single">
+  <div class="card"><h2>Open positions</h2><div id="positions" class="table-scroll"></div></div>
 </section>
 <footer id="footer">Advice comes from the bot's own engine and risk rules. It is not financial advice; the README documents that these strategies lost money out-of-sample.</footer>
 
@@ -455,7 +462,9 @@ function render() {
     $("#advice").replaceChildren(el("div", { class: "muted", text: `${row.symbol}: ${row.error}` }));
   }
   renderPositions();
+  renderSignals();
   renderActivity();
+  announce();
   drawChart();
 }
 
@@ -643,6 +652,75 @@ function renderPositions() {
       el("td", { class: "muted", text: p.bot ? "bot" : "manual" }));
   });
   $("#positions").replaceChildren(el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
+}
+
+function renderSignals() {
+  const rows = [];
+  let tradeable = 0, weeks = 0;
+  for (const sym of state.symbols) {
+    if (!sym.history) continue;
+    tradeable += sym.history.tradeable;
+    weeks = Math.max(weeks, sym.history.weeks);
+    for (const item of sym.history.items) rows.push({ ...item, symbol: sym.symbol, digits: sym.digits });
+  }
+  rows.sort((a, b) => (a.time < b.time ? 1 : -1));
+  if (!rows.length) { $("#signals").replaceChildren(el("div", { class: "empty", text: "No signals in the loaded history yet." })); return; }
+  const summary = el("div", { class: "fine", style: "margin:0 0 10px" },
+    `${tradeable} signals inside trading hours in the last ${Math.round(weeks)} weeks across all symbols: about ${(tradeable / weeks).toFixed(1)} a week. ` +
+    `Each one shows as BUY or SELL for a single ${state.timeframe} bar, so WAIT is the normal state.`);
+  const when = (iso) => { const d = parseTime(iso); return `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${localTime(iso)}`; };
+  const r = (v) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}R`;
+  const result = (x) => {
+    const label = x.outcome === "target" ? `Target first (${r(x.r)})` : x.outcome === "stop" ? `Stop first (${r(x.r)})` : `Still open (${r(x.r)})`;
+    const mark = x.outcome === "target" ? el("span", { class: "mark ok", text: "✓" }) : x.outcome === "stop" ? el("span", { class: "mark no", text: "✕" }) : el("span", { class: "mark", text: "…" });
+    return el("span", { class: "result" }, mark, label + (x.blocked ? " · outside trading hours, not traded" : ""));
+  };
+  const head = el("tr", {}, ...["When", "Symbol", "Side", "Entry", "What happened next"].map((h, i) => el("th", { class: i === 3 ? "n" : "", text: h })));
+  const body = rows.slice(0, 12).map((x) => el("tr", {},
+    el("td", { class: "muted", text: when(x.time) }),
+    el("td", { text: x.symbol }),
+    el("td", {}, el("span", { class: `badge ${x.side > 0 ? "BUY" : "SELL"}`, text: x.side > 0 ? "BUY" : "SELL" })),
+    el("td", { class: "n", text: px(x.entry, x.digits) }),
+    el("td", {}, result(x))));
+  $("#signals").replaceChildren(summary,
+    el("div", { class: "table-scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body))),
+    el("div", { class: "fine", text: "\"What happened next\" is which was touched first, the stop or the full target, before costs and without the breakeven, partial and trailing rules." }));
+}
+
+// --- alerts ----------------------------------------------------------------------------------
+let alertsOn = false;
+const announced = {};
+try { alertsOn = localStorage.getItem("tradebot-alerts") === "on" && "Notification" in window && Notification.permission === "granted"; } catch (e) { /* storage blocked */ }
+function showAlertsState() { $("#alerts").textContent = alertsOn ? "Alerts on" : "Alerts off"; }
+showAlertsState();
+$("#alerts").addEventListener("click", async () => {
+  if (!("Notification" in window)) { toast("This browser does not support notifications."); return; }
+  if (alertsOn) alertsOn = false;
+  else {
+    const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+    alertsOn = permission === "granted";
+    if (!alertsOn) toast("Notifications are blocked for this page. Allow them in the browser's site settings.");
+    else toast("Alerts on: you'll get a notification when a BUY or SELL appears. Keep this tab open.");
+  }
+  try { localStorage.setItem("tradebot-alerts", alertsOn ? "on" : "off"); } catch (e) { /* ignore */ }
+  showAlertsState();
+});
+function announce() {
+  const live = state.symbols.filter((sym) => sym.advice && sym.advice.actionable);
+  document.title = live.length ? `${live.map((sym) => `${sym.advice.action} ${sym.symbol}`).join(", ")} · tradebot advisor` : "tradebot advisor";
+  for (const sym of live) {
+    const key = `${sym.symbol}:${sym.advice.bar_time}`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    const plan = sym.advice.plan;
+    try {
+      new Notification(`${sym.advice.action} ${sym.symbol}`, {
+        body: `Entry ${px(plan.entry, sym.digits)} · stop ${px(plan.stop, sym.digits)} · target ${px(plan.target, sym.digits)} · ${plan.volume} lots`,
+        tag: key,
+      });
+    } catch (e) { /* notifications unavailable */ }
+  }
 }
 
 function renderActivity() {

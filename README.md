@@ -90,6 +90,8 @@ symbol, once a second:
 | Filter checklist | the strategy's filters (trend, ADX, MACD, RSI, room to S/R) on the last closed bar |
 | Chart | the last 120 bars plus the forming one, both EMAs, profit and loss zones, live price; hover for OHLC |
 | Track record | a backtest of the current config on your downloaded history, per symbol |
+| Recent signals | the last signals across all symbols and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
+| Alerts | optional browser notification and tab title when a BUY or SELL appears |
 | Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
 
 **The advice is the bot's own decision, not a separate indicator.** `advisor.py` calls the same
@@ -297,11 +299,28 @@ taken to the holdout, once, with the parameters its last research window chose:
 | Current default config | 166 | −7.5% | 0.70 | 36.7% | −0.19R |
 
 **The candidate failed and was not adopted.** Slower timeframes and letting winners run do not
-rescue these triggers; none of the twelve predicts direction on these six instruments. The
-default config is unchanged. Reproduce with `scripts/research_families.py` and
-`scripts/research_holdout.py`. The holdout has now been looked at, so the next idea needs fresh
-out-of-sample data: the honest source is forward testing in dry-run mode, which the journal
-already records.
+rescue these triggers; none of the twelve predicts direction on these six instruments.
+
+A second round tried three different *kinds* of idea, each tuned by walk-forward on the research
+years only and then run once on the same holdout through the real engine:
+
+| Idea | What it uses | Research (out-of-sample folds) | Holdout, Nov 2024 – Nov 2026 |
+|---|---|---|---|
+| **Fade** (H1) | mean reversion: trade against a move stretched ≥ 2 ATR from EMA 20 with RSI at an extreme | 334 trades, −0.10R each, t = −2.0 | 239 trades, 47.7% winners, **−4.3%**, PF 0.85 |
+| **Rates** (D1) | different information: 3-month interbank rate differentials (OECD via FRED), traded monthly | 129 trades, −0.07R each, t = −0.6 | 32 trades, 34.4% winners, **−1.7%**, PF 0.58 |
+| **Machine learning** (H1) | gradient boosting on the bot's 18 indicator features, predicting whether +1.5 ATR or −1.5 ATR comes first | 539 trades at its most confident, +0.00R each, t = +0.1 | 57 trades, 31.6% winners, **−5.0%**, PF 0.43 |
+
+The machine-learning result answers "can it tell a buy from a sell?" most directly. Across
+174,599 research-period bars it was right **50.4%** of the time, and 50.8% on 72,589 holdout
+bars. On the 1% of bars where it was most confident it reached 55.2% in research, then 48.7%
+on the holdout: the confidence was fitted noise.
+
+Fifteen strategy variants across five kinds of idea have now been tested this way and none
+predicts direction on these instruments after costs. **The default config is unchanged.**
+Reproduce with `scripts/research_families.py`, `scripts/research_holdout.py` and
+`scripts/research_round2.py` (`pip install -e ".[research]"`). The holdout has now been used
+for four final tests, so the next idea needs fresh out-of-sample data: the honest source is
+forward testing in dry-run mode, which the journal already records.
 
 So the bot is ready to run, and the research tooling says plainly that these signal sets are not
 worth trading with real money. Finding that out cheaply is the point of a backtester. New ideas
@@ -365,7 +384,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 121 tests
+pytest --cov=tradebot      # 124 tests
 ruff check . && ruff format --check .
 ```
 

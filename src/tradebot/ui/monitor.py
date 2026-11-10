@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from tradebot import __version__
-from tradebot.advisor import WORD, Advice, advise, pip_size
+from tradebot.advisor import WORD, Advice, advise, pip_size, recent_signals
 from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
 from tradebot.config import BotConfig
 from tradebot.engine import Engine
@@ -67,6 +67,7 @@ class Monitor:
         self._state: dict[str, Any] = {"ready": False, "version": __version__}
         self._features: dict[str, pd.DataFrame] = {}
         self._fetched: dict[str, float] = {}
+        self._recent: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
         self._orders: queue.Queue[_Order] = queue.Queue()
@@ -189,7 +190,18 @@ class Monitor:
             "spark": [*features["close"].tail(SPARK_BARS).round(spec.digits).tolist(), tick.bid],
             "forming": forming(symbol, self.config.timeframe) if forming else None,
             "advice": advice,
+            "history": self._history(symbol, features),
         }
+
+    def _history(self, symbol: str, features: pd.DataFrame) -> dict[str, Any]:
+        """Recent signals and their simple outcomes, recomputed when a new bar arrives."""
+        key = features["time"].iloc[-1]
+        cached = self._recent.get(symbol)
+        if cached is None or cached[0] != key:
+            params = self.config.for_symbol(symbol)
+            cached = (key, recent_signals(features, params, self.config.schedule, self.config.bar_minutes))
+            self._recent[symbol] = cached
+        return cached[1]
 
     def _spec(self, symbol: str, now: datetime) -> SymbolSpec:
         cached = self._specs.get(symbol)

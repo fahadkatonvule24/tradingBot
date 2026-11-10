@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tradebot"
-version = "3.2.0"
+version = "3.3.0"
 description = "MetaTrader 5 trading bot with one engine for live trading and backtests, walk-forward optimisation and layered risk controls."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.5"]
+research = ["scikit-learn>=1.4"]
 
 [project.scripts]
 tradebot = "tradebot.cli:main"

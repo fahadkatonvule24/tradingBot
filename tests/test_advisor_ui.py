@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 from conftest import FakeMT5, bar
 
-from tradebot.advisor import advise, filter_checks, pip_size
+from tradebot.advisor import advise, filter_checks, pip_size, recent_signals
 from tradebot.broker.mt5 import MT5Broker
 from tradebot.config import BotConfig, MT5Login, ScheduleParams, StrategyParams
 from tradebot.engine import Engine, EntryPlan
@@ -145,6 +145,55 @@ def test_pip_size():
 
     assert pip_size(preset_spec("EURUSD")) == pytest.approx(0.0001)
     assert pip_size(preset_spec("XAUUSD")) == pytest.approx(0.01)
+
+
+# --- recent signals -------------------------------------------------------------------------------
+
+
+def history(frame, cfg, **schedule):
+    sched = replace(cfg.schedule, **schedule) if schedule else cfg.schedule
+    return recent_signals(frame, cfg.for_symbol(SYMBOL), sched, cfg.bar_minutes)
+
+
+def test_recent_signal_outcomes(cfg):
+    """Entry 1.0992 at bar 10: stop 1.0977 (1.5 ATR), target 1.1022 (3 ATR)."""
+    frame = features()
+    frame.loc[10, "signal"] = 1
+    (still_open,) = history(frame, cfg)["items"]
+    assert still_open["outcome"] == "open" and still_open["r"] == pytest.approx(0.2533, abs=1e-3)
+    assert (still_open["stop"], still_open["target"]) == (pytest.approx(1.0977), pytest.approx(1.1022))
+
+    frame.loc[15, "high"] = 1.1030
+    (hit,) = history(frame, cfg)["items"]
+    assert (hit["outcome"], hit["r"]) == ("target", pytest.approx(2.0))
+
+    frame.loc[12, "low"] = 1.0970  # the stop is touched three bars earlier
+    assert history(frame, cfg)["items"][0]["outcome"] == "stop"
+
+    both = features()
+    both.loc[10, "signal"] = -1  # sell: stop 1.1007, target 1.0962
+    both.loc[11, ["high", "low"]] = [1.1010, 1.0960]
+    item = history(both, cfg)["items"][0]
+    assert (item["outcome"], item["r"]) == ("stop", -1.0)  # one bar touching both counts as the stop
+
+
+def test_recent_signals_newest_first_and_schedule_aware(cfg):
+    frame = features()
+    frame.loc[[5, 20], "signal"] = [1, -1]
+    out = history(frame, cfg)
+    assert [i["side"] for i in out["items"]] == [-1, 1] and out["tradeable"] == 2
+    assert all(i["blocked"] is None for i in out["items"])
+    asia = history(frame, cfg, session="asia")  # 23:00-08:00 UTC; these bars close around 06:00 and 09:45
+    assert asia["tradeable"] == 1
+    assert asia["items"][0]["blocked"] == "09:00 UTC outside 23-08" and asia["items"][1]["blocked"] is None
+
+
+def test_snapshot_includes_signal_history(cfg, broker):
+    monitor = Monitor(cfg, broker, [SYMBOL])
+    monitor.refresh()
+    row = monitor.snapshot()["symbols"][0]
+    assert set(row["history"]) == {"items", "tradeable", "weeks"}
+    json.dumps(row["history"], allow_nan=False)
 
 
 # --- monitor --------------------------------------------------------------------------------------

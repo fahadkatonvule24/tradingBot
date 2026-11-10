@@ -85,6 +85,43 @@ def next_entry_time(schedule: ScheduleParams, after: datetime, bar: timedelta) -
     return None
 
 
+def recent_signals(
+    features: pd.DataFrame, params: SymbolParams, schedule: ScheduleParams, bar_minutes: int, limit: int = 8
+) -> dict:
+    """The latest signals in the loaded window and what happened next, so a screen full of WAIT
+    still shows what the strategy does and how often.
+
+    The outcome is deliberately simple: which was touched first, the stop or the full target
+    (the stop, if one bar touches both). It ignores spread, commission and the breakeven, partial
+    and trailing rules, so it is a guide to direction, not a P/L statement.
+    """
+    time_, signal = features["time"], features["signal"].to_numpy()
+    high, low, close, atr_ = (features[k].to_numpy(dtype=float) for k in ("high", "low", "close", "atr"))
+    bar = pd.Timedelta(minutes=bar_minutes)
+    fired = np.flatnonzero(signal != 0)
+    tradeable = [i for i in fired if schedule.closed((time_.iloc[i] + bar).to_pydatetime()) is None]
+    items = []
+    for i in fired[::-1][:limit]:
+        side, entry = int(signal[i]), close[i]
+        sl, tp = params.risk.sl_atr * atr_[i], params.risk.tp_atr * atr_[i]
+        stop, target = entry - side * sl, entry + side * tp
+        outcome, r = "open", (close[-1] - entry) * side / sl
+        for j in range(i + 1, len(close)):
+            if (low[j] <= stop) if side > 0 else (high[j] >= stop):
+                outcome, r = "stop", -1.0
+                break
+            if (high[j] >= target) if side > 0 else (low[j] <= target):
+                outcome, r = "target", tp / sl
+                break
+        closed_at = (time_.iloc[i] + bar).to_pydatetime()
+        items.append(
+            {"time": closed_at, "side": side, "entry": entry, "stop": stop, "target": target,
+             "outcome": outcome, "r": r, "blocked": schedule.closed(closed_at)}
+        )  # fmt: skip
+    weeks = max((time_.iloc[-1] - time_.iloc[0]) / pd.Timedelta(weeks=1), 1e-9)
+    return {"items": items, "tradeable": len(tradeable), "weeks": float(weeks)}
+
+
 def pip_size(spec: SymbolSpec) -> float:
     """FX quotes with 3 or 5 digits have a fractional pip; everything else is quoted in points."""
     return spec.point * 10 if spec.digits in (3, 5) else spec.point
