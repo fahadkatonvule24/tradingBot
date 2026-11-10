@@ -93,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
                 "--write-config", type=Path, help="write the config with the latest tuned parameters here"
             )
 
+    sub.add_parser("telegram", help="set up and test phone alerts through a Telegram bot")
+
     journal = sub.add_parser("journal", help="summarise the trade journal")
     journal.add_argument("--days", type=int, default=7)
     return parser
@@ -141,7 +143,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config.validate()
         handler = {
             "check": cmd_check, "run": cmd_run, "ui": cmd_ui, "fetch": cmd_fetch, "backtest": cmd_backtest,
-            "optimize": cmd_optimize, "journal": cmd_journal,
+            "optimize": cmd_optimize, "journal": cmd_journal, "telegram": cmd_telegram,
         }[args.command]  # fmt: skip
         return handler(config, args)
     except (ConfigError, FileNotFoundError, ValueError) as exc:
@@ -235,10 +237,66 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
         else:
             log.info("DRY RUN: %s. Signals are logged and journalled; no orders are sent.", gate.reason)
         engine = Engine(config, broker, execute=gate.execute, journal=journal, live=True)
-        LiveRunner(config, broker, engine, symbols).run(once=args.once)
+        notifier = _notifier()
+        try:
+            LiveRunner(config, broker, engine, symbols, notifier=notifier).run(once=args.once)
+        finally:
+            notifier.close()
     finally:
         journal.close()
         broker.shutdown()
+    return 0
+
+
+def _notifier():
+    from tradebot.notify import Notifier
+
+    notifier = Notifier.from_env()
+    log.info(
+        "Telegram alerts: %s", "on" if notifier.enabled else "off (run `tradebot telegram` to set them up)"
+    )
+    return notifier
+
+
+def cmd_telegram(config: BotConfig, args: argparse.Namespace) -> int:
+    """Guide the setup one step at a time; the token is never printed."""
+    import os
+
+    from tradebot.notify import CHAT_ENV, TOKEN_ENV, TelegramError, call, discover_chats
+
+    token, chat = os.environ.get(TOKEN_ENV), os.environ.get(CHAT_ENV)
+    if not token:
+        console.print(
+            "[bold]Phone alerts are not set up yet.[/]\n"
+            "1. In Telegram, message [bold]@BotFather[/], send /newbot and follow the prompts. It gives you a token.\n"
+            f"2. Add this line to a file named .env in this folder:  {TOKEN_ENV}=<the token>\n"
+            "3. Open your new bot in Telegram and send it any message (for example: hi).\n"
+            "4. Run [bold]tradebot telegram[/] again."
+        )
+        return 1
+    try:
+        if not chat:
+            chats = discover_chats(token)
+            if not chats:
+                console.print(
+                    "The token works, but nobody has messaged the bot yet. Send it any message in Telegram, then run this again."
+                )
+                return 1
+            console.print("The token works. Add one of these to .env, then run this again:")
+            for chat_id, name in chats:
+                console.print(f"  {CHAT_ENV}={chat_id}    [grey50]# {escape(name)}[/]")
+            return 1
+        call(
+            token,
+            "sendMessage",
+            {"chat_id": chat, "text": f"tradebot {__version__}: test message. Phone alerts are set up."},
+        )
+    except TelegramError as exc:
+        console.print(f"[bold red]error:[/] {escape(str(exc))}")
+        return 1
+    console.print(
+        "[green]Test message sent.[/] `tradebot ui` and `tradebot run` will now send alerts to this chat."
+    )
     return 0
 
 
@@ -250,7 +308,10 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.ui.server import DashboardServer
 
     broker, _, symbols = _connect(config)
-    monitor = Monitor(config, broker, symbols, live_flag=args.live, journal_path=config.journal)
+    notifier = _notifier()
+    monitor = Monitor(
+        config, broker, symbols, live_flag=args.live, journal_path=config.journal, notifier=notifier
+    )
     names = {broker_name: wanted for wanted in config.symbols if (broker_name := broker.resolve(wanted))}
     worker = threading.Thread(target=monitor.run, name="mt5", daemon=True)
     try:
@@ -276,6 +337,7 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
         server.server_close()
         monitor.stop()
         worker.join(timeout=10)
+        notifier.close()
         broker.shutdown()
     return 0
 

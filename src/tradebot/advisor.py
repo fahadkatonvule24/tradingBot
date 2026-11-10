@@ -79,6 +79,8 @@ class Advice:
     """The plan for each side ("buy", "sell") at the live quote, for a trade the user chooses."""
     last_trigger: dict | None = None
     """The most recent entry trigger in the last few bars, taken or filtered, and the move since."""
+    early: dict | None = None
+    """What the bar that is still forming would do: see ``early_warning``."""
     """When trading hours are closed: the first bar close at which an entry is allowed again."""
 
 
@@ -145,7 +147,9 @@ def advise(
     features: pd.DataFrame,
     tick: Tick,
     now: datetime,
+    preview: pd.DataFrame | None = None,
 ) -> Advice:
+    """``preview`` (optional) is the same features with the forming bar appended at the current price."""
     config = engine.config
     p = params.strategy
     row = features.iloc[-1]
@@ -189,6 +193,7 @@ def advise(
         "direction_note": direction_note(row, p, side, config.timeframe),
         "plans": plans,
         "last_trigger": last_trigger(features, params, tick, config.bar_minutes),
+        "early": early_warning(features, preview, params, spec, config.bar_minutes),
     }
 
     if signal:
@@ -217,6 +222,53 @@ def advise(
         outcome = "taken" if recent["taken"] else f"blocked ({recent['blocked_by']})"
         return Advice(symbol, "WAIT", f"{word} trigger {ago}, {outcome}", trigger, actionable=False, **common)
     return Advice(symbol, "WAIT", "No setup yet", trigger, actionable=False, **common)
+
+
+def cross_level(features: pd.DataFrame, p: StrategyParams) -> tuple[int, float] | None:
+    """For the EMA crossover: which way the averages can cross next, and the close that does it.
+
+    With alpha = 2 / (n + 1), a bar closing at c moves an EMA to alpha * c + (1 - alpha) * previous.
+    Setting the new fast and slow EMAs equal and solving for c gives the exact closing price at
+    which the forming bar produces a cross.
+    """
+    if p.name != "ema_cross":
+        return None
+    fast, slow = float(features["ema_fast"].iloc[-1]), float(features["ema_slow"].iloc[-1])
+    if not (np.isfinite(fast) and np.isfinite(slow)) or fast == slow:
+        return None
+    a_fast, a_slow = 2 / (p.fast_ema + 1), 2 / (p.slow_ema + 1)
+    level = ((1 - a_slow) * slow - (1 - a_fast) * fast) / (a_fast - a_slow)
+    return (-1 if fast > slow else 1), level
+
+
+def early_warning(
+    features: pd.DataFrame,
+    preview: pd.DataFrame | None,
+    params: SymbolParams,
+    spec: SymbolSpec,
+    bar_minutes: int,
+) -> dict | None:
+    """A heads-up about the bar that is still forming. It is NOT a signal.
+
+    ``firing`` means a trigger would fire if the bar closed at the current price; it can vanish
+    before the close, which is why the bot only ever acts on closed bars. ``level`` is the closing
+    price that produces the trigger (EMA crossover only), so a setup can be watched as it builds.
+    """
+    out: dict = {"firing": False, "side": 0, "level": None, "passes": None, "blocked_by": "",
+                 "closes_at": None, "price": None}  # fmt: skip
+    cross = cross_level(features, params.strategy)
+    if cross:
+        out["side"], out["level"] = cross[0], spec.round_price(cross[1])
+    if preview is not None and len(preview):
+        row = preview.iloc[-1]
+        out["closes_at"] = (row["time"] + pd.Timedelta(minutes=bar_minutes)).to_pydatetime()
+        out["price"] = float(row["close"])
+        raw = int(row["raw_signal"])
+        if raw:
+            passes = bool(row["signal"] != 0)
+            out.update(firing=True, side=raw, passes=passes,
+                       blocked_by="" if passes else BLOCK_LABELS.get(row["block"], str(row["block"])))  # fmt: skip
+    return out if out["firing"] or out["level"] is not None else None
 
 
 TRIGGER_LOOKBACK = 12

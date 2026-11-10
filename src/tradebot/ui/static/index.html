@@ -531,6 +531,8 @@ function renderWatchlist() {
     const recentNote = recent && !row.advice.actionable
       ? `${recent.side > 0 ? "Buy" : "Sell"} trigger ${recent.bars_ago === 0 ? "on the last bar" : `${recent.bars_ago} bar${recent.bars_ago === 1 ? "" : "s"} ago`} · ${recent.taken ? "taken" : "blocked"}`
       : null;
+    const early = row.advice.early;
+    const formingNote = early && early.firing && !row.advice.actionable ? `${early.side > 0 ? "Buy" : "Sell"} trigger forming · not confirmed` : null;
     const pxEl = el("span", { class: "px", text: px(row.bid, row.digits) });
     const prev = lastBid[row.symbol];
     if (prev != null && prev !== row.bid) {
@@ -546,7 +548,8 @@ function renderWatchlist() {
       pxEl,
       el("span", { class: "chg muted", title: `Change over the last ${(row.spark || []).length - 1} ${state.timeframe} bars`, text: `${change > 0 ? "+" : change < 0 ? "−" : ""}${Math.abs(change).toFixed(2)}%` }),
       el("span", { class: "sub" }, el("span", { text: `spread ${distance(row, row.spread)}` }), sparkline(row)),
-      recentNote ? el("span", { class: "sub", style: "color:var(--text-2)", text: recentNote }) : null,
+      formingNote ? el("span", { class: "sub", style: "color:var(--text)", text: formingNote })
+        : recentNote ? el("span", { class: "sub", style: "color:var(--text-2)", text: recentNote }) : null,
     );
   });
   $("#watchlist").replaceChildren(...items);
@@ -567,13 +570,30 @@ function renderAdvice(row) {
     el("span", { class: `badge big ${a.action}`, text: badgeText(a) }),
     el("div", {}, el("div", { class: "headline", text: a.headline }), el("div", { class: "detail", text: a.detail }),
       a.direction_note ? el("div", { class: "detail", text: a.direction_note }) : null,
-      triggerLine(row)),
+      triggerLine(row), earlyLine(row)),
     when,
   ];
   if (a.blocker && a.action !== "SKIP") {
     parts.push(el("div", { class: "notice", text: `Entries are paused right now: ${a.blocker}.` }));
   }
   $("#advice").replaceChildren(...parts);
+}
+
+function earlyLine(row) {
+  const a = row.advice, e = a.early;
+  if (!e || a.actionable) return null;
+  const word = e.side > 0 ? "BUY" : "SELL";
+  const where = e.level != null ? ` if this ${state.timeframe} bar closes ${e.side > 0 ? "above" : "below"} ${px(e.level, row.digits)}` : "";
+  if (e.firing) {
+    const verdict = e.passes ? "The filters would pass it, so the bot would signal." : `The filters would block it (${e.blocked_by}).`;
+    return el("div", { class: "notice", style: "margin-top:6px" }, el("span", {},
+      el("strong", { text: `Forming, not confirmed: ${word} trigger` }),
+      `${where || " at the current price"}. It is decided when the bar closes at ${localTime(e.closes_at)} and can still disappear. ${verdict}`));
+  }
+  if (e.level == null) return null;
+  const away = Math.abs((e.side > 0 ? row.ask : row.bid) - e.level);
+  if (away > 2 * row.atr) return null;   // out of reach for this bar: the trigger text above covers it
+  return el("div", { class: "detail" }, el("strong", { text: "Early warning: " }), `a ${word} trigger fires${where} (${distance(row, away)} from the current price).`);
 }
 
 function triggerLine(row) {
@@ -769,6 +789,17 @@ function announce() {
     if (!alertsOn || Notification.permission !== "granted") continue;
     try { new Notification(`${badgeText(sym.advice)} · ${sym.symbol}`, { body: sym.advice.detail, tag: key }); } catch (e) { /* unavailable */ }
   }
+  for (const sym of state.symbols) {   // heads-up while the bar is still forming
+    const e = sym.advice && sym.advice.early;
+    if (!e || !e.firing || sym.advice.actionable) continue;
+    const key = `${sym.symbol}:${e.closes_at}:${e.side}:forming`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    const word = e.side > 0 ? "BUY" : "SELL";
+    const body = `Not confirmed. Decided at ${localTime(e.closes_at)}. ` + (e.passes ? "The filters would pass it." : `The filters would block it (${e.blocked_by}).`);
+    try { new Notification(`Forming: ${word} ${sym.symbol}`, { body, tag: key }); } catch (err) { /* unavailable */ }
+  }
 }
 
 function renderActivity() {
@@ -827,11 +858,14 @@ function drawChart() {
   const step = (W - pad.l - pad.r) / slots;
   const X = (i) => pad.l + step * (i + 0.5);
   const a = row.advice, plan = planFor(row);
+  // The trigger line: the close that would fire the next trigger, drawn only when it is near.
+  const rawTrig = a.early && a.early.level != null ? a.early.level : a.trigger_level;
+  const trig = rawTrig != null && Math.abs(rawTrig - row.bid) <= 4 * row.atr ? rawTrig : null;
   let lo = Infinity, hi = -Infinity;
   for (const b of bars) { lo = Math.min(lo, b.low); hi = Math.max(hi, b.high); }
   const levels = [row.bid];
   if (plan) levels.push(plan.stop, plan.target, plan.entry);
-  if (a.trigger_level != null) levels.push(a.trigger_level);
+  if (trig != null) levels.push(trig);
   for (const v of levels) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
   const span = hi - lo || 1;
   lo -= span * 0.05; hi += span * 0.05;
@@ -839,7 +873,7 @@ function drawChart() {
   const plotRight = W - pad.r;
 
   // grid + price axis (labels give way to the price tags drawn later)
-  const tagValues = [row.bid, a.trigger_level, ...(plan ? [plan.stop, plan.target, plan.entry] : [])].filter((v) => v != null);
+  const tagValues = [row.bid, trig, ...(plan ? [plan.stop, plan.target, plan.entry] : [])].filter((v) => v != null);
   ctx.lineWidth = 1;
   ctx.textBaseline = "middle";
   for (const t of niceTicks(lo, hi, Math.max(4, Math.floor((H - pad.t - pad.b) / 45)))) {
@@ -881,8 +915,8 @@ function drawChart() {
     }
     ctx.setLineDash([]);
   }
-  if (a.trigger_level != null) {
-    const y = Math.round(Y(a.trigger_level)) + 0.5;
+  if (trig != null) {
+    const y = Math.round(Y(trig)) + 0.5;
     ctx.strokeStyle = C.text2; ctx.setLineDash([2, 3]);
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(plotRight, y); ctx.stroke();
     ctx.setLineDash([]);
@@ -927,7 +961,7 @@ function drawChart() {
     tags.push({ v: plan.stop, label: `SL ${px(plan.stop, row.digits)}`, bg: C.down, fg: "#fff" });
     tags.push({ v: plan.entry, label: `In ${px(plan.entry, row.digits)}`, bg: C.surface2, fg: C.text });
   }
-  if (a.trigger_level != null) tags.push({ v: a.trigger_level, label: `Trig ${px(a.trigger_level, row.digits)}`, bg: C.surface2, fg: C.text2 });
+  if (trig != null) tags.push({ v: trig, label: `Trig ${px(trig, row.digits)}`, bg: C.surface2, fg: C.text2 });
   tags.forEach((t) => (t.y = Y(t.v)));
   tags.sort((p, q) => p.y - q.y);
   for (let i = 1; i < tags.length; i++) if (tags[i].y - tags[i - 1].y < 18) tags[i].y = tags[i - 1].y + 18;

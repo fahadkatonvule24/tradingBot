@@ -64,6 +64,7 @@ pip install -e ".[mt5]"            # the MetaTrader5 package is Windows-only
 
 tradebot check                     # connect to the open MT5 terminal, show account, symbols, signals
 tradebot ui                        # live advisor dashboard at http://127.0.0.1:8765 (advice only)
+tradebot telegram                  # optional: set up alerts to your phone
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
 tradebot run                       # keep running (dry run); Ctrl+C stops after the current cycle
 
@@ -97,13 +98,28 @@ symbol, once a second:
 | Buy / Sell switch on the plan | the same priced plan for either side, so a trade you choose yourself gets the bot's sizing, stop and target |
 | Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
 | Recent signals | the last triggers across all symbols, taken or blocked, and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
-| Alerts | optional browser notification and tab title when a BUY or SELL appears |
+| Early warning | while a bar is still forming: the exact close that would fire the next trigger, and a "forming, not confirmed" notice when the current price would fire it, with whether the filters would pass or block it |
+| Alerts | browser notifications, and optionally Telegram messages to your phone, when a signal fires, a filter blocks a trigger, a trigger is forming, or an order is placed |
 | Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
 
 **The advice is the bot's own decision, not a separate indicator.** `advisor.py` calls the same
 `Engine.entry_blocker` and `Engine.plan_entry` that `Engine.on_bar` runs before every live or
 backtest trade, so the side, lot size, stop and target on the page are exactly the order
 `tradebot run --live` would send at that moment.
+
+**Knowing early without acting early.** The bot decides only when a bar closes: a crossover on a
+bar that is still forming can appear and vanish several times, and v23 traded those. The early
+warning gives the heads-up without breaking that rule. For the EMA crossover the closing price
+that produces a cross has a closed form (with α = 2/(n+1), solve α_f·c + (1−α_f)·fast = α_s·c +
+(1−α_s)·slow for c); checked against 48,000 real H1 bars across the six symbols, that level
+predicts the actual trigger on 100% of them. The forming notice re-runs the real signal code with
+the forming bar appended at the current price, so it also says which filter would block it. It is
+labelled unconfirmed everywhere, and nothing is ever traded from it.
+
+**Alerts to your phone.** `tradebot telegram` walks through creating a Telegram bot and sends a
+test message. The token and chat id live in `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`),
+never in the committed config. Messages go out from a background thread so a slow network cannot
+delay trading; failures are logged and dropped, and the token is never written to a log.
 
 **The bot is the risk manager; direction can be yours.** The research below found no rule that
 predicts direction, and the filters block winners as readily as losers (removing the trend filter
@@ -192,6 +208,7 @@ src/tradebot/
 ├── live.py          trading loop and the live-trading gate
 ├── news.py          news-blackout calendar
 ├── journal.py       SQLite journal
+├── notify.py        Telegram alerts (background thread, token never logged)
 └── cli.py           `tradebot` command
 ```
 
@@ -399,7 +416,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 137 tests
+pytest --cov=tradebot      # 150 tests
 ruff check . && ruff format --check .
 ```
 
@@ -420,8 +437,8 @@ Linux and Windows without a terminal.
   they are not enough on their own; the tooling is built to evaluate better ideas honestly.
 - **News calendar is a JSON file you maintain.** An economic-calendar feed would be a natural
   addition.
-- **One process, one terminal.** The dashboard is local by design. Alerts (Telegram/email) when
-  advice turns to BUY or SELL would slot into the monitor's activity feed.
+- **One process, one terminal.** The dashboard is local by design; Telegram alerts are the only
+  thing that leaves the machine, and only if you configure them.
 
 ## Disclaimer
 

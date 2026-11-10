@@ -86,9 +86,15 @@ class Link:
             self.down_since, self.attempts = None, 0
 
 
+NOTIFY_KINDS = {"open", "dry_open", "close", "partial", "rejected"}
+
+
 class LiveRunner:
-    def __init__(self, config: BotConfig, broker: Broker, engine: Engine, symbols: list[str]) -> None:
+    def __init__(
+        self, config: BotConfig, broker: Broker, engine: Engine, symbols: list[str], notifier=None
+    ) -> None:
         self.config, self.broker, self.engine, self.symbols = config, broker, engine, symbols
+        self.notifier = notifier
         self._stop = threading.Event()
         self._link = Link(broker)
 
@@ -106,6 +112,10 @@ class LiveRunner:
                 if not self._link.ok():
                     return
                 log.exception("%s: cycle failed", symbol)
+        if self.notifier:
+            for event in self.engine.events:
+                if event.kind in NOTIFY_KINDS:
+                    self.notifier.send(f"{event.symbol}: {event.detail}")
         self.engine.events.clear()
 
     def _process(self, symbol: str) -> None:
@@ -148,6 +158,36 @@ def latest_features(broker: Broker, config: BotConfig, symbol: str) -> pd.DataFr
     if strategy.use_trend_filter and TIMEFRAME_MINUTES[strategy.trend_timeframe] > config.bar_minutes:
         htf = broker.bars(symbol, strategy.trend_timeframe, strategy.trend_ema * HTF_HISTORY_MULTIPLE)
     return compute_signals(bars, strategy, config.timeframe, htf)
+
+
+BAR_COLUMNS = ["time", "open", "high", "low", "close", "spread"]
+
+
+def preview_features(
+    broker: Broker, config: BotConfig, symbol: str, closed: pd.DataFrame
+) -> pd.DataFrame | None:
+    """Signals as they would be if the forming bar closed at the current price (None if there is none).
+
+    For the early warning only: nothing here is ever traded. If a higher-timeframe bar closes at
+    the same moment as the forming bar, it is included too, as it will be when the bar really closes.
+    """
+    forming = getattr(broker, "forming_bar", None)
+    bar = forming(symbol, config.timeframe) if forming else None
+    if bar is None or pd.Timestamp(bar["time"]) <= closed["time"].iloc[-1]:
+        return None
+    strategy = config.for_symbol(symbol).strategy
+    base = pd.concat(
+        [closed[BAR_COLUMNS], pd.DataFrame([{**bar, "spread": closed["spread"].iloc[-1]}])], ignore_index=True
+    )
+    htf = None
+    htf_minutes = TIMEFRAME_MINUTES[strategy.trend_timeframe]
+    if strategy.use_trend_filter and htf_minutes > config.bar_minutes:
+        htf = broker.bars(symbol, strategy.trend_timeframe, strategy.trend_ema * HTF_HISTORY_MULTIPLE)
+        closes = pd.Timestamp(bar["time"]) + pd.Timedelta(minutes=config.bar_minutes)
+        higher = forming(symbol, strategy.trend_timeframe)
+        if higher and pd.Timestamp(higher["time"]) + pd.Timedelta(minutes=htf_minutes) <= closes:
+            htf = pd.concat([htf, pd.DataFrame([{**higher, "spread": 0}])], ignore_index=True)
+    return compute_signals(base, strategy, config.timeframe, htf)
 
 
 def describe_bar(row: pd.Series) -> str:

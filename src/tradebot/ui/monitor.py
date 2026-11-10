@@ -28,13 +28,14 @@ from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
 from tradebot.config import BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
-from tradebot.live import Link, latest_features, trading_gate
+from tradebot.live import Link, latest_features, preview_features, trading_gate
 
 log = logging.getLogger(__name__)
 
 SPARK_BARS = 48
 CHART_BARS = 120
 SPEC_REFRESH = timedelta(minutes=5)
+PREVIEW_SECONDS = 3.0
 LOST_LINK = "Lost the connection to MetaTrader 5. Is the terminal open? Prices are frozen; retrying."
 
 
@@ -57,6 +58,7 @@ class Monitor:
         live_flag: bool = False,
         journal_path: str | Path | None = None,
         interval: float = 1.0,
+        notifier: Any = None,
     ) -> None:
         self.config, self.broker, self.symbols = config, broker, symbols
         self.live_flag = live_flag
@@ -72,6 +74,9 @@ class Monitor:
         self._recent: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._link = Link(broker)
         self._last_error: str | None = None
+        self.notifier = notifier
+        self._previews: dict[str, tuple[float, pd.DataFrame | None]] = {}
+        self._forming_seen: set[tuple[str, Any, int]] = set()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
         self._orders: queue.Queue[_Order] = queue.Queue()
@@ -188,8 +193,12 @@ class Monitor:
         spec = self._spec(symbol, now)
         tick = self.broker.tick(symbol)
         features = self._features_for(symbol, now)
-        advice = advise(self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now)
-        self._note(symbol, advice, now)
+        preview = self._preview_for(symbol, features)
+        advice = advise(
+            self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now, preview
+        )
+        self._note(symbol, advice, now, spec)
+        self._note_forming(symbol, advice, now, spec)
         last = features.iloc[-1]
         forming = getattr(self.broker, "forming_bar", None)
         return {
@@ -242,7 +251,51 @@ class Monitor:
             self._features[symbol] = features
         return features
 
-    def _note(self, symbol: str, advice: Advice, now: datetime) -> None:
+    def _preview_for(self, symbol: str, features: pd.DataFrame) -> pd.DataFrame | None:
+        """The forming bar's would-be signals, refreshed every few seconds (early warning only)."""
+        cached = self._previews.get(symbol)
+        if cached and time.monotonic() - cached[0] < PREVIEW_SECONDS:
+            return cached[1]
+        try:
+            preview = preview_features(self.broker, self.config, symbol, features)
+        except Exception:
+            log.debug("%s: preview failed", symbol, exc_info=True)
+            preview = None
+        self._previews[symbol] = (time.monotonic(), preview)
+        return preview
+
+    def _note_forming(self, symbol: str, advice: Advice, now: datetime, spec: SymbolSpec) -> None:
+        """Announce a forming trigger once per bar and side. It flickers; that is its nature."""
+        early = advice.early
+        if not early or not early["firing"] or advice.actionable:
+            return
+        key = (symbol, early["closes_at"], early["side"])
+        if key in self._forming_seen:
+            return
+        if len(self._forming_seen) > 500:
+            self._forming_seen.clear()
+        self._forming_seen.add(key)
+        word = WORD[early["side"]]
+        where = ""
+        if early["level"] is not None:
+            where = f" if the {self.config.timeframe} bar closes {'above' if early['side'] > 0 else 'below'} {early['level']:.{spec.digits}f}"
+        verdict = (
+            "the filters would pass it"
+            if early["passes"]
+            else f"the filters would block it ({early['blocked_by']})"
+        )
+        text = (
+            f"{word} trigger forming{where}. Decided at {early['closes_at']:%H:%M} UTC; "
+            f"price now {early['price']:.{spec.digits}f}; {verdict}. Not confirmed, it can still disappear."
+        )
+        self.activity.append({"time": now, "symbol": symbol, "action": "FORMING", "text": text})
+        self._send(f"FORMING (unconfirmed) · {symbol}\n{text}")
+
+    def _send(self, text: str) -> None:
+        if self.notifier:
+            self.notifier.send(text)
+
+    def _note(self, symbol: str, advice: Advice, now: datetime, spec: SymbolSpec | None = None) -> None:
         """Log advice changes worth seeing: new signals, skips and the return to waiting."""
         key = f"{advice.action}:{advice.bar_time}"
         previous = self._last_action.get(symbol)
@@ -259,6 +312,21 @@ class Monitor:
                 "text": f"{advice.headline}. {advice.detail}",
             }
         )
+        if advice.action in ("BUY", "SELL", "BLOCKED", "SKIP"):
+            self._send(self._alert_text(symbol, advice, spec))
+
+    @staticmethod
+    def _alert_text(symbol: str, advice: Advice, spec: SymbolSpec | None) -> str:
+        digits = spec.digits if spec else 5
+        lines = [f"{advice.action} · {symbol}", f"{advice.headline}. {advice.detail}"]
+        plan = advice.plan
+        if plan and plan.volume and advice.action != "SKIP":
+            lines.append(
+                f"{WORD[plan.side]} plan: entry ~{plan.entry:.{digits}f} · SL {plan.stop:.{digits}f} · "
+                f"TP {plan.target:.{digits}f} · {plan.volume} lots · risk {plan.risk_amount:,.2f} · "
+                f"target {plan.reward_amount:,.2f}"
+            )
+        return "\n".join(lines)
 
     # --- orders --------------------------------------------------------------------------------
 
@@ -317,6 +385,7 @@ class Monitor:
             {"time": now, "symbol": symbol, "action": "ORDER" if result.ok else "REJECTED", "text": text}
         )
         log.warning("%s %s", symbol, text)
+        self._send(f"ORDER · {symbol}\n{text}")
         return {"ok": result.ok, "message": text, "ticket": result.ticket, "price": result.price}
 
     # --- history -------------------------------------------------------------------------------
