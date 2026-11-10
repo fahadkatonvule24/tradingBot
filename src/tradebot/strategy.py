@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from tradebot.broker.clock import NEW_YORK
 from tradebot.config import TIMEFRAME_MINUTES, StrategyParams
 from tradebot.indicators import adx, atr, ema, macd, rsi
 
@@ -33,15 +34,32 @@ BLOCK_LABELS = {
 }
 
 
+FX_DAY_START_NEW_YORK = pd.Timedelta(hours=17)
+"""The FX trading day starts at 17:00 New York, which is 00:00 on most brokers' server clocks."""
+
+
 def resample(bars: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    """Aggregate bars to a higher timeframe. Bars are labelled by their open time (MT5 style)."""
-    agg = (
-        bars.set_index("time")
-        .resample(f"{minutes}min", label="left", closed="left")
-        .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
-        .dropna()
+    """Aggregate UTC bars to a higher timeframe, labelled by open time (MT5 style).
+
+    Hour-multiple bins are aligned the way a broker's are: from 17:00 New York, so H4 bars open at
+    17, 21, 01, 05, 09 and 13 New York time in summer and winter alike (22, 02, 06... UTC in winter).
+    Real higher-timeframe bars from ``tradebot fetch`` are preferred when available.
+    """
+    ohlc = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    if minutes < 60 or (24 * 60) % minutes:
+        agg = bars.set_index("time").resample(f"{minutes}min", label="left", closed="left").agg(ohlc)
+        return agg.dropna().reset_index()
+    local = bars["time"].dt.tz_localize("UTC").dt.tz_convert(NEW_YORK).dt.tz_localize(None)
+    opened = (local - FX_DAY_START_NEW_YORK).dt.floor(f"{minutes}min") + FX_DAY_START_NEW_YORK
+    utc_open = (
+        opened.dt.tz_localize(
+            NEW_YORK, ambiguous=np.ones(len(opened), dtype=bool), nonexistent="shift_forward"
+        )
+        .dt.tz_convert("UTC")
+        .dt.tz_localize(None)
     )
-    return agg.reset_index()
+    agg = bars.groupby(utc_open.rename("time"), sort=True).agg(ohlc)
+    return agg.dropna().reset_index()
 
 
 def higher_timeframe_trend(

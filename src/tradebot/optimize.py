@@ -114,14 +114,14 @@ def split_windows(start: datetime, end: datetime, folds: int) -> list[tuple[date
 _WORKER: dict[str, Any] = {}
 
 
-def _init_worker(config: BotConfig, data: dict, specs: dict, windows: list) -> None:
-    _WORKER.update(config=config, data=data, specs=specs, windows=windows)
+def _init_worker(config: BotConfig, data: dict, specs: dict, windows: list, htf: dict | None = None) -> None:
+    _WORKER.update(config=config, data=data, specs=specs, windows=windows, htf=htf)
 
 
 def _evaluate(combo: dict[str, Any]) -> list[Metrics]:
     """Metrics of one parameter combination on every window (features computed once)."""
     config = apply_params(_WORKER["config"], combo)
-    features = prepare_features(config, _WORKER["data"])
+    features = prepare_features(config, _WORKER["data"], _WORKER.get("htf"))
     out = []
     for start, end in _WORKER["windows"]:
         try:
@@ -135,16 +135,16 @@ def _evaluate(combo: dict[str, Any]) -> list[Metrics]:
     return out
 
 
-def _evaluate_all(config, data, specs, windows, combos, jobs) -> list[list[Metrics]]:
+def _evaluate_all(config, data, specs, windows, combos, jobs, htf=None) -> list[list[Metrics]]:
     if jobs > 1:
         try:
             with ProcessPoolExecutor(
-                max_workers=jobs, initializer=_init_worker, initargs=(config, data, specs, windows)
+                max_workers=jobs, initializer=_init_worker, initargs=(config, data, specs, windows, htf)
             ) as pool:
                 return list(pool.map(_evaluate, combos, chunksize=max(1, len(combos) // (jobs * 4))))
         except (BrokenProcessPool, OSError) as exc:  # e.g. Windows pipe-handle errors in detached consoles
             log.warning("worker pool failed (%s); continuing in a single process", exc)
-    _init_worker(config, data, specs, windows)
+    _init_worker(config, data, specs, windows, htf)
     return [_evaluate(c) for c in combos]
 
 
@@ -158,6 +158,7 @@ def walk_forward(
     objective: str = "sharpe",
     min_trades: int = 20,
     jobs: int | None = None,
+    htf: dict[tuple[str, str], pd.DataFrame] | None = None,
 ) -> WalkForwardResult:
     if objective not in OBJECTIVES:
         raise ValueError(f"objective must be one of {', '.join(OBJECTIVES)}")
@@ -168,7 +169,7 @@ def walk_forward(
     windows = split_windows(start, end, folds)
     jobs = jobs or max(1, (os.cpu_count() or 2) - 1)
 
-    table = _evaluate_all(config, data, specs, windows, combos, jobs)  # [combo][window] -> Metrics
+    table = _evaluate_all(config, data, specs, windows, combos, jobs, htf)  # [combo][window] -> Metrics
 
     fold_results: list[Fold] = []
     oos_runs: list[BacktestResult] = []
@@ -176,7 +177,7 @@ def walk_forward(
         best = max(range(len(combos)), key=lambda i: score(table[i][k], objective, min_trades))
         tuned = apply_params(config, combos[best])
         test_start, test_end = windows[k + 1]
-        run = run_backtest(tuned, data, specs, start=test_start, end=test_end)
+        run = run_backtest(tuned, data, specs, start=test_start, end=test_end, htf=htf)
         oos_runs.append(run)
         fold_results.append(Fold(windows[k], windows[k + 1], combos[best], table[best][k], run.metrics))
 

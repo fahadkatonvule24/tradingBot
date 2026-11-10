@@ -26,6 +26,7 @@ from tradebot.ui.monitor import Monitor
 log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-Tradebot-Token"
+MAX_BODY = 4096
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
@@ -85,6 +86,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:
+        # Read the (small) body before any refusal: answering with unread request bytes makes the
+        # socket close with a reset, and the browser reports a network error instead of the reason.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 <= length <= MAX_BODY:
+            self.close_connection = True
+            return self._json(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "message": "bad request size"}
+            )
+        raw = self.rfile.read(length)
         if not self._host_ok():
             return
         if urlsplit(self.path).path != "/api/order":
@@ -97,10 +110,7 @@ class _Handler(BaseHTTPRequestHandler):
                 HTTPStatus.FORBIDDEN, {"ok": False, "message": "missing or wrong session token"}
             )
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > 4096:
-                raise ValueError("request too large")
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body = json.loads(raw or b"{}")
             symbol, side = str(body["symbol"]), int(body["side"])
         except (ValueError, KeyError, TypeError) as exc:
             return self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": f"bad request: {exc}"})

@@ -31,7 +31,8 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
   symbol with the reason, entry, stop-loss, take-profit, lot size, and the money at risk and to
   gain, all priced at the live quote by the same engine that trades.
 - **Trades MT5** (demo or live) on closed bars, across many symbols, resolving broker suffixes
-  (`EURUSD` → `EURUSDm`). All timestamps are converted from server time to UTC.
+  (`EURUSD` → `EURUSDm`). All timestamps are converted from server time to UTC, including the
+  broker's daylight-saving changes, which are detected from its own history.
 - **Three strategies** behind one interface: EMA crossover, Donchian breakout, and trend
   pullback. They share filters for higher-timeframe trend, ADX, MACD, RSI, support/resistance and
   Fibonacci levels, all measured in ATR, so gold and forex use the same settings.
@@ -63,7 +64,7 @@ tradebot ui                        # live advisor dashboard at http://127.0.0.1:
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
 tradebot run                       # keep running (dry run); Ctrl+C stops after the current cycle
 
-tradebot fetch --bars 60000        # download history to data/ (CSV + symbol specs)
+tradebot fetch --bars 60000        # history to data/: trading + trend timeframes, symbol specs
 tradebot backtest                  # backtest config/config.json on data/ -> reports/*.html
 tradebot optimize --folds 4        # walk-forward optimisation -> out-of-sample report
 tradebot journal --days 7          # what the bot did this week
@@ -226,33 +227,42 @@ position sizes below the minimum lot, the losing-streak pause, and position limi
 ## Results on real data
 
 Every strategy was walk-forward tested on six instruments (EURUSD, GBPUSD, USDJPY, AUDUSD,
-USDCAD, XAUUSD) using history exported from a MetaQuotes demo terminal: 60,000 M15 bars (Jun 2024 –
-Nov 2026) and 20,000 H1 bars (Aug 2023 – Nov 2026). Each run used 4 folds and default costs (≥ 1-pip
-spread, $7 per lot round trip). **Every configuration tested is shown, including the losers.**
+USDCAD, XAUUSD) using history exported from a MetaQuotes demo terminal: 60,000 H1 bars (2017 –
+Nov 2026), 60,000 M15 bars (Jun 2024 – Nov 2026), and the broker's real H4 bars for the trend
+filter. Each run used 4 folds and default costs (≥ 1-pip spread, $7 per lot round trip). The
+out-of-sample periods are Sep 2018 – Nov 2026 for H1 (8.2 years) and Oct 2024 – Nov 2026 for M15
+(2.1 years). **Every configuration tested is shown, including the losers.**
 
 | Strategy | TF | Out-of-sample trades | Return | Max DD | Sharpe | Profit factor | Avg trade | WF efficiency |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| ema_cross | H1 | 153 | **−4.9%** | 8.8% | −0.66 | 0.79 | −0.14R | −0.83 |
-| breakout | H1 | 782 | −18.2% | 19.4% | −1.19 | 0.81 | −0.10R | −4.19 |
-| pullback | H1 | 1,036 | −31.1% | 31.9% | −1.90 | 0.76 | −0.15R | n/a¹ |
-| ema_cross | M15 | 360 | −16.6% | 18.9% | −1.91 | 0.69 | −0.21R | n/a¹ |
-| breakout | M15 | 1,705 | −42.4% | 43.7% | −2.51 | 0.78 | −0.13R | n/a¹ |
-| pullback | M15 | 2,273 | −46.3% | 47.7% | −2.36 | 0.82 | −0.11R | n/a¹ |
+| ema_cross | H1 | 521 | **−20.0%** | 21.6% | −0.91 | 0.73 | −0.17R | −9.54 |
+| breakout | H1 | 2,703 | −43.2% | 43.7% | −1.03 | 0.85 | −0.09R | −6.55 |
+| pullback | H1 | 3,516 | −70.8% | 71.0% | −1.97 | 0.77 | −0.13R | n/a¹ |
+| ema_cross | M15 | 362 | −20.4% | 21.0% | −2.33 | 0.63 | −0.26R | n/a¹ |
+| breakout | M15 | 1,468 | −44.1% | 44.6% | −2.74 | 0.74 | −0.15R | n/a¹ |
+| pullback | M15 | 2,458 | −53.3% | 54.4% | −2.83 | 0.80 | −0.12R | n/a¹ |
 
 ¹ Not even the best parameter set was profitable in-sample.
 
-**None of these strategies has an edge that survives costs out of sample.** What the numbers show:
+These numbers replace an earlier table computed on 3 years of H1 data with mislabelled summer
+hours (see [what the advisor check found](#found-by-checking-the-advisor-against-mt5-v32)). On
+that shorter window the corrected ema_cross H1 result is −6.5% out of sample (it was −4.9%).
 
-- **Costs are the whole story.** Re-running with zero costs moves results to roughly break-even
-  (ema_cross H1: +0.02R per trade; M15: −0.12R). Costs are ~0.12R per trade on M15 but ~0.04R on
-  H1, because the H1 stop is wider. That is why the default timeframe is now H1, and why
-  high-frequency variants lose fastest.
-- **In-sample results lie.** ema_cross H1 reached an in-sample Sharpe of 1.72 in one window and
-  then −1.57 on the next, unseen window. A negative walk-forward efficiency means the in-sample
-  "edge" was fitted to noise. v23's optimizer only ever reported in-sample numbers.
-- **The simulator has been sanity-checked.** At zero cost, a strategy plus its exact mirror image
-  sums to about −0.05R per trade. That is the deliberate conservatism of the fill model (a bar
-  touching both stop and target counts as a stop), small and in the safe direction.
+**None of these strategies has an edge, before or after costs.** What the numbers show:
+
+- **Costs make it worse, but they are not the whole story.** With spread, commission and slippage
+  all set to zero, ema_cross with default settings still averages −0.06R per trade on H1 and
+  −0.12R on M15. Costs add about 0.07R per trade on H1 and 0.13R on M15, where stops are tighter;
+  that is why the default timeframe is H1 and why high-frequency variants lose fastest. (An
+  earlier version of this README said zero-cost results were break-even. That was measured on
+  the mislabelled data and did not survive the correction.)
+- **In-sample results lie.** For ema_cross H1 the best in-sample Sharpe in any window was 0.26;
+  the parameters it chose then lost in every one of the four unseen windows, one of them −16.3%.
+  A negative walk-forward efficiency means the in-sample "edge" was fitted to noise. v23's
+  optimizer only ever reported in-sample numbers.
+- **The fill model leans conservative.** A bar that touches both stop and target counts as a
+  stop. On the earlier dataset, a strategy plus its exact mirror image summed to about −0.05R per
+  trade at zero cost, which is the size of that bias: small, and in the safe direction.
 
 So the bot is ready to run, and the research tooling says plainly that these signal sets are not
 worth trading with real money. Finding that out cheaply is the point of a backtester. New ideas
@@ -288,11 +298,35 @@ v23 is kept under the [`v23` tag](https://github.com/fahadkatonvule24/tradingBot
 | Forex-pip filters on every symbol | crypto/gold spreads never passed; S/R and Fibonacci meaningless | everything in ATR units, per-symbol overrides |
 | Local clock for sessions, UTC for news, server time for deals | guards disagreed about "today" | UTC everywhere, server offset detected |
 
+### Found by checking the advisor against MT5 (v3.2)
+
+Before trusting the dashboard, every number it shows was recomputed independently against the live
+terminal. The indicators matched a plain-loop reimplementation to 1e-15 and the money was within
+about 1% of `order_calc_profit`, but the check also exposed these problems:
+
+| Found | Impact | Now |
+|---|---|---|
+| History converted with today's server offset (UTC+2) for every bar | the broker runs New York time + 7h, so **every bar from the US daylight-saving months was labelled an hour late**: the 8:30 New York payroll spike sat in its true UTC hour on 2 of 18 summer first-Fridays (44 of 55 after the fix). Backtests applied session hours and news blackouts an hour off for seven months a year, and a bot left running over a DST weekend would have treated a forming bar as closed | the broker's clock rule is detected from its week-open pattern (`broker/clock.py`) and every bar is converted with the offset of its own date |
+| Live trend filter fetched 400 H4 bars for a 200-period EMA | the EMA still carried 2% of its seed: the live H4 trend disagreed with a fully warmed EMA on up to 8% of recent bars, exactly at trend changes | 6 periods of history (seed weight 0.0006%) |
+| Backtest built H4 bars from H1 starting at 00:00 UTC | MT5's H4 bars start at 17:00 New York (22:00 UTC in winter), so the backtest graded a different trend filter from the one that trades | `fetch` saves the real H4 bars and the backtest uses them; the fallback resample is anchored like the broker's |
+| Profit/loss from one tick value | for USDJPY/USDCAD a pip is worth less at the target than at the stop: the plan was up to $3 off per $250 | stop and target priced by the terminal at the exact prices; sizing uses the same figure |
+| Countdown to the next bar close outside trading hours | "next decision 09:00" when nothing could open before 10:00 | shows when entries resume |
+
+After the fixes, the live path (MT5 bars, real H4 bars) and the backtest path (CSV files) agree on
+the trend on every bar they share, and on the signal on every one of the last 1,300 bars of the
+live window, including every bar the bot acts on. The only differences sit in the first ~150 bars
+of the live window, where its indicators are still warming up. The planned loss and profit match
+`order_calc_profit` to the cent.
+
+The corrected data also changed the verdict on individual symbols: over the same 3.4 years the
+default backtest went from −1.1% to **−4.7%**, and EURUSD's apparent edge (profit factor 1.15)
+became a loss (0.86). It had come from the mislabelled hours.
+
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 105 tests
+pytest --cov=tradebot      # 121 tests
 ruff check . && ruff format --check .
 ```
 

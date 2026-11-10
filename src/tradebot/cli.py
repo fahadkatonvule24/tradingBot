@@ -64,7 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     fetch = sub.add_parser("fetch", help="download history from MT5 to CSV")
     fetch.add_argument("--symbols", nargs="+", help="default: symbols from the config")
-    fetch.add_argument("--timeframes", nargs="+", help="default: the config timeframe")
+    fetch.add_argument(
+        "--timeframes", nargs="+", help="default: the config timeframe and the trend filter's timeframe"
+    )
     fetch.add_argument("--bars", type=int, default=60_000)
     fetch.add_argument("--out", type=Path, default=Path("data"))
 
@@ -191,7 +193,8 @@ def cmd_check(config: BotConfig, args: argparse.Namespace) -> int:
         kind = "[bold red]REAL MONEY[/]" if account.is_real else "[green]demo[/]"
         console.print(Panel.fit(
             f"Server [bold]{escape(broker.server_name())}[/] · {kind} account · {account.currency} · leverage 1:{account.leverage}\n"
-            f"Balance {account.balance:,.2f} · equity {account.equity:,.2f} · server time UTC{broker.offset.total_seconds() / 3600:+.2f}h\n"
+            f"Balance {account.balance:,.2f} · equity {account.equity:,.2f}\n"
+            f"Server time {escape(broker.server_clock.describe(broker.now()))}\n"
             f"Orders with --live: {'[bold green]would be sent[/]' if gate.execute else '[yellow]blocked[/] (' + escape(gate.reason) + ')'}",
             title=f"tradebot {__version__}", border_style="grey50",
         ))  # fmt: skip
@@ -279,14 +282,15 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
 
 def cmd_fetch(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.broker.mt5 import fetch_history
-    from tradebot.data import bars_path, save_spec
+    from tradebot.data import bars_path, save_spec, trend_timeframes
 
     broker, _, symbols = _connect(config)
     args.out.mkdir(parents=True, exist_ok=True)
     try:
         for configured, symbol in zip(args.symbols or config.symbols, symbols, strict=False):
             save_spec(args.out, _rename(broker.symbol(symbol), configured))
-            for tf in args.timeframes or [config.timeframe]:
+            trend = trend_timeframes(config).get(configured)
+            for tf in args.timeframes or [config.timeframe, *([trend] if trend else [])]:
                 bars = fetch_history(broker, symbol, tf, args.bars)
                 path = bars_path(args.out, configured, tf)
                 bars.to_csv(path, index=False)
@@ -306,25 +310,26 @@ def _rename(spec, name):
 
 
 def _load(config: BotConfig, args: argparse.Namespace):
-    from tradebot.data import load_dataset
+    from tradebot.data import load_dataset, load_trend_bars
 
     data, specs = load_dataset(args.data, list(config.symbols), config.timeframe)
+    htf = load_trend_bars(args.data, config)  # full history: the trend EMA needs its warm-up
     if args.start is not None or args.end is not None:
         start = args.start or pd.Timestamp.min
         end = args.end or pd.Timestamp.max
         data = {
             s: df[(df["time"] >= start) & (df["time"] < end)].reset_index(drop=True) for s, df in data.items()
         }
-    return data, specs
+    return data, specs, htf
 
 
 def cmd_backtest(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.backtest import run_backtest
     from tradebot.report import render_backtest, write_report
 
-    data, specs = _load(config, args)
+    data, specs, htf = _load(config, args)
     with console.status("Backtesting…"):
-        result = run_backtest(config, data, specs)
+        result = run_backtest(config, data, specs, htf=htf)
     print_summary(
         result.metrics,
         result.per_symbol,
@@ -351,7 +356,7 @@ def cmd_optimize(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.optimize import apply_params, walk_forward
     from tradebot.report import render_backtest, write_report
 
-    data, specs = _load(config, args)
+    data, specs, htf = _load(config, args)
     with console.status(f"Walk-forward: {config.strategy.name}, {args.folds} folds…"):
         wf = walk_forward(
             config,
@@ -361,6 +366,7 @@ def cmd_optimize(config: BotConfig, args: argparse.Namespace) -> int:
             objective=args.objective,
             min_trades=args.min_trades,
             jobs=args.jobs,
+            htf=htf,
         )
     table = Table(title="Walk-forward windows", box=None, header_style="bold grey50", title_justify="left")
     for col in (
@@ -392,7 +398,7 @@ def cmd_optimize(config: BotConfig, args: argparse.Namespace) -> int:
         else "Walk-forward efficiency: n/a (in-sample return was not positive)"
     )
 
-    reference = run_backtest(config, data, specs)
+    reference = run_backtest(config, data, specs, htf=htf)
     report = write_report(
         render_backtest(reference, walk_forward=wf),
         args.out,

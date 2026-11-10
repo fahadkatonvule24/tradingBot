@@ -288,11 +288,12 @@ class Monitor:
         ``names`` maps the broker's symbol names to the configured ones used for the CSV files.
         """
         from tradebot.backtest import run_backtest
-        from tradebot.data import load_dataset
+        from tradebot.data import load_dataset, load_trend_bars
 
         try:
             data, specs = load_dataset(data_dir, list(self.config.symbols), self.config.timeframe)
-            result = run_backtest(self.config, data, specs)
+            htf = load_trend_bars(data_dir, self.config)
+            result = run_backtest(self.config, data, specs, htf=htf)
         except (FileNotFoundError, ValueError) as exc:
             log.info("no track record: %s", exc)
             return

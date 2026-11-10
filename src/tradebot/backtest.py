@@ -55,13 +55,17 @@ class BacktestResult:
 def prepare_features(
     config: BotConfig,
     data: dict[str, pd.DataFrame],
-    htf: dict[str, pd.DataFrame] | None = None,
+    htf: dict[tuple[str, str], pd.DataFrame] | None = None,
 ) -> dict[str, pd.DataFrame]:
+    """Signals per symbol. ``htf`` holds real higher-timeframe bars keyed by (symbol, timeframe)."""
     htf = htf or {}
-    return {
-        symbol: compute_signals(bars, config.for_symbol(symbol).strategy, config.timeframe, htf.get(symbol))
-        for symbol, bars in data.items()
-    }
+    out = {}
+    for symbol, bars in data.items():
+        strategy = config.for_symbol(symbol).strategy
+        out[symbol] = compute_signals(
+            bars, strategy, config.timeframe, htf.get((symbol, strategy.trend_timeframe))
+        )
+    return out
 
 
 def run_backtest(
@@ -72,7 +76,7 @@ def run_backtest(
     start: datetime | None = None,
     end: datetime | None = None,
     features: dict[str, pd.DataFrame] | None = None,
-    htf: dict[str, pd.DataFrame] | None = None,
+    htf: dict[tuple[str, str], pd.DataFrame] | None = None,
 ) -> BacktestResult:
     """Backtest ``config`` on ``data`` (closed bars per symbol), optionally within [start, end)."""
     features = features if features is not None else prepare_features(config, data, htf)

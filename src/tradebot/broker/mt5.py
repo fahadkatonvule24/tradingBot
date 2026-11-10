@@ -3,9 +3,11 @@
 Differences from v23 worth knowing:
 - **Closed bars only.** ``copy_rates_from_pos(..., 0, n)`` includes the still-forming bar; a
   signal computed on it can appear and vanish within the bar. It is dropped here.
-- **UTC everywhere.** MT5 stamps bars, ticks and deals in *server* time. The offset is measured
-  once from a live tick (or taken from config) and every timestamp is converted to UTC, so
-  session hours, news blackouts and loss limits all use one clock.
+- **UTC everywhere, daylight saving included.** MT5 stamps bars, ticks and deals in *server*
+  time. The offset is measured from a live tick, and the broker's week-open pattern decides
+  whether the server clock follows New York daylight saving (most FX brokers: UTC+2 in winter,
+  UTC+3 in summer). Every timestamp, including a year of history, is converted with the offset
+  that applied at that moment, so session hours, news blackouts and loss limits use one clock.
 - **Restart-safe position state.** A position's original volume and stop (its 1R) are read back
   from the order history, so partial take-profit and R-based management survive restarts
   (v23 kept that in memory and could take partial profit twice).
@@ -30,6 +32,7 @@ from tradebot.broker.base import (
     SymbolSpec,
     Tick,
 )
+from tradebot.broker.clock import ServerClock, detect_convention
 from tradebot.config import TIMEFRAME_MINUTES, MT5Login
 
 log = logging.getLogger(__name__)
@@ -60,7 +63,7 @@ class MT5Broker:
                 ) from exc
         self.mt5 = module
         self.login = login
-        self._offset = timedelta(hours=offset_hours) if offset_hours is not None else None
+        self._clock_rule: ServerClock | None = ServerClock(offset_hours) if offset_hours is not None else None
         self._clock = clock
         self._origin: dict[int, tuple[float | None, float | None]] = {}
         self._warned: set[str] = set()
@@ -107,35 +110,46 @@ class MT5Broker:
         return name
 
     @property
-    def offset(self) -> timedelta:
-        if self._offset is None:
-            self._offset = self._detect_offset()
-        return self._offset
+    def server_clock(self) -> ServerClock:
+        if self._clock_rule is None:
+            self._clock_rule = self._detect_clock()
+        return self._clock_rule
 
-    def _detect_offset(self) -> timedelta:
-        """Server time minus UTC, from the freshest tick among visible symbols, rounded to 15 min."""
-        now = self._clock().replace(tzinfo=timezone.utc).timestamp()
+    @property
+    def offset(self) -> timedelta:
+        """Server time minus UTC right now."""
+        return self.server_clock.offset_at(self.now())
+
+    def _detect_clock(self) -> ServerClock:
+        """Measure today's offset from the freshest tick, then check the week-open pattern in the
+        broker's own H1 history to see whether the server follows New York daylight saving."""
+        now = self._clock()
+        now_epoch = now.replace(tzinfo=timezone.utc).timestamp()
         for symbol in self.mt5.symbols_get() or []:
             if not getattr(symbol, "visible", True):
                 continue
             tick = self.mt5.symbol_info_tick(symbol.name)
             if tick is None:
                 continue
-            diff_hours = (tick.time - now) / 3600
-            if abs(diff_hours) <= 14:
-                rounded = round(diff_hours * 4) / 4
-                log.info("server time is UTC%+.2fh (from %s tick)", rounded, symbol.name)
-                return timedelta(hours=rounded)
+            diff_hours = (tick.time - now_epoch) / 3600
+            if abs(diff_hours) > 14:
+                continue
+            offset = timedelta(hours=round(diff_hours * 4) / 4)
+            rates = self.mt5.copy_rates_from_pos(symbol.name, self.mt5.TIMEFRAME_H1, 0, 12_000)
+            times = [] if rates is None else rates["time"]
+            clock = detect_convention(times, offset, now)
+            log.info("server time is %s (from %s)", clock.describe(now), symbol.name)
+            return clock
         log.warning(
             "no fresh tick (market closed?); assuming server time = UTC. Set server_utc_offset_hours to override."
         )
-        return timedelta(0)
+        return ServerClock(0.0)
 
     def _to_utc(self, server_epoch: float) -> datetime:
-        return datetime.fromtimestamp(server_epoch, timezone.utc).replace(tzinfo=None) - self.offset
+        return self.server_clock.epoch_to_utc(server_epoch)
 
     def _to_server_epoch(self, utc: datetime) -> int:
-        return int((utc + self.offset).replace(tzinfo=timezone.utc).timestamp())
+        return self.server_clock.utc_to_server_epoch(utc)
 
     # --- Broker interface ---------------------------------------------------------------------
 
@@ -203,7 +217,7 @@ class MT5Broker:
         if rates is None or len(rates) == 0:
             raise MT5Error(f"no {timeframe} bars for {name}: {self.mt5.last_error()}")
         df = pd.DataFrame(rates)
-        df["time"] = pd.to_datetime(df["time"], unit="s") - self.offset
+        df["time"] = self.server_clock.to_utc(pd.to_datetime(df["time"], unit="s"))
         bar = pd.Timedelta(minutes=TIMEFRAME_MINUTES[timeframe])
         df = df[df["time"] + bar <= pd.Timestamp(self.now())]  # drop the forming bar
         if "spread" not in df:
@@ -330,6 +344,13 @@ class MT5Broker:
             "magic": magic,
         }
         return self._result(self.mt5.order_send(request))
+
+    def calc_profit(
+        self, symbol: str, side: int, volume: float, price_open: float, price_close: float
+    ) -> float | None:
+        """Account-currency profit of a position from ``price_open`` to ``price_close``, by the terminal."""
+        kind = self.mt5.ORDER_TYPE_BUY if side == BUY else self.mt5.ORDER_TYPE_SELL
+        return self.mt5.order_calc_profit(kind, symbol, volume, price_open, price_close)
 
     def margin_required(self, symbol: str, side: int, volume: float) -> float | None:
         tick = self.mt5.symbol_info_tick(symbol)

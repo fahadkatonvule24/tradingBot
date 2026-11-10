@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass, field, fields, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +134,15 @@ class ScheduleParams:
         if self.session == "custom":
             return self.start_hour_utc, self.end_hour_utc
         return SESSIONS[self.session]
+
+    def closed(self, now: datetime) -> str | None:
+        """Why entries are not allowed at ``now`` (UTC) by the schedule, or None if they are."""
+        if not self.trade_weekends and now.weekday() >= 5:
+            return "weekend"
+        start, end = self.hours()
+        hour = now.hour
+        inside = start <= hour < end if start < end else (hour >= start or hour < end)
+        return None if inside else f"{hour:02d}:00 UTC outside {start:02d}-{end:02d}"
 
 
 @dataclass(frozen=True)

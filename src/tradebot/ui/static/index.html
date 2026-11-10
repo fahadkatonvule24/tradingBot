@@ -524,11 +524,14 @@ function renderWatchlist() {
 
 function renderAdvice(row) {
   const a = row.advice;
-  const when = a.decision_at
+  // Outside trading hours the next bar close cannot open a trade: count down to when one can.
+  const target = a.entries_from || a.decision_at;
+  const label = a.entries_from ? "Entries resume in" : a.actionable ? "Signal valid for" : "Next decision in";
+  const when = target
     ? el("div", { class: "when" },
-        el("div", { class: "faint", text: a.actionable ? "Signal valid for" : "Next decision in" }),
-        el("div", { class: "big", text: countdown(a.decision_at) }),
-        el("div", { class: "faint", text: `at ${localTime(a.decision_at)} (${utcTime(a.decision_at)})` }))
+        el("div", { class: "faint", text: label }),
+        el("div", { class: "big", text: countdown(target) }),
+        el("div", { class: "faint", text: `at ${localTime(target)} (${utcTime(target)})` }))
     : el("div", { class: "when" });
   const parts = [
     el("span", { class: `badge big ${a.action}`, text: a.action }),
@@ -576,6 +579,7 @@ function renderPlan(row) {
   const notes = [];
   if (p.rejected) notes.push(el("div", { class: "fine", text: `The engine would not take this trade: ${p.rejected}.` }));
   if (!g.execute) notes.push(el("div", { class: "fine" }, "To enable the button: set ", el("code", { text: "dry_run: false" }), " and ", el("code", { text: "live_trading_confirm: true" }), ", then start with ", el("code", { text: "tradebot ui --live" }), "."));
+  notes.push(el("div", { class: "fine", text: "Amounts come from MT5's own profit calculator at these exact prices, before commission and swap. A stop is a market order once touched, so a fast market or a weekend gap can fill it worse." }));
   notes.push(el("div", { class: "fine", text: "The stop and target are sent with the order. Breakeven at +1R, half off at +1.5R and the trailing stop apply while `tradebot run` manages the position." }));
   box.replaceChildren(el("h2", { text: title }), el("div", { class: "sub", text: subtitle }), list, outcome, btn, ...notes);
 }

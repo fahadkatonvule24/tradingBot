@@ -186,13 +186,9 @@ class Engine:
 
         if self.live and Path(self.config.kill_switch_file).exists():
             return f"kill switch: {self.config.kill_switch_file} exists"
-        if not sched.trade_weekends and now.weekday() >= 5:
-            return "session: weekend"
-        start, end = sched.hours()
-        hour = now.hour
-        in_session = start <= hour < end if start < end else (hour >= start or hour < end)
-        if not in_session:
-            return f"session: {hour:02d}:00 UTC outside {start:02d}-{end:02d}"
+        closed = sched.closed(now)
+        if closed:
+            return f"session: {closed}"
         currencies = {spec.currency_base, spec.currency_profit} - {""}
         event = (
             self._news.blackout(now, currencies, sched.news_before_minutes, sched.news_after_minutes)
@@ -276,7 +272,9 @@ class Engine:
         r = params.risk
         sl_distance, tp_distance = stop_distances(spec, r, float(row["atr"]), spread)
         account = self.broker.account()
-        size = position_size(spec, account.equity, sl_distance, r)
+        exact = self._exact_pnl(symbol, spec, side, sl_distance, tp_distance)
+        tick_value = exact[0] / (sl_distance / spec.tick_size) if exact else None
+        size = position_size(spec, account.equity, sl_distance, r, tick_value)
         if not size.ok:
             return Rejection("size", size.reason)
         positions = self.broker.positions(self.config.magic)
@@ -294,11 +292,31 @@ class Engine:
             volume=size.volume,
             sl_distance=sl_distance,
             tp_distance=tp_distance,
-            risk_amount=size.risk_amount,
-            reward_amount=loss_per_lot(spec, tp_distance) * size.volume,
+            risk_amount=exact[0] * size.volume if exact else size.risk_amount,
+            reward_amount=(exact[1] if exact else loss_per_lot(spec, tp_distance)) * size.volume,
             equity=account.equity,
             reason=explain(row, params.strategy) if row.get("raw_signal", 0) else "",
         )
+
+    def _exact_pnl(
+        self, symbol: str, spec: SymbolSpec, side: int, sl_distance: float, tp_distance: float
+    ) -> tuple[float, float] | None:
+        """(loss at the stop, profit at the target) per lot, by the broker's own profit calculator.
+
+        Quote-currency conversion makes a pip worth slightly different amounts at the stop and at
+        the target (USDJPY, USDCAD); a single tick value cannot capture that, the terminal can.
+        """
+        calc = getattr(self.broker, "calc_profit", None)
+        if calc is None:
+            return None
+        tick = self.broker.tick(symbol)
+        entry = tick.ask if side > 0 else tick.bid
+        stop = spec.round_price(entry - side * sl_distance)
+        target = spec.round_price(entry + side * tp_distance)
+        loss, win = calc(symbol, side, 1.0, entry, stop), calc(symbol, side, 1.0, entry, target)
+        if not loss or not win or loss >= 0 or win <= 0:
+            return None
+        return -loss, win
 
     def _enter(
         self,

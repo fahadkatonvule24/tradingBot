@@ -68,7 +68,7 @@ def at(minutes: int) -> datetime:
 class FakeMT5:
     """Just enough of the MetaTrader5 package to exercise the adapter without a terminal."""
 
-    TIMEFRAME_M15, TIMEFRAME_H4 = 15, 240
+    TIMEFRAME_M15, TIMEFRAME_H1, TIMEFRAME_H4 = 15, 60, 240
     POSITION_TYPE_BUY, POSITION_TYPE_SELL = 0, 1
     ORDER_TYPE_BUY, ORDER_TYPE_SELL = 0, 1
     DEAL_TYPE_BUY, DEAL_TYPE_SELL = 0, 1
@@ -173,7 +173,8 @@ class FakeMT5:
 
     def order_calc_profit(self, kind, symbol, volume, price_open, price_close):
         info = self.symbols[symbol]
-        return round((price_close - price_open) * info.trade_contract_size * volume, 2)
+        direction = 1 if kind == self.ORDER_TYPE_BUY else -1
+        return round((price_close - price_open) * direction * info.trade_contract_size * volume, 2)
 
     def order_calc_margin(self, kind, symbol, volume, price):
         return volume * 100_000 * price / 100

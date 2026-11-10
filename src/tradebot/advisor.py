@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from tradebot.broker.base import SymbolSpec, Tick
-from tradebot.config import StrategyParams, SymbolParams
+from tradebot.config import ScheduleParams, StrategyParams, SymbolParams
 from tradebot.engine import Engine, Rejection, stop_distances
 from tradebot.indicators import rsi
 from tradebot.strategy import BLOCK_LABELS, FILTERS, _near_fib, explain
@@ -71,6 +71,18 @@ class Advice:
     checks: list[Check] = field(default_factory=list)
     blocker: str | None = None
     plan: TradePlan | None = None
+    entries_from: datetime | None = None
+    """When trading hours are closed: the first bar close at which an entry is allowed again."""
+
+
+def next_entry_time(schedule: ScheduleParams, after: datetime, bar: timedelta) -> datetime | None:
+    """First bar close at or after ``after`` that the schedule allows (searches one week)."""
+    t = after
+    for _ in range(int(timedelta(days=7) / bar) + 1):
+        if not schedule.closed(t):
+            return t
+        t += bar
+    return None
 
 
 def pip_size(spec: SymbolSpec) -> float:
@@ -110,6 +122,9 @@ def advise(
     blocker = engine.entry_blocker(symbol, spec, params, row, spread, now)
     plan = trade_plan(engine, symbol, spec, params, row, tick, side)
     trigger, level = next_trigger(features, p, side, tick, spec, config.timeframe)
+    entries_from = None
+    if config.schedule.closed(now):
+        entries_from = next_entry_time(config.schedule, bar_close + bar, bar)
     common = {
         "side": side,
         "bar_time": bar_time,
@@ -119,6 +134,7 @@ def advise(
         "checks": filter_checks(features, p, side),
         "blocker": blocker,
         "plan": plan,
+        "entries_from": entries_from,
     }
 
     if signal:

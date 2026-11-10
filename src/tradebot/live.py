@@ -83,13 +83,19 @@ class LiveRunner:
             self._stop.wait(self.config.poll_seconds)
 
 
+HTF_HISTORY_MULTIPLE = 6
+"""Higher-timeframe bars fetched per trend-EMA period. An EMA seeded n bars back still carries
+(1 - 2/(period+1))^n of its seed: 2% after 2 periods (what v3.0 fetched, enough to flip the trend
+filter near a crossing), 0.0006% after 6. Live trading must see the same trend as the backtest."""
+
+
 def latest_features(broker: Broker, config: BotConfig, symbol: str) -> pd.DataFrame:
     """Signals on the most recent closed bars, with the trend filter fed by real higher-timeframe bars."""
     strategy = config.for_symbol(symbol).strategy
     bars = broker.bars(symbol, config.timeframe, config.history_bars)
     htf = None
     if strategy.use_trend_filter and TIMEFRAME_MINUTES[strategy.trend_timeframe] > config.bar_minutes:
-        htf = broker.bars(symbol, strategy.trend_timeframe, strategy.trend_ema * 2)
+        htf = broker.bars(symbol, strategy.trend_timeframe, strategy.trend_ema * HTF_HISTORY_MULTIPLE)
     return compute_signals(bars, strategy, config.timeframe, htf)
 
 

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from tradebot.broker.base import SymbolSpec
+from tradebot.config import TIMEFRAME_MINUTES, BotConfig
 
 REQUIRED = ("time", "open", "high", "low", "close")
 
@@ -49,6 +50,30 @@ def load_dataset(
         data[symbol] = load_bars(path)
         specs[symbol] = load_spec(data_dir, symbol)
     return data, specs
+
+
+def trend_timeframes(config: BotConfig) -> dict[str, str]:
+    """Symbol -> higher timeframe its trend filter reads, for symbols that use one."""
+    out = {}
+    for symbol in config.symbols:
+        p = config.for_symbol(symbol).strategy
+        if p.use_trend_filter and TIMEFRAME_MINUTES[p.trend_timeframe] > config.bar_minutes:
+            out[symbol] = p.trend_timeframe
+    return out
+
+
+def load_trend_bars(data_dir: str | Path, config: BotConfig) -> dict[tuple[str, str], pd.DataFrame]:
+    """Real higher-timeframe bars saved by `tradebot fetch`, keyed by (symbol, timeframe).
+
+    With these the backtest's trend filter reads the same bars as live trading; without them it
+    falls back to resampling the base timeframe.
+    """
+    out = {}
+    for symbol, timeframe in trend_timeframes(config).items():
+        path = bars_path(Path(data_dir), symbol, timeframe)
+        if path.is_file():
+            out[(symbol, timeframe)] = load_bars(path)
+    return out
 
 
 def save_spec(data_dir: Path, spec: SymbolSpec) -> Path:
