@@ -56,7 +56,8 @@ class TradePlan:
 class Advice:
     symbol: str
     action: str
-    """BUY / SELL (take it now), SKIP (signal, but a guard says no), WAIT, CLOSED."""
+    """BUY / SELL (take it now), SKIP (signal, but a guard says no), BLOCKED (a trigger fired on
+    the last bar and a strategy filter rejected it), WAIT, CLOSED."""
     headline: str
     detail: str
     side: int
@@ -102,13 +103,15 @@ def recent_signals(
     and trailing rules, so it is a guide to direction, not a P/L statement.
     """
     time_, signal = features["time"], features["signal"].to_numpy()
+    raw, block = features["raw_signal"].to_numpy(), features["block"].to_numpy()
     high, low, close, atr_ = (features[k].to_numpy(dtype=float) for k in ("high", "low", "close", "atr"))
     bar = pd.Timedelta(minutes=bar_minutes)
-    fired = np.flatnonzero(signal != 0)
-    tradeable = [i for i in fired if schedule.closed((time_.iloc[i] + bar).to_pydatetime()) is None]
+    passed = np.flatnonzero(signal != 0)
+    tradeable = [i for i in passed if schedule.closed((time_.iloc[i] + bar).to_pydatetime()) is None]
+    fired = np.flatnonzero((signal != 0) | (raw != 0))  # blocked triggers are listed too
     items = []
     for i in fired[::-1][:limit]:
-        side, entry = int(signal[i]), close[i]
+        side, entry = int(signal[i] or raw[i]), close[i]
         sl, tp = params.risk.sl_atr * atr_[i], params.risk.tp_atr * atr_[i]
         stop, target = entry - side * sl, entry + side * tp
         outcome, r = "open", (close[-1] - entry) * side / sl
@@ -122,7 +125,8 @@ def recent_signals(
         closed_at = (time_.iloc[i] + bar).to_pydatetime()
         items.append(
             {"time": closed_at, "side": side, "entry": entry, "stop": stop, "target": target,
-             "outcome": outcome, "r": r, "blocked": schedule.closed(closed_at)}
+             "outcome": outcome, "r": r, "blocked": schedule.closed(closed_at),
+             "filter": "" if signal[i] else BLOCK_LABELS.get(block[i], str(block[i]))}
         )  # fmt: skip
     weeks = max((time_.iloc[-1] - time_.iloc[0]) / pd.Timedelta(weeks=1), 1e-9)
     return {"items": items, "tradeable": len(tradeable), "weeks": float(weeks)}
@@ -199,10 +203,19 @@ def advise(
         )  # fmt: skip
     if raw:
         label = BLOCK_LABELS.get(row["block"], row["block"])
+        word = WORD[raw].title()
         return Advice(
-            symbol, "WAIT", f"{WORD[raw].title()} trigger filtered out", f"The trigger fired but {label}.",
+            symbol, "BLOCKED", f"{word} trigger fired, blocked by a filter",
+            f"The {word.lower()} trigger fired on the last bar, but the bot did not take it: {label}. "
+            f"The plan shows the {word.lower()} if you want to take it on your own call.",
             actionable=False, **common,
         )  # fmt: skip
+    recent = common["last_trigger"]
+    if recent and recent["bars_ago"] > 0:
+        word = WORD[recent["side"]].title()
+        ago = f"{recent['bars_ago']} bar{'' if recent['bars_ago'] == 1 else 's'} ago"
+        outcome = "taken" if recent["taken"] else f"blocked ({recent['blocked_by']})"
+        return Advice(symbol, "WAIT", f"{word} trigger {ago}, {outcome}", trigger, actionable=False, **common)
     return Advice(symbol, "WAIT", "No setup yet", trigger, actionable=False, **common)
 
 

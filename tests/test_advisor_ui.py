@@ -95,8 +95,32 @@ def test_engine_size_rejection_also_skips(cfg, broker):
 
 def test_filtered_trigger_says_which_filter(cfg, broker):
     a = advice_for(cfg, broker, features({"raw_signal": 1, "block": "adx"}))
-    assert a.action == "WAIT" and a.headline == "Buy trigger filtered out"
+    assert a.action == "BLOCKED" and not a.actionable and a.side == 1
+    assert a.headline == "Buy trigger fired, blocked by a filter"
     assert "ADX below minimum" in a.detail
+    assert a.plan == a.plans["buy"]  # the plan shows the trade the user may take themselves
+
+
+def test_a_blocked_trigger_stays_in_the_headline_on_later_bars(cfg, broker):
+    """Regression for a real complaint: one bar after a blocked sell the screen said 'No setup yet'."""
+    frame = features()
+    frame.loc[len(frame) - 2, ["raw_signal", "block"]] = [-1, "rsi"]
+    a = advice_for(cfg, broker, frame)
+    assert a.action == "WAIT" and a.headline == "Sell trigger 1 bar ago, blocked (RSI stretched)"
+    frame.loc[len(frame) - 2, ["signal", "block"]] = [-1, ""]
+    assert advice_for(cfg, broker, frame).headline == "Sell trigger 1 bar ago, taken"
+
+
+def test_recent_signals_include_blocked_triggers(cfg):
+    frame = features()
+    frame.loc[10, "signal"] = 1
+    frame.loc[18, ["raw_signal", "block"]] = [-1, "trend"]
+    out = recent_signals(frame, cfg.for_symbol(SYMBOL), cfg.schedule, cfg.bar_minutes)
+    assert [(i["side"], i["filter"]) for i in out["items"]] == [
+        (-1, "against higher-timeframe trend"),
+        (1, ""),
+    ]
+    assert out["tradeable"] == 1  # only signals that passed the filters count towards the rate
 
 
 def test_no_setup_explains_the_next_trigger(cfg, broker):

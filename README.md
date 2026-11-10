@@ -27,7 +27,7 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
 
 ## What it does
 
-- **Advises you live** in a browser dashboard: streaming bid/ask, BUY / SELL / WAIT / SKIP per
+- **Advises you live** in a browser dashboard: streaming bid/ask, BUY / SELL / BLOCKED / SKIP / WAIT per
   symbol with the reason, entry, stop-loss, take-profit, lot size, and the money at risk and to
   gain, all priced at the live quote by the same engine that trades.
 - **Trades MT5** (demo or live) on closed bars, across many symbols, resolving broker suffixes
@@ -87,6 +87,7 @@ symbol, once a second:
 | Live bid / ask, spread, recent price | `symbol_info_tick` and closed bars, polled on one MT5 thread |
 | **BUY / SELL**: take it now, valid until the forming bar closes | a signal on the last closed bar that passes every engine guard |
 | **SKIP**: signal, but don't | the guard that blocks it (session, news, loss limit, spread, minimum lot, margin…) |
+| **BLOCKED**: a trigger fired on the last bar and a strategy filter rejected it | the filter that rejected it (trend, ADX, MACD, RSI, room to S/R); the plan shows that trade in case you take it yourself, and the headline keeps the trigger visible for the next 12 bars |
 | **WAIT**: no setup, and what would trigger one | the strategy's trigger, e.g. "a sell triggers when EMA 10 closes below EMA 50 (now 0.93 ATR above it)" |
 | Entry, stop-loss, take-profit, lot size | `Engine.plan_entry`, the bot's own sizing, priced at the live ask (buy) or bid (sell) |
 | Loss if stopped, profit at target | volume × distance × the terminal's own per-tick value |
@@ -95,7 +96,7 @@ symbol, once a second:
 | Track record | a backtest of the current config on your downloaded history, per symbol |
 | Buy / Sell switch on the plan | the same priced plan for either side, so a trade you choose yourself gets the bot's sizing, stop and target |
 | Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
-| Recent signals | the last signals across all symbols and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
+| Recent signals | the last triggers across all symbols, taken or blocked, and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
 | Alerts | optional browser notification and tab title when a BUY or SELL appears |
 | Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
 
@@ -398,7 +399,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 135 tests
+pytest --cov=tradebot      # 137 tests
 ruff check . && ruff format --check .
 ```
 

@@ -144,8 +144,8 @@ button { font: inherit; color: inherit; }
 }
 .badge.BUY, .badge.ORDER { background: var(--up); color: var(--on-color); }
 .badge.SELL, .badge.REJECTED { background: var(--down); color: var(--on-color); }
-.badge.SKIP { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
-.badge.SKIP::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
+.badge.SKIP, .badge.BLOCKED { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
+.badge.SKIP::before, .badge.BLOCKED::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
 .badge.big { font-size: 15px; padding: 7px 14px; border-radius: 8px; }
 
 /* --- advice --- */
@@ -517,6 +517,8 @@ function sparkline(row) {
   return svg;
 }
 
+const badgeText = (a) => (a.action === "BLOCKED" ? `${a.side > 0 ? "BUY" : "SELL"} BLOCKED` : a.action);
+
 function renderWatchlist() {
   const items = state.symbols.map((row) => {
     if (row.error) {
@@ -525,6 +527,10 @@ function renderWatchlist() {
         el("span", { class: "sub", text: row.error }));
     }
     const action = row.advice.action;
+    const recent = row.advice.last_trigger;
+    const recentNote = recent && !row.advice.actionable
+      ? `${recent.side > 0 ? "Buy" : "Sell"} trigger ${recent.bars_ago === 0 ? "on the last bar" : `${recent.bars_ago} bar${recent.bars_ago === 1 ? "" : "s"} ago`} · ${recent.taken ? "taken" : "blocked"}`
+      : null;
     const pxEl = el("span", { class: "px", text: px(row.bid, row.digits) });
     const prev = lastBid[row.symbol];
     if (prev != null && prev !== row.bid) {
@@ -536,10 +542,11 @@ function renderWatchlist() {
     const change = first ? Math.round(((row.bid - first) / first) * 10000) / 100 : 0;
     return el("button", { class: "sym", type: "button", "aria-current": row.symbol === selected ? "true" : "false", onclick: () => select(row.symbol) },
       el("span", { class: "name", text: row.symbol }),
-      el("span", { class: `badge ${action}`, text: action }),
+      el("span", { class: `badge ${action}`, text: badgeText(row.advice) }),
       pxEl,
       el("span", { class: "chg muted", title: `Change over the last ${(row.spark || []).length - 1} ${state.timeframe} bars`, text: `${change > 0 ? "+" : change < 0 ? "−" : ""}${Math.abs(change).toFixed(2)}%` }),
       el("span", { class: "sub" }, el("span", { text: `spread ${distance(row, row.spread)}` }), sparkline(row)),
+      recentNote ? el("span", { class: "sub", style: "color:var(--text-2)", text: recentNote }) : null,
     );
   });
   $("#watchlist").replaceChildren(...items);
@@ -557,7 +564,7 @@ function renderAdvice(row) {
         el("div", { class: "faint", text: `at ${localTime(target)} (${utcTime(target)})` }))
     : el("div", { class: "when" });
   const parts = [
-    el("span", { class: `badge big ${a.action}`, text: a.action }),
+    el("span", { class: `badge big ${a.action}`, text: badgeText(a) }),
     el("div", {}, el("div", { class: "headline", text: a.headline }), el("div", { class: "detail", text: a.detail }),
       a.direction_note ? el("div", { class: "detail", text: a.direction_note }) : null,
       triggerLine(row)),
@@ -698,14 +705,15 @@ function renderSignals() {
   rows.sort((a, b) => (a.time < b.time ? 1 : -1));
   if (!rows.length) { $("#signals").replaceChildren(el("div", { class: "empty", text: "No signals in the loaded history yet." })); return; }
   const summary = el("div", { class: "fine", style: "margin:0 0 10px" },
-    `${tradeable} signals inside trading hours in the last ${Math.round(weeks)} weeks across all symbols: about ${(tradeable / weeks).toFixed(1)} a week. ` +
-    `Each one shows as BUY or SELL for a single ${state.timeframe} bar, so WAIT is the normal state.`);
+    `${tradeable} signals passed the filters inside trading hours in the last ${Math.round(weeks)} weeks across all symbols: about ${(tradeable / weeks).toFixed(1)} a week. ` +
+    `Each shows as BUY or SELL for a single ${state.timeframe} bar. Triggers the filters blocked are listed too, so you can see how those calls turned out.`);
   const when = (iso) => { const d = parseTime(iso); return `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${localTime(iso)}`; };
   const r = (v) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}R`;
   const result = (x) => {
     const label = x.outcome === "target" ? `Target first (${r(x.r)})` : x.outcome === "stop" ? `Stop first (${r(x.r)})` : `Still open (${r(x.r)})`;
     const mark = x.outcome === "target" ? el("span", { class: "mark ok", text: "✓" }) : x.outcome === "stop" ? el("span", { class: "mark no", text: "✕" }) : el("span", { class: "mark", text: "…" });
-    return el("span", { class: "result" }, mark, label + (x.blocked ? " · outside trading hours, not traded" : ""));
+    const why = x.filter ? ` · blocked: ${x.filter}` : x.blocked ? " · outside trading hours, not traded" : "";
+    return el("span", { class: "result" }, mark, label + why);
   };
   const head = el("tr", {}, ...["When", "Symbol", "Side", "Entry", "What happened next"].map((h, i) => el("th", { class: i === 3 ? "n" : "", text: h })));
   const body = rows.slice(0, 12).map((x) => el("tr", {},
@@ -752,6 +760,14 @@ function announce() {
         tag: key,
       });
     } catch (e) { /* notifications unavailable */ }
+  }
+  for (const sym of state.symbols) {   // a trigger the filters blocked: tell the user, the call is theirs
+    if (!sym.advice || sym.advice.action !== "BLOCKED") continue;
+    const key = `${sym.symbol}:${sym.advice.bar_time}:blocked`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    try { new Notification(`${badgeText(sym.advice)} · ${sym.symbol}`, { body: sym.advice.detail, tag: key }); } catch (e) { /* unavailable */ }
   }
 }
 
