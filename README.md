@@ -264,6 +264,45 @@ that shorter window the corrected ema_cross H1 result is −6.5% out of sample (
   stop. On the earlier dataset, a strategy plus its exact mirror image summed to about −0.05R per
   trade at zero cost, which is the size of that bias: small, and in the safe direction.
 
+### Trying to improve the strategy
+
+A structured attempt to find something better, designed so that a lucky result could not pass as
+skill. The last two years (Nov 2024 – Nov 2026) were locked away as a holdout. Twelve families
+were fixed in advance and walk-forward tested on the earlier data only: two triggers × three
+timeframes × two exit styles ("target" = the current exits; "run" = no fixed target, trailing
+stop only). The slower timeframes test whether lower relative costs help; "run" tests whether
+cutting winners at a target was the problem.
+
+| Family (2017 – Oct 2024, out-of-sample folds) | Trades | Return | Profit factor | Avg trade | t-stat |
+|---|---:|---:|---:|---:|---:|
+| ema_cross · H1 · run | 529 | **+3.6%** | 1.05 | +0.04R | +0.45 |
+| breakout · H4 · target | 727 | −2.7% | 0.97 | −0.02R | −0.33 |
+| ema_cross · H4 · target | 285 | −3.4% | 0.92 | −0.04R | −0.62 |
+| ema_cross · H1 · target | 516 | −6.2% | 0.92 | −0.05R | −0.85 |
+| ema_cross · D1 · target | 73 | −1.4% | 0.83 | −0.07R | −0.56 |
+| ema_cross · H4 · run | 389 | −6.4% | 0.86 | −0.08R | −1.19 |
+| breakout · H4 · run | 560 | −12.3% | 0.80 | −0.09R | −1.65 |
+| breakout · H1 · run | 1,665 | −24.2% | 0.88 | −0.07R | −1.80 |
+| breakout · H1 · target | 2,337 | −32.8% | 0.88 | −0.07R | −2.80 |
+| breakout · D1 · target | 180 | −5.4% | 0.77 | −0.15R | −1.56 |
+| breakout · D1 · run | 109 | −3.7% | 0.70 | −0.24R | −1.98 |
+| ema_cross · D1 · run | 45 | −2.6% | 0.48 | −0.28R | −2.15 |
+
+One family of twelve was positive, with a t-statistic of 0.45: what chance produces. It was still
+taken to the holdout, once, with the parameters its last research window chose:
+
+| Holdout, Nov 2024 – Nov 2026 | Trades | Return | Profit factor | Winners | Avg trade (after swap) |
+|---|---:|---:|---:|---:|---:|
+| Candidate: ema_cross · H1 · run | 77 | **−8.8%** | 0.37 | 19.5% | −0.47R |
+| Current default config | 166 | −7.5% | 0.70 | 36.7% | −0.19R |
+
+**The candidate failed and was not adopted.** Slower timeframes and letting winners run do not
+rescue these triggers; none of the twelve predicts direction on these six instruments. The
+default config is unchanged. Reproduce with `scripts/research_families.py` and
+`scripts/research_holdout.py`. The holdout has now been looked at, so the next idea needs fresh
+out-of-sample data: the honest source is forward testing in dry-run mode, which the journal
+already records.
+
 So the bot is ready to run, and the research tooling says plainly that these signal sets are not
 worth trading with real money. Finding that out cheaply is the point of a backtester. New ideas
 (regime filters, longer horizons, ML classifiers on the same features) can be evaluated under the
