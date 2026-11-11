@@ -32,6 +32,26 @@ SESSIONS = {
 
 STRATEGIES = ("ema_cross", "breakout", "pullback")
 
+# Top-down analysis: the two higher timeframes that set the direction for each trading timeframe.
+# Each step is roughly 4-12x the one below it, the usual spacing for multi-timeframe analysis.
+AUTO_TREND_TIMEFRAMES = {
+    "M1": ("M15", "H1"),
+    "M5": ("H1", "H4"),
+    "M15": ("H1", "H4"),
+    "M30": ("H1", "H4"),
+    "H1": ("H4", "D1"),
+    "H4": ("D1",),
+    "D1": (),
+}
+_STANDARD = ("M5", "M15", "M30", "H1", "H4", "D1")
+
+
+def auto_trend_timeframes(timeframe: str) -> tuple[str, ...]:
+    if timeframe in AUTO_TREND_TIMEFRAMES:
+        return AUTO_TREND_TIMEFRAMES[timeframe]
+    base = TIMEFRAME_MINUTES[timeframe]  # non-standard timeframes: the next two at least 3x larger
+    return tuple(tf for tf in _STANDARD if TIMEFRAME_MINUTES[tf] >= 3 * base)[:2]
+
 
 class ConfigError(ValueError):
     """Raised for invalid configuration, listing every problem found."""
@@ -63,6 +83,9 @@ class StrategyParams:
     macd_signal: int = 9
     use_trend_filter: bool = True
     trend_timeframe: str = "H4"
+    trend_timeframes: tuple[str, ...] | str = ()
+    """Higher timeframes that must all agree with a trade: a list such as ["H1", "H4"], or "auto" to
+    pick the two that suit the trading timeframe. Empty = the single ``trend_timeframe``."""
     trend_ema: int = 200
     use_sr_filter: bool = True
     sr_lookback: int = 80
@@ -70,6 +93,14 @@ class StrategyParams:
     use_fib_filter: bool = False
     fib_lookback: int = 120
     fib_tolerance_atr: float = 0.5
+
+    def trend_ladder(self, timeframe: str) -> tuple[str, ...]:
+        """The higher timeframes the trend filter reads when trading ``timeframe``."""
+        if self.trend_timeframes == "auto":
+            return auto_trend_timeframes(timeframe)
+        if self.trend_timeframes:
+            return tuple(self.trend_timeframes)
+        return (self.trend_timeframe,)
 
     @property
     def warmup_bars(self) -> int:
@@ -275,6 +306,11 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
         errors.append("strategy.macd_fast must be lower than macd_slow")
     if s.trend_timeframe not in TIMEFRAME_MINUTES:
         errors.append(f"strategy.trend_timeframe {s.trend_timeframe!r} is not a timeframe")
+    if s.trend_timeframes != "auto":
+        bad = [t for t in ([s.trend_timeframes] if isinstance(s.trend_timeframes, str) else s.trend_timeframes)
+               if t not in TIMEFRAME_MINUTES]  # fmt: skip
+        if bad:
+            errors.append(f'strategy.trend_timeframes must be "auto" or a list of timeframes; got {bad}')
     if r.fixed_lot is None and not 0 < r.risk_percent <= 5:
         errors.append("risk.risk_percent must be in (0, 5]; above 5% per trade is not supported")
     if r.sl_atr <= 0 or r.tp_atr <= 0:

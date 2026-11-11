@@ -81,6 +81,7 @@ def init() -> None:
     if _W:
         return
     base = load_config("config/config.json")
+    base = base.with_strategy(trend_timeframes=("H4",))  # the single H4 filter these runs used
     h1 = {s: load_bars(DATA / f"{s}_H1.csv") for s in base.symbols}
     h4 = {(s, "H4"): load_bars(DATA / f"{s}_H4.csv") for s in base.symbols}
     d1 = {s: resample(h4[(s, "H4")], 1440).assign(spread=0) for s in base.symbols}

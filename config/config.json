@@ -24,7 +24,7 @@
     "adx_min": 20,
     "use_macd": true,
     "use_trend_filter": true,
-    "trend_timeframe": "H4",
+    "trend_timeframes": "auto",
     "trend_ema": 200,
     "use_sr_filter": true,
     "sr_lookback": 80,

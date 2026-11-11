@@ -50,12 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="run the trading loop")
     run.add_argument("--once", action="store_true", help="run one cycle and exit")
+    run.add_argument("--timeframe", type=str.upper, help="override the config timeframe (e.g. M30)")
     run.add_argument(
         "--live", action="store_true", help="allow real orders (the config must also allow them)"
     )
 
     ui = sub.add_parser("ui", help="live advisor dashboard in the browser: when, where, and how much")
     ui.add_argument("--port", type=int, default=8765, help="local port (default: %(default)s)")
+    ui.add_argument("--timeframe", type=str.upper, help="start on this trading timeframe (e.g. M30)")
     ui.add_argument(
         "--live", action="store_true", help="enable the order button (the config must also allow orders)"
     )
@@ -66,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--symbols", nargs="+", help="default: symbols from the config")
     fetch.add_argument(
         "--timeframes", nargs="+", help="default: the config timeframe and the trend filter's timeframe"
+    )
+    fetch.add_argument(
+        "--timeframe", type=str.upper, help="fetch this trading timeframe and the ones its trend filter needs"
     )
     fetch.add_argument("--bars", type=int, default=60_000)
     fetch.add_argument("--out", type=Path, default=Path("data"))
@@ -351,8 +356,8 @@ def cmd_fetch(config: BotConfig, args: argparse.Namespace) -> int:
     try:
         for configured, symbol in zip(args.symbols or config.symbols, symbols, strict=False):
             save_spec(args.out, _rename(broker.symbol(symbol), configured))
-            trend = trend_timeframes(config).get(configured)
-            for tf in args.timeframes or [config.timeframe, *([trend] if trend else [])]:
+            trend = trend_timeframes(config).get(configured, ())
+            for tf in args.timeframes or [config.timeframe, *trend]:
                 bars = fetch_history(broker, symbol, tf, args.bars)
                 path = bars_path(args.out, configured, tf)
                 bars.to_csv(path, index=False)

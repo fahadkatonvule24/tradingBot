@@ -40,10 +40,10 @@ def bars_for(symbol: str, tf: str) -> pd.DataFrame:
 def family_config(base, strategy: str, tf: str, exits: str):
     cfg = replace(base, timeframe=tf).with_strategy(name=strategy)
     if tf == "H4":
-        cfg = cfg.with_strategy(trend_timeframe="D1")
+        cfg = cfg.with_strategy(trend_timeframes=("D1",))
         cfg = replace(cfg, schedule=replace(cfg.schedule, session="all"))
     if tf == "D1":
-        cfg = cfg.with_strategy(trend_timeframe="D1")
+        cfg = cfg.with_strategy(trend_timeframes=("D1",))
         cfg = replace(cfg, schedule=replace(cfg.schedule, session="all"))
         # Daily bars close at the 17:00 New York rollover, when spreads are widest: triple the floor.
         cfg = replace(
@@ -86,6 +86,7 @@ def summarise(wf) -> dict:
 
 def main() -> None:
     base = load_config("config/config.json")
+    base = base.with_strategy(trend_timeframes=("H4",))  # the single H4 filter these runs used
     only = sys.argv[1:]
     OUT.parent.mkdir(exist_ok=True)
     results = json.loads(OUT.read_text()) if OUT.exists() else {}

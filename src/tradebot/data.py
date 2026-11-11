@@ -52,13 +52,18 @@ def load_dataset(
     return data, specs
 
 
-def trend_timeframes(config: BotConfig) -> dict[str, str]:
-    """Symbol -> higher timeframe its trend filter reads, for symbols that use one."""
+def trend_timeframes(config: BotConfig) -> dict[str, tuple[str, ...]]:
+    """Symbol -> the higher timeframes its trend filter reads, for symbols that use any."""
     out = {}
     for symbol in config.symbols:
         p = config.for_symbol(symbol).strategy
-        if p.use_trend_filter and TIMEFRAME_MINUTES[p.trend_timeframe] > config.bar_minutes:
-            out[symbol] = p.trend_timeframe
+        if not p.use_trend_filter:
+            continue
+        higher = tuple(
+            tf for tf in p.trend_ladder(config.timeframe) if TIMEFRAME_MINUTES[tf] > config.bar_minutes
+        )
+        if higher:
+            out[symbol] = higher
     return out
 
 
@@ -69,10 +74,11 @@ def load_trend_bars(data_dir: str | Path, config: BotConfig) -> dict[tuple[str, 
     falls back to resampling the base timeframe.
     """
     out = {}
-    for symbol, timeframe in trend_timeframes(config).items():
-        path = bars_path(Path(data_dir), symbol, timeframe)
-        if path.is_file():
-            out[(symbol, timeframe)] = load_bars(path)
+    for symbol, timeframes in trend_timeframes(config).items():
+        for timeframe in timeframes:
+            path = bars_path(Path(data_dir), symbol, timeframe)
+            if path.is_file():
+                out[(symbol, timeframe)] = load_bars(path)
     return out
 
 

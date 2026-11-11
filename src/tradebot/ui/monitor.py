@@ -14,7 +14,7 @@ import queue
 import threading
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,8 @@ from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
 from tradebot.config import BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
-from tradebot.live import Link, latest_features, preview_features, trading_gate
+from tradebot.live import Link, fetch_frames, preview_features, trading_gate
+from tradebot.strategy import compute_signals
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,16 @@ CHART_BARS = 120
 SPEC_REFRESH = timedelta(minutes=5)
 PREVIEW_SECONDS = 3.0
 LOST_LINK = "Lost the connection to MetaTrader 5. Is the terminal open? Prices are frozen; retrying."
+
+
+SWITCHABLE = ("M5", "M15", "M30", "H1", "H4")
+
+
+@dataclass
+class _Switch:
+    timeframe: str
+    done: threading.Event = field(default_factory=threading.Event)
+    result: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -76,6 +87,8 @@ class Monitor:
         self._last_error: str | None = None
         self.notifier = notifier
         self._previews: dict[str, tuple[float, pd.DataFrame | None]] = {}
+        self._track_args: tuple[Any, Any] | None = None
+        self._htf: dict[str, dict[str, pd.DataFrame]] = {}
         self._forming_seen: set[tuple[str, Any, int]] = set()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
@@ -88,6 +101,44 @@ class Monitor:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return self._state
+
+    def set_timeframe(self, timeframe: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Switch the trading timeframe (handled on the MT5 thread, between refreshes)."""
+        switch = _Switch(str(timeframe).upper())
+        self._orders.put(switch)
+        if not switch.done.wait(timeout):
+            return {"ok": False, "message": "timed out waiting for the MT5 thread"}
+        return switch.result
+
+    def _apply_timeframe(self, timeframe: str) -> dict[str, Any]:
+        if timeframe not in SWITCHABLE:
+            return {"ok": False, "message": f"timeframe must be one of {', '.join(SWITCHABLE)}"}
+        if timeframe != self.config.timeframe:
+            config = replace(self.config, timeframe=timeframe)
+            try:
+                config.validate()
+            except ValueError as exc:
+                return {"ok": False, "message": str(exc)}
+            self.config = config
+            self.engine = Engine(config, self.broker, execute=False, live=True)
+            with self._lock:
+                self._features.clear()
+            for cache in (self._fetched, self._recent, self._previews, self._last_action, self._htf):
+                cache.clear()
+            self._forming_seen.clear()
+            self.track_record = {}
+            if self._track_args:
+                threading.Thread(
+                    target=self.load_track_record, args=self._track_args, name="track-record", daemon=True
+                ).start()
+            log.info("trading timeframe switched to %s", timeframe)
+        ladder = self.trend_timeframes()
+        trend = f"direction from {' + '.join(ladder)}" if ladder else "no trend filter"
+        return {"ok": True, "message": f"Now analysing {timeframe} ({trend}).", "timeframe": timeframe}
+
+    def trend_timeframes(self) -> list[str]:
+        strategy = self.config.strategy
+        return list(strategy.trend_ladder(self.config.timeframe)) if strategy.use_trend_filter else []
 
     def chart(self, symbol: str) -> dict[str, Any] | None:
         with self._lock:
@@ -119,12 +170,22 @@ class Monitor:
             while not self._stop.is_set():
                 deadline = time.monotonic() + self.interval
                 self.cycle()
-                while (remaining := deadline - time.monotonic()) > 0 and not self._stop.is_set():
+                while not self._stop.is_set():
+                    # Requests from the page are served after every refresh, even one that overran
+                    # its second: waiting for spare time starved them when refreshes got slower.
+                    remaining = deadline - time.monotonic()
                     try:
-                        order = self._orders.get(timeout=remaining)
+                        order = (
+                            self._orders.get(timeout=remaining)
+                            if remaining > 0
+                            else self._orders.get_nowait()
+                        )
                     except queue.Empty:
                         break
-                    order.result = self._safe_execute(order)
+                    if isinstance(order, _Switch):
+                        order.result = self._apply_timeframe(order.timeframe)
+                    else:
+                        order.result = self._safe_execute(order)
                     order.done.set()
         finally:
             if self._journal:
@@ -177,6 +238,8 @@ class Monitor:
             "now": now,
             "strategy": self.config.strategy.name,
             "timeframe": self.config.timeframe,
+            "timeframes": list(SWITCHABLE),
+            "trend_timeframes": self.trend_timeframes(),
             "session": "{:02d}-{:02d} UTC".format(*self.config.schedule.hours()),
             "account": asdict(account) | {"server": server, "floating": account.equity - account.balance},
             "gate": {"execute": gate.execute, "reason": gate.reason, "live_flag": self.live_flag},
@@ -245,7 +308,9 @@ class Monitor:
             due = pd.Timestamp(now) >= next_close and time.monotonic() - fetched >= 5
             if not due and time.monotonic() - fetched < 300:
                 return features
-        features = latest_features(self.broker, self.config, symbol)
+        bars, htf = fetch_frames(self.broker, self.config, symbol)
+        features = compute_signals(bars, self.config.for_symbol(symbol).strategy, self.config.timeframe, htf)
+        self._htf[symbol] = htf
         self._fetched[symbol] = time.monotonic()
         with self._lock:
             self._features[symbol] = features
@@ -257,7 +322,7 @@ class Monitor:
         if cached and time.monotonic() - cached[0] < PREVIEW_SECONDS:
             return cached[1]
         try:
-            preview = preview_features(self.broker, self.config, symbol, features)
+            preview = preview_features(self.broker, self.config, symbol, features, self._htf.get(symbol))
         except Exception:
             log.debug("%s: preview failed", symbol, exc_info=True)
             preview = None
@@ -398,12 +463,16 @@ class Monitor:
         from tradebot.backtest import run_backtest
         from tradebot.data import load_dataset, load_trend_bars
 
+        self._track_args = (data_dir, names)
+        config = self.config  # the timeframe may be switched while this runs
         try:
-            data, specs = load_dataset(data_dir, list(self.config.symbols), self.config.timeframe)
-            htf = load_trend_bars(data_dir, self.config)
-            result = run_backtest(self.config, data, specs, htf=htf)
+            data, specs = load_dataset(data_dir, list(config.symbols), config.timeframe)
+            htf = load_trend_bars(data_dir, config)
+            result = run_backtest(config, data, specs, htf=htf)
         except (FileNotFoundError, ValueError) as exc:
             log.info("no track record: %s", exc)
+            return
+        if config is not self.config:
             return
         per = result.per_symbol
         m = result.metrics

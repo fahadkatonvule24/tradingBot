@@ -62,9 +62,10 @@ def prepare_features(
     out = {}
     for symbol, bars in data.items():
         strategy = config.for_symbol(symbol).strategy
-        out[symbol] = compute_signals(
-            bars, strategy, config.timeframe, htf.get((symbol, strategy.trend_timeframe))
-        )
+        frames = {
+            tf: htf[(symbol, tf)] for tf in strategy.trend_ladder(config.timeframe) if (symbol, tf) in htf
+        }
+        out[symbol] = compute_signals(bars, strategy, config.timeframe, frames)
     return out
 
 

@@ -152,21 +152,46 @@ filter near a crossing), 0.0006% after 6. Live trading must see the same trend a
 
 def latest_features(broker: Broker, config: BotConfig, symbol: str) -> pd.DataFrame:
     """Signals on the most recent closed bars, with the trend filter fed by real higher-timeframe bars."""
+    bars, htf = fetch_frames(broker, config, symbol)
+    return compute_signals(bars, config.for_symbol(symbol).strategy, config.timeframe, htf)
+
+
+def fetch_frames(
+    broker: Broker, config: BotConfig, symbol: str
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    """Closed bars on the trading timeframe, and on each higher timeframe the trend filter reads."""
     strategy = config.for_symbol(symbol).strategy
     bars = broker.bars(symbol, config.timeframe, config.history_bars)
-    htf = None
-    if strategy.use_trend_filter and TIMEFRAME_MINUTES[strategy.trend_timeframe] > config.bar_minutes:
-        htf = broker.bars(symbol, strategy.trend_timeframe, strategy.trend_ema * HTF_HISTORY_MULTIPLE)
-    return compute_signals(bars, strategy, config.timeframe, htf)
+    htf = {
+        tf: broker.bars(symbol, tf, strategy.trend_ema * HTF_HISTORY_MULTIPLE)
+        for tf in higher_timeframes(config, strategy)
+    }
+    return bars, htf
+
+
+def higher_timeframes(config: BotConfig, strategy) -> list[str]:
+    """The trend filter's timeframes that are above the trading timeframe and so need their own bars."""
+    if not strategy.use_trend_filter:
+        return []
+    return [
+        tf for tf in strategy.trend_ladder(config.timeframe) if TIMEFRAME_MINUTES[tf] > config.bar_minutes
+    ]
 
 
 BAR_COLUMNS = ["time", "open", "high", "low", "close", "spread"]
 
 
 def preview_features(
-    broker: Broker, config: BotConfig, symbol: str, closed: pd.DataFrame
+    broker: Broker,
+    config: BotConfig,
+    symbol: str,
+    closed: pd.DataFrame,
+    htf: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame | None:
     """Signals as they would be if the forming bar closed at the current price (None if there is none).
+
+    Pass the higher-timeframe bars already fetched for ``closed`` as ``htf`` to avoid asking the
+    terminal for them again: the dashboard calls this every few seconds for every symbol.
 
     For the early warning only: nothing here is ever traded. If a higher-timeframe bar closes at
     the same moment as the forming bar, it is included too, as it will be when the bar really closes.
@@ -179,14 +204,16 @@ def preview_features(
     base = pd.concat(
         [closed[BAR_COLUMNS], pd.DataFrame([{**bar, "spread": closed["spread"].iloc[-1]}])], ignore_index=True
     )
-    htf = None
-    htf_minutes = TIMEFRAME_MINUTES[strategy.trend_timeframe]
-    if strategy.use_trend_filter and htf_minutes > config.bar_minutes:
-        htf = broker.bars(symbol, strategy.trend_timeframe, strategy.trend_ema * HTF_HISTORY_MULTIPLE)
-        closes = pd.Timestamp(bar["time"]) + pd.Timedelta(minutes=config.bar_minutes)
-        higher = forming(symbol, strategy.trend_timeframe)
-        if higher and pd.Timestamp(higher["time"]) + pd.Timedelta(minutes=htf_minutes) <= closes:
-            htf = pd.concat([htf, pd.DataFrame([{**higher, "spread": 0}])], ignore_index=True)
+    known, htf = htf or {}, {}
+    closes = pd.Timestamp(bar["time"]) + pd.Timedelta(minutes=config.bar_minutes)
+    for tf in higher_timeframes(config, strategy):
+        frame = known.get(tf)
+        if frame is None:
+            frame = broker.bars(symbol, tf, strategy.trend_ema * HTF_HISTORY_MULTIPLE)
+        higher = forming(symbol, tf)
+        if higher and pd.Timestamp(higher["time"]) + pd.Timedelta(minutes=TIMEFRAME_MINUTES[tf]) <= closes:
+            frame = pd.concat([frame, pd.DataFrame([{**higher, "spread": 0}])], ignore_index=True)
+        htf[tf] = frame
     return compute_signals(base, strategy, config.timeframe, htf)
 
 

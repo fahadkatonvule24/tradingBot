@@ -148,7 +148,7 @@ def test_backtest_uses_real_trend_bars_when_saved(tmp_path):
     bars = synthetic_bars(n=4000, seed=3)
     real_h4 = resample(synthetic_bars(n=4000, seed=99), 240)  # same times, different prices
     real_h4.to_csv(tmp_path / "EURUSD_H4.csv", index=False)
-    assert trend_timeframes(config) == {"EURUSD": "H4"}
+    assert trend_timeframes(config) == {"EURUSD": ("H4",)}
     htf = load_trend_bars(tmp_path, config)
     features = prepare_features(config, {"EURUSD": bars}, htf)["EURUSD"]
     expected = compute_signals(bars, config.strategy, "M15", htf[("EURUSD", "H4")])

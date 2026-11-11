@@ -100,7 +100,8 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         if not self._host_ok():
             return
-        if urlsplit(self.path).path != "/api/order":
+        path = urlsplit(self.path).path
+        if path not in ("/api/order", "/api/timeframe"):
             return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         origin = self.headers.get("Origin")
         if origin and origin.removeprefix("http://") not in self.server.allowed_hosts():
@@ -109,6 +110,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(
                 HTTPStatus.FORBIDDEN, {"ok": False, "message": "missing or wrong session token"}
             )
+        if path == "/api/timeframe":
+            try:
+                timeframe = str(json.loads(raw or b"{}")["timeframe"])
+            except (ValueError, KeyError, TypeError) as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": f"bad request: {exc}"})
+            result = self.server.monitor.set_timeframe(timeframe)
+            return self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST, result)
         try:
             body = json.loads(raw or b"{}")
             symbol, side = str(body["symbol"]), int(body["side"])

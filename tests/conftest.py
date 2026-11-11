@@ -68,7 +68,14 @@ def at(minutes: int) -> datetime:
 class FakeMT5:
     """Just enough of the MetaTrader5 package to exercise the adapter without a terminal."""
 
-    TIMEFRAME_M15, TIMEFRAME_H1, TIMEFRAME_H4 = 15, 60, 240
+    TIMEFRAME_M5, TIMEFRAME_M15, TIMEFRAME_M30, TIMEFRAME_H1, TIMEFRAME_H4, TIMEFRAME_D1 = (
+        5,
+        15,
+        30,
+        60,
+        240,
+        1440,
+    )
     POSITION_TYPE_BUY, POSITION_TYPE_SELL = 0, 1
     ORDER_TYPE_BUY, ORDER_TYPE_SELL = 0, 1
     DEAL_TYPE_BUY, DEAL_TYPE_SELL = 0, 1

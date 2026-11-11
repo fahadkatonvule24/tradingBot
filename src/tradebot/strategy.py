@@ -63,11 +63,15 @@ def resample(bars: pd.DataFrame, minutes: int) -> pd.DataFrame:
 
 
 def higher_timeframe_trend(
-    bars: pd.DataFrame, timeframe: str, p: StrategyParams, htf: pd.DataFrame | None = None
+    bars: pd.DataFrame,
+    timeframe: str,
+    p: StrategyParams,
+    htf: pd.DataFrame | None = None,
+    trend_timeframe: str | None = None,
 ) -> pd.Series:
     """+1 / -1 / 0 per base bar: is the last *completed* higher-timeframe close above its EMA?"""
     base_min = TIMEFRAME_MINUTES[timeframe]
-    htf_min = TIMEFRAME_MINUTES[p.trend_timeframe]
+    htf_min = TIMEFRAME_MINUTES[trend_timeframe or p.trend_timeframe]
     if htf_min <= base_min:
         line = ema(bars["close"], p.trend_ema)
         return np.sign(bars["close"] - line).fillna(0).astype(int)
@@ -107,10 +111,23 @@ def _trigger(df: pd.DataFrame, p: StrategyParams) -> pd.Series:
     return up.astype(int) - down.astype(int)
 
 
+def trend_columns(frame: pd.DataFrame | pd.Series) -> list[str]:
+    """Names of the per-timeframe trend columns ("trend_H1", "trend_H4") in a features frame or row."""
+    return [c for c in frame.keys() if isinstance(c, str) and c.startswith("trend_")]  # noqa: SIM118
+
+
 def compute_signals(
-    bars: pd.DataFrame, p: StrategyParams, timeframe: str, htf: pd.DataFrame | None = None
+    bars: pd.DataFrame,
+    p: StrategyParams,
+    timeframe: str,
+    htf: pd.DataFrame | dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
-    """Indicators + filtered signal for every closed bar."""
+    """Indicators + filtered signal for every closed bar.
+
+    ``htf`` holds real higher-timeframe bars: a dict keyed by timeframe, or one frame for the first
+    timeframe of the ladder. Missing ones are resampled from ``bars``. ``trend`` is +1 / -1 only
+    when every timeframe of the ladder agrees; ``trend_<TF>`` holds each one.
+    """
     df = bars.reset_index(drop=True).copy()
     close = df["close"]
     df["atr"] = atr(df, p.atr_period)
@@ -119,7 +136,17 @@ def compute_signals(
     df["rsi"] = rsi(close, p.rsi_period)
     df["adx"] = adx(df, p.adx_period)
     df["macd_hist"] = macd(close, p.macd_fast, p.macd_slow, p.macd_signal)[2]
-    df["trend"] = higher_timeframe_trend(df, timeframe, p, htf)
+    ladder = p.trend_ladder(timeframe)
+    frames = htf if isinstance(htf, dict) else ({ladder[0]: htf} if ladder and htf is not None else {})
+    each = {tf: higher_timeframe_trend(df, timeframe, p, frames.get(tf), tf) for tf in ladder}
+    for tf, values in each.items():
+        df[f"trend_{tf}"] = values
+    if each:
+        stacked = pd.concat(each.values(), axis=1)
+        agree = (stacked.max(axis=1) == stacked.min(axis=1)).to_numpy()
+        df["trend"] = np.where(agree, stacked.iloc[:, 0].to_numpy(), 0).astype(int)
+    else:
+        df["trend"] = 0
     df["resistance"] = df["high"].rolling(p.sr_lookback).max().shift(1)
     df["support"] = df["low"].rolling(p.sr_lookback).min().shift(1)
 
@@ -186,9 +213,9 @@ def explain(row: pd.Series, p: StrategyParams) -> str:
         "pullback": f"RSI({p.pullback_rsi_period}) pullback {'recovered' if side == 'buy' else 'rolled over'}",
     }[p.name]
     parts = [trigger, f"RSI {row['rsi']:.1f}", f"ADX {row['adx']:.1f}"]
-    parts.append(
-        f"{p.trend_timeframe} trend {'up' if row['trend'] > 0 else 'down' if row['trend'] < 0 else 'flat'}"
-    )
+    names = "+".join(c[6:] for c in trend_columns(row)) or p.trend_timeframe
+    state = "up" if row["trend"] > 0 else "down" if row["trend"] < 0 else "mixed" if "+" in names else "flat"
+    parts.append(f"{names} trend {state}")
     if row.get("block"):
         parts.append("blocked: " + BLOCK_LABELS.get(row["block"], row["block"]))
     return " · ".join(parts)

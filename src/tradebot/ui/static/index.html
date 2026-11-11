@@ -183,6 +183,8 @@ button { font: inherit; color: inherit; }
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px; margin: 0 0 10px; border-radius: 8px; background: var(--surface-2); }
 .seg button { border: 0; border-radius: 6px; padding: 6px 8px; background: transparent; color: var(--text-2); font-weight: 650; cursor: pointer; }
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow), inset 0 0 0 1px var(--border); }
+.seg.tf { grid-template-columns: repeat(5, auto); margin: 0; padding: 2px; }
+.seg.tf button { padding: 3px 9px; font-size: 12px; }
 .seg small { display: block; font-weight: 500; font-size: 11px; color: var(--text-3); }
 .kv-list { display: grid; grid-template-columns: auto 1fr auto; gap: 7px 10px; align-items: baseline; }
 .kv-list .k { color: var(--text-2); }
@@ -270,6 +272,7 @@ dialog .actions .go { border: 0; font-weight: 650; }
     <svg width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="4" fill="var(--up)"/><path d="M3 11l3-3 2 2 5-5" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
     tradebot <span class="muted">advisor</span>
   </div>
+  <div class="chips" id="tfs"></div>
   <div class="chips" id="chips"></div>
   <div class="account" id="account"></div>
   <div class="gate" id="gate"><span class="dot"></span><span>Connecting to MetaTrader 5…</span></div>
@@ -482,11 +485,44 @@ function render() {
   drawChart();
 }
 
+let timeframeKey = "";
+function renderTimeframes() {   // rebuilt only when it changes, so a click is never lost to a re-render
+  const trend = state.trend_timeframes || [];
+  const key = `${state.timeframe}|${(state.timeframes || []).join()}|${trend.join()}`;
+  if (key === timeframeKey) return;
+  timeframeKey = key;
+  const buttons = (state.timeframes || []).map((tf) => el("button", { type: "button", title: `Trade on ${tf} bars`,
+    "aria-pressed": tf === state.timeframe ? "true" : "false", onclick: () => switchTimeframe(tf) }, tf));
+  $("#tfs").replaceChildren(
+    el("div", { class: "seg tf", role: "group", "aria-label": "Trading timeframe" }, ...buttons),
+    el("span", { class: "chip", text: trend.length ? `direction from ${trend.join(" + ")}` : "no trend filter" }));
+}
+async function switchTimeframe(tf) {
+  if (tf === state.timeframe) return;
+  toast(`Switching to ${tf}…`, 4000);
+  try {
+    const res = await fetch("/api/timeframe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Tradebot-Token": TOKEN },
+      body: JSON.stringify({ timeframe: tf }),
+    });
+    const out = await res.json();
+    if (!out.ok) { toast(`Could not switch: ${out.message}`); return; }
+    for (const key of Object.keys(charts)) delete charts[key];
+    planSide = 0;
+    hoverIndex = null;
+    toast(out.message, 5000);
+  } catch (e) {
+    toast(`Switch failed: ${e.message}`);
+  }
+}
+
 function renderHeader() {
+  renderTimeframes();
   const a = state.account;
   const names = { ema_cross: "EMA cross", breakout: "Breakout", pullback: "Pullback" };
   $("#chips").replaceChildren(
-    el("span", { class: "chip", text: `${names[state.strategy] || state.strategy} · ${state.timeframe}` }),
+    el("span", { class: "chip", text: names[state.strategy] || state.strategy }),
     el("span", { class: "chip", text: `Session ${state.session}` }),
     el("span", { class: "chip", text: `${a.server || "MT5"} · ${a.is_real ? "REAL MONEY" : "demo"}` }),
   );
@@ -670,7 +706,7 @@ function renderRecord(row) {
   const tr = state.track_record || {};
   const rec = tr.symbols && tr.symbols[row.symbol];
   if (!rec) {
-    box.replaceChildren(el("h2", { text: "Track record" }), el("div", { class: "empty" }, "No backtest for this symbol yet. Run ", el("code", { text: "tradebot fetch" }), " to download history, then restart the dashboard."));
+    box.replaceChildren(el("h2", { text: "Track record" }), el("div", { class: "empty" }, "No backtest for this symbol yet. Run ", el("code", { text: `tradebot fetch --timeframe ${state.timeframe}` }), " to download history for this timeframe, then restart the dashboard."));
     return;
   }
   const fig = (label, value) => el("div", {}, el("div", { class: "label", text: label }), el("div", { class: "value", text: value }));

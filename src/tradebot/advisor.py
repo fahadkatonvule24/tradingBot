@@ -21,7 +21,7 @@ from tradebot.broker.base import SymbolSpec, Tick
 from tradebot.config import ScheduleParams, StrategyParams, SymbolParams
 from tradebot.engine import Engine, Rejection, stop_distances
 from tradebot.indicators import rsi
-from tradebot.strategy import BLOCK_LABELS, FILTERS, _near_fib, explain
+from tradebot.strategy import BLOCK_LABELS, FILTERS, _near_fib, explain, trend_columns
 
 WORD = {1: "BUY", -1: "SELL"}
 
@@ -302,18 +302,32 @@ def last_trigger(features: pd.DataFrame, params: SymbolParams, tick: Tick, bar_m
 
 def direction_note(row: pd.Series, p: StrategyParams, side: int, timeframe: str) -> str:
     """Explain a trend-filtered direction, and say so plainly when the chart is moving against it."""
-    if not (p.use_trend_filter and "trend" in FILTERS[p.name]) or int(row["trend"]) != side:
+    if not (p.use_trend_filter and "trend" in FILTERS[p.name]):
+        return ""
+    columns = trend_columns(row)
+    names = [c[6:] for c in columns] or [p.trend_timeframe]
+    label, several = " and ".join(names), len(names) > 1
+    if several and int(row["trend"]) == 0 and len({int(row[c]) for c in columns}) > 1:
+        states = ", ".join(
+            f"{c[6:]} {'up' if row[c] > 0 else 'down' if row[c] < 0 else 'flat'}" for c in columns
+        )
+        return (
+            f"No trades either way right now: the higher timeframes disagree ({states}). "
+            f"A trigger is only taken when {label} point the same way."
+        )
+    if int(row["trend"]) != side:
         return ""
     allowed, other = ("buys", "sell") if side > 0 else ("sells", "buy")
     note = (
-        f"Only {allowed} are considered here: the {p.trend_timeframe} trend is {'up' if side > 0 else 'down'} "
-        f"(the last completed {p.trend_timeframe} bar closed {'above' if side > 0 else 'below'} its EMA {p.trend_ema})."
+        f"Only {allowed} are considered here: the {label} trend{'s are' if several else ' is'} "
+        f"{'up' if side > 0 else 'down'} (the last completed {label} bar{'s' if several else ''} closed "
+        f"{'above' if side > 0 else 'below'} {'their' if several else 'its'} EMA {p.trend_ema})."
     )
     chart_up = row["ema_fast"] > row["ema_slow"]
     if chart_up != (side > 0):
         note += (
             f" The {timeframe} chart is moving {'up' if chart_up else 'down'}, against that trend, so {other} "
-            f"triggers are filtered out until the {p.trend_timeframe} trend turns."
+            f"triggers are filtered out until the {label} trend{'s turn' if several else ' turns'}."
         )
     return note
 
@@ -369,9 +383,11 @@ def filter_checks(features: pd.DataFrame, p: StrategyParams, side: int) -> list[
     applicable = FILTERS[p.name]
     checks = []
     if "trend" in applicable and p.use_trend_filter:
-        state = {1: "up", -1: "down"}.get(int(row["trend"]), "flat")
-        checks.append(Check(f"{p.trend_timeframe} trend", int(row["trend"]) == side,
-                            f"{state} (close vs EMA {p.trend_ema})"))  # fmt: skip
+        columns = [(c[6:], c) for c in trend_columns(features)] or [(p.trend_timeframe, "trend")]
+        for name, column in columns:  # one row per higher timeframe; all must agree with the trade
+            value = int(row[column])
+            state = {1: "up", -1: "down"}.get(value, "flat")
+            checks.append(Check(f"{name} trend", value == side, f"{state} (close vs EMA {p.trend_ema})"))
     if "adx" in applicable and p.use_adx:
         checks.append(Check("Trend strength", bool(row["adx"] >= p.adx_min),
                             f"ADX {row['adx']:.1f}, needs ≥ {p.adx_min:g}"))  # fmt: skip

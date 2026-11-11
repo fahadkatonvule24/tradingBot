@@ -95,6 +95,7 @@ symbol, once a second:
 | Filter checklist | the strategy's filters (trend, ADX, MACD, RSI, room to S/R) on the last closed bar |
 | Chart | the last 120 bars plus the forming one, both EMAs, profit and loss zones, live price; hover for OHLC |
 | Track record | a backtest of the current config on your downloaded history, per symbol |
+| Timeframe switch | trade on M5, M15, M30, H1 or H4; the two higher timeframes that set the direction are chosen automatically (M5/M15/M30 → H1 + H4, H1 → H4 + D1, H4 → D1) and each gets its own row in the checklist |
 | Buy / Sell switch on the plan | the same priced plan for either side, so a trade you choose yourself gets the bot's sizing, stop and target |
 | Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
 | Recent signals | the last triggers across all symbols, taken or blocked, and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
@@ -106,6 +107,26 @@ symbol, once a second:
 `Engine.entry_blocker` and `Engine.plan_entry` that `Engine.on_bar` runs before every live or
 backtest trade, so the side, lot size, stop and target on the page are exactly the order
 `tradebot run --live` would send at that moment.
+
+**Top-down analysis, on any timeframe.** With `"trend_timeframes": "auto"` (the default), the
+trend filter reads the two timeframes above the one you trade and takes a trigger only when both
+agree with it. Pick the trading timeframe on the dashboard, or with `--timeframe` on `ui`, `run`,
+`fetch` and `backtest`; a list such as `["M30", "H4"]` sets the ladder by hand. Lower timeframes
+do give more signals, and worse ones. Default parameters, nothing tuned, six instruments:
+
+| Trading timeframe · direction from | Trades a week | Winners | Average trade | Return | Period |
+|---|---:|---:|---:|---:|---|
+| H1 · H4 only (the earlier default) | 1.6 | 39.3% | −0.13R | −25.3% | Aug 2016 – Nov 2026 |
+| H1 · H4 + D1 | 1.2 | 37.1% | −0.18R | −26.1% | Aug 2016 – Nov 2026 |
+| M30 · H1 + H4 | 2.3 | 36.5% | −0.24R | −29.9% | Oct 2021 – Nov 2026 |
+| M15 · H1 + H4 | 3.4 | 34.5% | −0.27R | −26.1% | Apr 2024 – Nov 2026 |
+| M5 · H1 + H4 | 6.1 | 36.3% | −0.17R | −11.1% | Dec 2025 – Nov 2026 |
+
+Over the one window they all share (Feb – Nov 2026) the order is the same: −2.5% on H1, −8.9% on
+M30, −8.2% on M15, −12.3% on M5. A second higher timeframe removes trades without improving the
+ones that remain, and a 5-minute stop is only two or three pips, so the spread is a large share
+of every trade. The switch is there because a person's own read is often on a lower timeframe;
+it is not a way to make these triggers profitable.
 
 **Knowing early without acting early.** The bot decides only when a bar closes: a crossover on a
 bar that is still forming can appear and vanish several times, and v23 traded those. The early
@@ -260,6 +281,10 @@ position sizes below the minimum lot, the losing-streak pause, and position limi
 
 ## Results on real data
 
+These runs used a single H4 trend filter (`"trend_timeframes": ["H4"]`), which was the default
+when they were made; the research scripts pin it. The automatic two-timeframe ladder that is
+now the default is measured [under the advisor dashboard](#advisor-dashboard).
+
 Every strategy was walk-forward tested on six instruments (EURUSD, GBPUSD, USDJPY, AUDUSD,
 USDCAD, XAUUSD) using history exported from a MetaQuotes demo terminal: 60,000 H1 bars (2017 –
 Nov 2026), 60,000 M15 bars (Jun 2024 – Nov 2026), and the broker's real H4 bars for the trend
@@ -385,6 +410,7 @@ v23 is kept under the [`v23` tag](https://github.com/fahadkatonvule24/tradingBot
 | Backtest commission charged on the minimum lot | costs understated ~10× | per lot traded |
 | Volume below the broker minimum was rounded up | trades risked more than configured | skipped unless explicitly allowed |
 | Partial take-profit remembered in memory | a restart could take it again | derived from position history |
+| Dashboard requests handled only in a refresh's spare time (found in v3.6 testing) | once a refresh took over a second, the timeframe switch and the order button were never served | requests are served after every refresh |
 | Forex-pip filters on every symbol | crypto/gold spreads never passed; S/R and Fibonacci meaningless | everything in ATR units, per-symbol overrides |
 | Local clock for sessions, UTC for news, server time for deals | guards disagreed about "today" | UTC everywhere, server offset detected |
 
@@ -416,7 +442,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 150 tests
+pytest --cov=tradebot      # 170 tests
 ruff check . && ruff format --check .
 ```
 
@@ -437,6 +463,10 @@ Linux and Windows without a terminal.
   they are not enough on their own; the tooling is built to evaluate better ideas honestly.
 - **News calendar is a JSON file you maintain.** An economic-calendar feed would be a natural
   addition.
+- **The terminal can stall the bot.** The MetaTrader5 package blocks the whole Python process
+  while the terminal is busy, for example during a large history download, so the dashboard
+  freezes until the terminal answers. Download history (`tradebot fetch`) when the dashboard is
+  not running.
 - **One process, one terminal.** The dashboard is local by design; Telegram alerts are the only
   thing that leaves the machine, and only if you configure them.
 
