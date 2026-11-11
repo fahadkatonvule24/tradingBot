@@ -38,6 +38,10 @@ _ROW_COLUMNS = [
 ]
 
 
+_OPTIONAL_COLUMNS = ("target_price",)
+"""Present only for setups that name their own target."""
+
+
 @dataclass
 class BacktestResult:
     config: BotConfig
@@ -90,7 +94,8 @@ def run_backtest(
             window = window[window["time"] < end]
         if "spread" not in window:
             window = window.assign(spread=0)
-        frames.append(window[_ROW_COLUMNS].assign(symbol=symbol))
+        columns = [*_ROW_COLUMNS, *(c for c in _OPTIONAL_COLUMNS if c in window.columns)]
+        frames.append(window[columns].assign(symbol=symbol))
     timeline = pd.concat(frames, ignore_index=True).sort_values(["time", "symbol"], kind="stable")
     if timeline.empty:
         raise ValueError("no bars in the requested backtest window")

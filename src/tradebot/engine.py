@@ -370,6 +370,18 @@ class Engine:
         """
         r = params.risk
         sl_distance, tp_distance = stop_distances(spec, r, float(row["atr"]), spread)
+        target = row.get("target_price")
+        if target is not None and pd.notna(target) and int(row.get("raw_signal", 0)) == side:
+            # the setup names its own target price (a measured move): the distance is from the fill
+            tick = self.broker.tick(symbol)
+            entry = tick.ask if side > 0 else tick.bid
+            tp_distance = max((float(target) - entry) * side, spec.stops_level * spec.point + spread)
+        if r.min_reward_risk and tp_distance < r.min_reward_risk * sl_distance - 1e-12:
+            return Rejection(
+                "reward",
+                f"the target is {tp_distance / sl_distance:.1f} times the risk, below the minimum "
+                f"{r.min_reward_risk:g}",
+            )
         account = self.broker.account()
         exact = self._exact_pnl(symbol, spec, side, sl_distance, tp_distance)
         tick_value = exact[0] / (sl_distance / spec.tick_size) if exact else None

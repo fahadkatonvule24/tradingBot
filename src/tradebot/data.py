@@ -13,6 +13,10 @@ from tradebot.broker.base import SymbolSpec
 from tradebot.config import TIMEFRAME_MINUTES, BotConfig
 
 REQUIRED = ("time", "open", "high", "low", "close")
+BAR_COLUMNS = ["time", "open", "high", "low", "close", "spread"]
+OPTIONAL_COLUMNS = ("tick_volume",)
+"""Kept when the source has them. Tick volume is the broker's count of price changes in the bar:
+spot FX has no central volume, so this is the only volume there is."""
 
 
 def load_bars(path: str | Path) -> pd.DataFrame:
@@ -29,7 +33,7 @@ def load_bars(path: str | Path) -> pd.DataFrame:
     bad = (df["high"] < df[["open", "close"]].max(axis=1)) | (df["low"] > df[["open", "close"]].min(axis=1))
     if bad.any():
         raise ValueError(f"{path}: {int(bad.sum())} bars have high/low inconsistent with open/close")
-    return df[["time", "open", "high", "low", "close", "spread"]]
+    return df[[*BAR_COLUMNS, *(c for c in OPTIONAL_COLUMNS if c in df.columns)]]
 
 
 def bars_path(data_dir: Path, symbol: str, timeframe: str) -> Path:

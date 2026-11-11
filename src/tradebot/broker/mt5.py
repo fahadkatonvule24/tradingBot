@@ -259,7 +259,10 @@ class MT5Broker:
         df = df[df["time"] + bar <= pd.Timestamp(self.now())]  # drop the forming bar
         if "spread" not in df:
             df["spread"] = 0
-        return df[["time", "open", "high", "low", "close", "spread"]].tail(count).reset_index(drop=True)
+        columns = ["time", "open", "high", "low", "close", "spread"]
+        if "tick_volume" in df:
+            columns.append("tick_volume")
+        return df[columns].tail(count).reset_index(drop=True)
 
     def forming_bar(self, name: str, timeframe: str) -> dict[str, Any] | None:
         """The bar that is still forming (UTC open time), or None when the market is closed."""
@@ -270,7 +273,10 @@ class MT5Broker:
         opened = self._to_utc(float(last["time"]))
         if opened + timedelta(minutes=TIMEFRAME_MINUTES[timeframe]) <= self.now():
             return None
-        return {k: float(last[k]) for k in ("open", "high", "low", "close")} | {"time": opened}
+        bar = {k: float(last[k]) for k in ("open", "high", "low", "close")} | {"time": opened}
+        if "tick_volume" in (rates.dtype.names or ()):
+            bar["tick_volume"] = float(last["tick_volume"])  # so far: the bar is not finished
+        return bar
 
     def positions(self, magic: int | None) -> list[Position]:
         """Open positions with this magic number (``None``: every position on the account)."""

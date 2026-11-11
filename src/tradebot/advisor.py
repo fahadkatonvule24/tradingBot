@@ -444,6 +444,10 @@ def filter_checks(features: pd.DataFrame, p: StrategyParams, side: int) -> list[
         checks.append(Check("Momentum", bool(np.sign(hist) == side),
                             f"MACD histogram {'positive' if hist > 0 else 'negative'}, "
                             f"needs {'positive to buy' if side > 0 else 'negative to sell'}"))  # fmt: skip
+    if "volume" in applicable and p.use_volume_filter:
+        ratio = float(row.get("volume_ratio", float("nan")))
+        checks.append(Check("Volume", bool(ratio >= p.volume_min_ratio),
+                            f"{ratio:.1f} times the {p.volume_period}-bar average, needs ≥ {p.volume_min_ratio:g}"))  # fmt: skip
     if "rsi" in applicable:
         if side > 0:
             ok, need = row["rsi"] <= p.rsi_buy_max, f"≤ {p.rsi_buy_max:g} to buy"

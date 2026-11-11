@@ -82,6 +82,11 @@ def _filters(p: StrategyParams, timeframe: str) -> list[str]:
             f"Momentum: the MACD ({p.macd_fast}, {p.macd_slow}, {p.macd_signal}) histogram is positive "
             f"for a buy, negative for a sell."
         )
+    if "volume" in applicable and p.use_volume_filter:
+        lines.append(
+            f"Volume: the bar that breaks out has at least {p.volume_min_ratio:g} times the average tick "
+            f"volume of the previous {p.volume_period} bars."
+        )
     if "rsi" in applicable:
         lines.append(
             f"Not overextended: RSI({p.rsi_period}) at most {p.rsi_buy_max:g} for a buy, at least "
@@ -135,6 +140,15 @@ def trading_plan(
         f"Target: {r.tp_atr:g} ATR, so the reward is {r.tp_atr / r.sl_atr:.1f} times the risk (1R = the "
         f"distance to the stop).",
     ]
+    if p.name == "breakout" and p.breakout_target == "measured":
+        exits[1] = (
+            f"Target: the measured move. The height of the {p.breakout_period}-bar range that broke is "
+            f"projected from the broken level."
+        )
+    if r.min_reward_risk:
+        exits.insert(
+            2, f"A trade whose target is closer than {r.min_reward_risk:g} times its risk is skipped."
+        )
     if m.partial_tp:
         exits.append(f"At +{m.partial_tp_r:g}R, {m.partial_tp_fraction:.0%} of the position is closed.")
     exits.append(

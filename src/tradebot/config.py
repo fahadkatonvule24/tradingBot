@@ -71,6 +71,14 @@ class StrategyParams:
     breakout_min_atr: float = 0.25
     """A break only counts if the bar closes at least this many ATR beyond the level, and it has
     failed if a later bar closes back through the level by the same margin. 0 = any close through."""
+    breakout_target: str = "atr"
+    """"atr": the target is ``risk.tp_atr`` ATR, as for every setup. "measured": the measured move,
+    the height of the range that broke projected from the broken level."""
+    use_volume_filter: bool = False
+    """Breakout only: the break bar's tick volume must be ``volume_min_ratio`` times the average of
+    the previous ``volume_period`` bars. Needs tick volume in the bars (``tradebot fetch`` saves it)."""
+    volume_period: int = 20
+    volume_min_ratio: float = 1.5
     # pullback (RSI dips against the higher-timeframe trend, then recovers)
     pullback_rsi_period: int = 3
     pullback_buy_below: float = 15.0
@@ -148,6 +156,9 @@ class RiskParams:
     drawdown_days: int = 365
     max_consecutive_losses: int = 4
     max_trades_per_day: int = 8
+    min_reward_risk: float = 0.0
+    """Skip a trade whose target is closer than this many times its stop distance. 0 = off. Only
+    matters when a setup names its own target (the measured move); ATR targets are a fixed ratio."""
     allow_min_lot_overrisk: bool = False
 
 
@@ -331,6 +342,15 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
             errors.append(f'strategy.trend_timeframes must be "auto" or a list of timeframes; got {bad}')
     if r.fixed_lot is None and not 0 < r.risk_percent <= 5:
         errors.append("risk.risk_percent must be in (0, 5]; above 5% per trade is not supported")
+    if s.breakout_target not in ("atr", "measured"):
+        errors.append('strategy.breakout_target must be "atr" or "measured"')
+    if s.volume_period < 2 or s.volume_min_ratio <= 0:
+        errors.append("strategy.volume_period must be >= 2 and volume_min_ratio positive")
+    measured = s.name == "breakout" and s.breakout_target == "measured"
+    if r.min_reward_risk < 0 or (
+        not measured and r.sl_atr > 0 and r.min_reward_risk > r.tp_atr / r.sl_atr + 1e-9
+    ):
+        errors.append("risk.min_reward_risk is above tp_atr / sl_atr, so no trade could open")
     if r.sl_atr <= 0 or r.tp_atr <= 0:
         errors.append("risk.sl_atr and risk.tp_atr must be positive")
     if r.max_total_risk_percent < (r.risk_percent if r.fixed_lot is None else 0):

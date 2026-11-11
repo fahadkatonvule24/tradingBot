@@ -72,7 +72,7 @@ tradebot telegram                  # optional: set up alerts to your phone
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
 tradebot run                       # keep running (dry run); Ctrl+C stops after the current cycle
 
-tradebot fetch --bars 60000        # history to data/: trading + trend timeframes, symbol specs
+tradebot fetch --bars 60000        # history to data/: trading + trend timeframes, tick volume, symbol specs
 tradebot backtest                  # backtest config/config.json on data/ -> reports/*.html
 tradebot optimize --folds 4        # walk-forward optimisation -> out-of-sample report
 tradebot journal --days 7          # what the bot did this week
@@ -307,7 +307,7 @@ src/tradebot/
 | `strategy.name` | Entry trigger | Filters applied |
 |---|---|---|
 | `ema_cross` | fast EMA crosses slow EMA | trend, ADX, MACD, RSI cap, S/R room, Fibonacci (opt.) |
-| `breakout` | a bar closes at least `breakout_min_atr` (0.25) ATR beyond the prior N-bar high/low | trend, ADX, MACD |
+| `breakout` | a bar closes at least `breakout_min_atr` (0.25) ATR beyond the prior N-bar high/low. Options, both off by default: `use_volume_filter` (the break bar has 1.5 times the average tick volume of the previous 20 bars) and `breakout_target: "measured"` (target = the height of the range, projected from the level) | trend, ADX, MACD, volume (opt.) |
 | `pullback` | fast RSI recovers from an extreme in the direction of the trend | trend, ADX, S/R room, Fibonacci (opt.) |
 | `retest` | a bar closes through the prior N-bar high/low; within the next 12 bars price returns to that level and a bar closes away from it again. A close back through the level cancels the setup | trend, ADX |
 
@@ -358,10 +358,8 @@ v3.9; one principle cannot be met by code.
 | Paper-trade first, start small | dry run is the default; orders need three separate switches and real-money accounts are refused unless allowed |
 | **Positive expectancy** | **not met.** Every setup loses on ten years of history ([results](#results-on-real-data)). The plan prints the measured figure and says to stay in dry run. Risk rules limit what a losing system costs; they cannot make it a winning one |
 
-Two things from the usual advice are deliberately absent. **Volume confirmation** for breakouts:
-spot FX has no central volume, only the broker's tick count, and the stored history does not
-include it. **Mean reversion**, the third common family next to trend following and breakouts,
-was measured before deciding whether to build it. The textbook template (only when ADX(14) is
+**Mean reversion**, the third common family next to trend following and breakouts, was measured
+before deciding whether to build it. The textbook template (only when ADX(14) is
 below 25; a bar closes outside the 20-period, 2-deviation Bollinger band with RSI(14) below 30 or
 above 70; enter when the next bar closes back inside; stop 1 ATR beyond the extreme; target the
 middle band) was written down first and run once per variant on the six instruments:
@@ -403,8 +401,49 @@ to −0.12R on M30 and from −0.16R to −0.20R on M5, so it was not adopted, a
 a notice on the dashboard instead of an automatic exit. The RSI(2) rule is the clearest case of a
 high win rate that still loses: 59% winners on H1, 8,317 trades, and a negative average, because
 the losers are larger than the winners. **Nothing was adopted and the default rules are unchanged.**
-Not tested: measured-move targets (they need pattern detection the bot does not have) and volume
-(not in the stored history). Reproduce with `scripts/research_rule_variants.py`.
+Reproduce with `scripts/research_rule_variants.py`.
+
+**Volume, measured moves and other markets (v3.10).** Three more pieces of the same advice were
+built and then measured the same way. Spot FX has no central volume, so "volume" here is the
+broker's tick count per bar, which `tradebot fetch` now saves. The measured move is the height of
+the 20-bar range that broke, projected from the broken level; a trade whose target is closer than
+1.5 times its risk is skipped (`min_reward_risk`). Average trade of the breakout, current rule →
+variant:
+
+| Breakout variant | H1 | M30 | M15 | M5 |
+|---|---:|---:|---:|---:|
+| Volume: the break bar has 1.5 times the average tick volume of the previous 20 bars | −0.044R → **−0.008R** | −0.130R → −0.118R | −0.185R → −0.186R | −0.162R → −0.153R |
+| Measured-move target | −0.044R → −0.096R | −0.130R → −0.132R | −0.185R → −0.225R | −0.162R → −0.177R |
+| Both | −0.044R → −0.053R | −0.130R → −0.131R | −0.185R → −0.178R | −0.162R → −0.128R |
+
+The volume filter is the best single result in this README: on H1 the breakout goes from 4.7 to
+3.0 trades a week and from −0.044R to −0.008R (t = −0.2, not distinguishable from zero), with the
+loss over ten years falling from −26.5% to −6.5%. It did not pass the rule set beforehand, which
+required an improvement on both H1 and M15, and M15 did not move. M30 and M5 were then run for
+information only. So it ships as an option, off by default, and it is still not a profitable
+rule. Measured-move targets were worse than the plain 3 ATR target on three timeframes and level
+on the fourth.
+
+All six default instruments have a US dollar leg, so their daily returns are correlated (mean
+absolute correlation 0.43). A second set was fixed before any of its data was seen: EURUSD,
+USDJPY and XAUUSD kept, plus EURGBP, AUDNZD and the US500 index (0.17). Same rules, same cost
+model, average trade and largest drawdown:
+
+| Setup | H1, current six | H1, diversified six | M15, current six | M15, diversified six |
+|---|---:|---:|---:|---:|
+| ema_cross | −0.18R · 28% | −0.21R · 32% | −0.27R · 26% | −0.29R · 26% |
+| breakout | −0.04R · 34% | −0.06R · 39% | −0.19R · 53% | −0.15R · 43% |
+| pullback | −0.11R · 63% | −0.16R · 76% | −0.15R · 58% | −0.13R · 52% |
+| retest | −0.10R · 51% | −0.14R · 58% | −0.22R · 60% | −0.22R · 55% |
+
+Less correlated instruments did not smooth anything: on H1 all four setups did worse and drew
+down further, and M15 was mixed. Diversification spreads the risk of a system that makes money;
+it does nothing for one whose average trade is negative, and here the added pairs were the
+weakest ones (AUDNZD averaged −0.3R to −0.5R: a quiet pair with a wide spread). The default
+instruments are unchanged. US500 results use its contract value for dollar amounts and the same
+commission as a share of position value; for the two crosses the simulator converts profit at
+today's exchange rate, which leaves R-multiples exact and the percentage returns approximate.
+Reproduce with `scripts/research_breakout_extras.py`.
 
 ## Backtesting model
 
@@ -591,7 +630,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 230 tests
+pytest --cov=tradebot      # 243 tests
 ruff check . && ruff format --check .
 ```
 

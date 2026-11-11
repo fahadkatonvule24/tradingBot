@@ -19,7 +19,7 @@ from tradebot.indicators import adx, atr, ema, macd, rsi
 # pullback entry by construction, and an S/R "room to resistance" check contradicts a breakout.
 FILTERS = {
     "ema_cross": ("trend", "adx", "macd", "rsi", "sr", "fib"),
-    "breakout": ("trend", "adx", "macd"),
+    "breakout": ("trend", "adx", "macd", "volume"),
     "pullback": ("trend", "adx", "sr", "fib"),
     "retest": ("trend", "adx"),
 }
@@ -31,6 +31,7 @@ BLOCK_LABELS = {
     "rsi": "RSI stretched",
     "sr": "too close to support/resistance",
     "fib": "not near a Fibonacci retracement",
+    "volume": "volume below the breakout minimum",
     "warmup": "indicators still warming up",
 }
 
@@ -203,6 +204,17 @@ def break_failures(df: pd.DataFrame, p: StrategyParams, raw: pd.Series) -> pd.Da
     return pd.DataFrame({"failed_side": failed_side, "failed_level": failed_level}, index=df.index)
 
 
+def measured_move(df: pd.DataFrame, p: StrategyParams, raw: pd.Series) -> pd.Series:
+    """Target price of a breakout by the measured-move rule: the height of the range that broke
+    (prior ``breakout_period``-bar high minus low) projected from the broken level. NaN elsewhere."""
+    upper = df["high"].rolling(p.breakout_period).max().shift(1)
+    lower = df["low"].rolling(p.breakout_period).min().shift(1)
+    height = upper - lower
+    return pd.Series(
+        np.where(raw > 0, upper + height, np.where(raw < 0, lower - height, np.nan)), index=df.index
+    )
+
+
 def trend_columns(frame: pd.DataFrame | pd.Series) -> list[str]:
     """Names of the per-timeframe trend columns ("trend_H1", "trend_H4") in a features frame or row."""
     return [c for c in frame.keys() if isinstance(c, str) and c.startswith("trend_")]  # noqa: SIM118
@@ -250,6 +262,11 @@ def compute_signals(
         raw = _trigger(df, p)
         if p.name == "breakout":
             df[["failed_side", "failed_level"]] = break_failures(df, p, raw)
+            if p.breakout_target == "measured":
+                df["target_price"] = measured_move(df, p, raw)
+    if "tick_volume" in df.columns:
+        volume = df["tick_volume"].astype(float)
+        df["volume_ratio"] = volume / volume.rolling(p.volume_period).mean().shift(1)
     long, short = raw > 0, raw < 0
     atr_ = df["atr"]
     applicable = FILTERS[p.name]
@@ -266,6 +283,12 @@ def compute_signals(
     if "macd" in applicable and p.use_macd:
         hist = df["macd_hist"]
         checks.append(("macd", (long & (hist > 0)) | (short & (hist < 0))))
+    if "volume" in applicable and p.use_volume_filter:
+        if "volume_ratio" not in df.columns:
+            raise ValueError(
+                "strategy.use_volume_filter needs tick volume in the bars; run `tradebot fetch` again to save it"
+            )
+        checks.append(("volume", df["volume_ratio"] >= p.volume_min_ratio))
     if "rsi" in applicable:
         checks.append(
             ("rsi", (long & (df["rsi"] <= p.rsi_buy_max)) | (short & (df["rsi"] >= p.rsi_sell_min)))

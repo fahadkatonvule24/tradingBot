@@ -29,7 +29,10 @@
     "use_sr_filter": true,
     "sr_lookback": 80,
     "sr_min_atr": 1.0,
-    "use_fib_filter": false
+    "use_fib_filter": false,
+    "use_volume_filter": false,
+    "volume_min_ratio": 1.5,
+    "breakout_target": "atr"
   },
 
   "risk": {
@@ -46,7 +49,8 @@
     "max_drawdown_percent": 10.0,
     "drawdown_days": 365,
     "max_consecutive_losses": 4,
-    "max_trades_per_day": 8
+    "max_trades_per_day": 8,
+    "min_reward_risk": 0
   },
 
   "management": {

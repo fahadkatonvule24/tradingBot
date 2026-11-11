@@ -201,9 +201,9 @@ def preview_features(
     if bar is None or pd.Timestamp(bar["time"]) <= closed["time"].iloc[-1]:
         return None
     strategy = config.for_symbol(symbol).strategy
-    base = pd.concat(
-        [closed[BAR_COLUMNS], pd.DataFrame([{**bar, "spread": closed["spread"].iloc[-1]}])], ignore_index=True
-    )
+    columns = [*BAR_COLUMNS, *(c for c in ("tick_volume",) if c in closed.columns and c in bar)]
+    forming_row = {**bar, "spread": closed["spread"].iloc[-1]}
+    base = pd.concat([closed[columns], pd.DataFrame([forming_row])[columns]], ignore_index=True)
     known, htf = htf or {}, {}
     closes = pd.Timestamp(bar["time"]) + pd.Timedelta(minutes=config.bar_minutes)
     for tf in higher_timeframes(config, strategy):
