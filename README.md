@@ -379,6 +379,33 @@ which uses a simpler fill model than the backtester (stop or target, whichever i
 with the same spread and commission) and the whole history, holdout years included. Nothing was
 tuned on it and nothing was adopted from it.
 
+**Rule variations.** The same advice lists refinements for each family. The ones the bot did not
+have were written down as fixed variants and run once each through the real engine, with an
+adoption rule set beforehand: a variant must improve the average trade on both H1 and M15, and
+then also on M30 and M5, which it has not seen.
+
+| Variation | Setup | H1 average trade | M15 average trade |
+|---|---|---:|---:|
+| Volatility filter: enter only when ATR(14) is above its 100-bar average | EMA cross | −0.18R → −0.20R | −0.27R → −0.21R |
+| | Breakout | −0.04R → −0.10R | −0.19R → −0.20R |
+| | Pullback | −0.11R → −0.12R | −0.15R → −0.09R |
+| | Break and retest | −0.10R → −0.09R | −0.22R → −0.24R |
+| Squeeze first: Bollinger bandwidth below its 100-bar median before the break | Breakout | −0.04R → −0.05R | −0.19R → −0.14R |
+| Exit as soon as the break fails (a close back through the level) | Breakout | −0.044R → −0.043R | −0.19R → −0.18R |
+| Turtle exits: 2.5 ATR stop, no target, out on a close beyond the opposite 10-bar extreme | Breakout | −0.044R → −0.045R | −0.19R → −0.14R |
+| Scale out: 2.5 ATR stop, half off at +2R, trail the rest, no target | Breakout | −0.04R → −0.07R | −0.19R → −0.19R |
+| | EMA cross | −0.18R → −0.14R | −0.27R → −0.29R |
+| RSI(2) dip-buy with the 200-bar average, out on a close beyond the 5-bar average or after 10 bars | new setup | −0.04R, 58.8% winners | −0.08R, 55.2% winners |
+
+Each cell is the current rule → the variant. Only the exit on a failed break improved on both
+timeframes, by a hundredth of an R or less. On the timeframes it had not seen it went from −0.13R
+to −0.12R on M30 and from −0.16R to −0.20R on M5, so it was not adopted, and a failed break stays
+a notice on the dashboard instead of an automatic exit. The RSI(2) rule is the clearest case of a
+high win rate that still loses: 59% winners on H1, 8,317 trades, and a negative average, because
+the losers are larger than the winners. **Nothing was adopted and the default rules are unchanged.**
+Not tested: measured-move targets (they need pattern detection the bot does not have) and volume
+(not in the stored history). Reproduce with `scripts/research_rule_variants.py`.
+
 ## Backtesting model
 
 | Aspect | Model |
