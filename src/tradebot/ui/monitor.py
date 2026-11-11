@@ -25,7 +25,7 @@ import pandas as pd
 from tradebot import __version__
 from tradebot.advisor import WORD, Advice, advise, pip_size, recent_signals
 from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
-from tradebot.config import BotConfig
+from tradebot.config import STRATEGIES, BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
 from tradebot.live import Link, fetch_frames, preview_features, trading_gate
@@ -45,7 +45,8 @@ SWITCHABLE = ("M5", "M15", "M30", "H1", "H4")
 
 @dataclass
 class _Switch:
-    timeframe: str
+    timeframe: str = ""
+    strategy: str = ""
     done: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] = field(default_factory=dict)
 
@@ -110,27 +111,58 @@ class Monitor:
             return {"ok": False, "message": "timed out waiting for the MT5 thread"}
         return switch.result
 
+    def set_strategy(self, name: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Switch the setup the advisor watches (handled on the MT5 thread, between refreshes)."""
+        switch = _Switch(strategy=str(name).lower())
+        self._orders.put(switch)
+        if not switch.done.wait(timeout):
+            return {"ok": False, "message": "timed out waiting for the MT5 thread"}
+        return switch.result
+
+    def _reconfigure(self, config: BotConfig) -> str | None:
+        """Swap in a changed config and drop everything computed from the old one."""
+        try:
+            config.validate()
+        except ValueError as exc:
+            return str(exc)
+        self.config = config
+        self.engine = Engine(config, self.broker, execute=False, live=True)
+        with self._lock:
+            self._features.clear()
+        for cache in (self._fetched, self._recent, self._previews, self._last_action, self._htf):
+            cache.clear()
+        self._forming_seen.clear()
+        self.track_record = {}
+        if self._track_args:
+            threading.Thread(
+                target=self.load_track_record, args=self._track_args, name="track-record", daemon=True
+            ).start()
+        return None
+
+    def _apply_strategy(self, name: str) -> dict[str, Any]:
+        if name not in STRATEGIES:
+            return {"ok": False, "message": f"strategy must be one of {', '.join(STRATEGIES)}"}
+        if name != self.config.strategy.name:
+            overrides = {  # a per-symbol strategy name would silently keep the old setup
+                symbol: {
+                    section: {k: v for k, v in values.items() if not (section == "strategy" and k == "name")}
+                    for section, values in sections.items()
+                }
+                for symbol, sections in self.config.overrides.items()
+            }
+            error = self._reconfigure(replace(self.config.with_strategy(name=name), overrides=overrides))
+            if error:
+                return {"ok": False, "message": error}
+            log.info("setup switched to %s", name)
+        return {"ok": True, "message": f"Now watching the {name.replace('_', ' ')} setup.", "strategy": name}
+
     def _apply_timeframe(self, timeframe: str) -> dict[str, Any]:
         if timeframe not in SWITCHABLE:
             return {"ok": False, "message": f"timeframe must be one of {', '.join(SWITCHABLE)}"}
         if timeframe != self.config.timeframe:
-            config = replace(self.config, timeframe=timeframe)
-            try:
-                config.validate()
-            except ValueError as exc:
-                return {"ok": False, "message": str(exc)}
-            self.config = config
-            self.engine = Engine(config, self.broker, execute=False, live=True)
-            with self._lock:
-                self._features.clear()
-            for cache in (self._fetched, self._recent, self._previews, self._last_action, self._htf):
-                cache.clear()
-            self._forming_seen.clear()
-            self.track_record = {}
-            if self._track_args:
-                threading.Thread(
-                    target=self.load_track_record, args=self._track_args, name="track-record", daemon=True
-                ).start()
+            error = self._reconfigure(replace(self.config, timeframe=timeframe))
+            if error:
+                return {"ok": False, "message": error}
             log.info("trading timeframe switched to %s", timeframe)
         ladder = self.trend_timeframes()
         trend = f"direction from {' + '.join(ladder)}" if ladder else "no trend filter"
@@ -183,7 +215,11 @@ class Monitor:
                     except queue.Empty:
                         break
                     if isinstance(order, _Switch):
-                        order.result = self._apply_timeframe(order.timeframe)
+                        order.result = (
+                            self._apply_strategy(order.strategy)
+                            if order.strategy
+                            else self._apply_timeframe(order.timeframe)
+                        )
                     else:
                         order.result = self._safe_execute(order)
                     order.done.set()
@@ -237,6 +273,7 @@ class Monitor:
             "version": __version__,
             "now": now,
             "strategy": self.config.strategy.name,
+            "strategies": list(STRATEGIES),
             "timeframe": self.config.timeframe,
             "timeframes": list(SWITCHABLE),
             "trend_timeframes": self.trend_timeframes(),

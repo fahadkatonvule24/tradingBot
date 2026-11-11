@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run the trading loop")
     run.add_argument("--once", action="store_true", help="run one cycle and exit")
     run.add_argument("--timeframe", type=str.upper, help="override the config timeframe (e.g. M30)")
+    run.add_argument("--strategy", choices=STRATEGIES, help="override strategy.name")
     run.add_argument(
         "--live", action="store_true", help="allow real orders (the config must also allow them)"
     )
@@ -58,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui = sub.add_parser("ui", help="live advisor dashboard in the browser: when, where, and how much")
     ui.add_argument("--port", type=int, default=8765, help="local port (default: %(default)s)")
     ui.add_argument("--timeframe", type=str.upper, help="start on this trading timeframe (e.g. M30)")
+    ui.add_argument("--strategy", choices=STRATEGIES, help="start on this setup (e.g. retest)")
     ui.add_argument(
         "--live", action="store_true", help="enable the order button (the config must also allow orders)"
     )

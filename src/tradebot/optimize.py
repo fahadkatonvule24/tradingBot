@@ -45,6 +45,12 @@ DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
         "strategy.adx_min": [15.0, 22.0],
         "risk.tp_atr": [1.5, 2.5, 3.5],
     },
+    "retest": {
+        "strategy.retest_period": [20, 40],
+        "strategy.retest_window": [6, 12],
+        "strategy.retest_tolerance_atr": [0.15, 0.3],
+        "risk.tp_atr": [2.0, 3.0],
+    },
 }
 
 OBJECTIVES = ("sharpe", "profit_factor", "return_pct", "calmar")

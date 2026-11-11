@@ -63,7 +63,7 @@ def test_atr_is_positive(bars):
     assert (atr(bars, 14).dropna() > 0).all()
 
 
-@pytest.mark.parametrize("name", ["ema_cross", "breakout", "pullback"])
+@pytest.mark.parametrize("name", ["ema_cross", "breakout", "pullback", "retest"])
 def test_signals_are_causal(bars, name):
     """No look-ahead: results on any prefix equal the full run's rows for that prefix."""
     p = StrategyParams(name=name)
@@ -85,14 +85,14 @@ def test_higher_timeframe_trend_ignores_unfinished_htf_bar(bars):
     assert (trend.iloc[:-3] == altered_trend.iloc[:-3]).all()
 
 
-@pytest.mark.parametrize("name", ["ema_cross", "breakout", "pullback"])
+@pytest.mark.parametrize("name", ["ema_cross", "breakout", "pullback", "retest"])
 def test_each_strategy_signals_both_ways(bars, name):
     signals = compute_signals(bars, StrategyParams(name=name, use_trend_filter=False), "M15")
     assert (signals["signal"] == 1).sum() > 0 and (signals["signal"] == -1).sum() > 0
     assert set(signals["signal"].unique()) <= {-1, 0, 1}
 
 
-@pytest.mark.parametrize("name", ["ema_cross", "breakout", "pullback"])
+@pytest.mark.parametrize("name", ["ema_cross", "breakout", "pullback", "retest"])
 def test_trend_filter_only_allows_trades_with_the_trend(bars, name):
     signals = compute_signals(bars, StrategyParams(name=name), "M15")
     taken = signals[signals["signal"] != 0]

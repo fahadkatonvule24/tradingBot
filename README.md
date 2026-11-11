@@ -33,8 +33,8 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
 - **Trades MT5** (demo or live) on closed bars, across many symbols, resolving broker suffixes
   (`EURUSD` → `EURUSDm`). All timestamps are converted from server time to UTC, including the
   broker's daylight-saving changes, which are detected from its own history.
-- **Three strategies** behind one interface: EMA crossover, Donchian breakout, and trend
-  pullback. They share filters for higher-timeframe trend, ADX, MACD, RSI, support/resistance and
+- **Four entry setups** behind one interface: EMA crossover, Donchian breakout, trend pullback,
+  and break-and-retest. They share filters for higher-timeframe trend, ADX, MACD, RSI, support/resistance and
   Fibonacci levels, all measured in ATR, so gold and forex use the same settings.
 - **Sizes every trade from risk.** The volume is chosen so that hitting the stop loses
   `risk_percent` of equity. Per-lot risk comes from the terminal's own profit calculator, and the
@@ -96,6 +96,7 @@ symbol, once a second:
 | Chart | the last 120 bars plus the forming one, both EMAs, profit and loss zones, live price; hover for OHLC |
 | Track record | a backtest of the current config on your downloaded history, per symbol |
 | Timeframe switch | trade on M5, M15, M30, H1 or H4; the two higher timeframes that set the direction are chosen automatically (M5/M15/M30 → H1 + H4, H1 → H4 + D1, H4 → D1) and each gets its own row in the checklist |
+| Setup switch | which entry the advisor watches: EMA cross, Breakout, Pullback or Break & retest. Each says what it is waiting for, with the price level where it has one ("price broke above 1.0995; a buy triggers when a bar comes back to that level and closes above it again") |
 | Buy / Sell switch on the plan | the same priced plan for either side, so a trade you choose yourself gets the bot's sizing, stop and target |
 | Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
 | Recent signals | the last triggers across all symbols, taken or blocked, and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
@@ -127,6 +128,38 @@ M30, −8.2% on M15, −12.3% on M5. A second higher timeframe removes trades wi
 ones that remain, and a 5-minute stop is only two or three pips, so the spread is a large share
 of every trade. The switch is there because a person's own read is often on a lower timeframe;
 it is not a way to make these triggers profitable.
+
+**Earlier entries: breakout, pullback, break and retest.** The EMA crossover is a late entry by
+design: it fires after a move is under way. The setup switch (or `--strategy`, or
+`"strategy": {"name": ...}`) changes what the advisor watches: `breakout` for the bar that starts
+a move, `pullback` for a dip inside a trend, and `retest` for a broken level that price comes
+back to and holds. They fire five to ten times as often, and they lose too. Default parameters,
+nothing tuned, six instruments, direction from the automatic two-timeframe ladder:
+
+| Timeframe (period) | Setup | Trades a week | Winners | Average trade | Return |
+|---|---|---:|---:|---:|---:|
+| H1 (Aug 2016 – Nov 2026) | ema_cross | 1.2 | 37.1% | −0.18R | −26.1% |
+| | breakout | 6.1 | 40.0% | −0.09R | −53.7% |
+| | pullback | 6.9 | 40.3% | −0.11R | −62.5% |
+| | retest | 4.5 | 39.4% | −0.10R | −47.4% |
+| M30 (Oct 2021 – Nov 2026) | ema_cross | 2.3 | 36.5% | −0.24R | −29.9% |
+| | breakout | 12.0 | 38.6% | −0.16R | −69.2% |
+| | pullback | 10.2 | 40.0% | −0.13R | −58.0% |
+| | retest | 9.2 | 38.2% | −0.17R | −63.3% |
+| M15 (Apr 2024 – Nov 2026) | ema_cross | 3.4 | 34.5% | −0.27R | −26.1% |
+| | breakout | 15.1 | 35.1% | −0.24R | −69.4% |
+| | pullback | 17.4 | 39.2% | −0.15R | −57.6% |
+| | retest | 12.0 | 36.1% | −0.22R | −58.7% |
+| M5 (Dec 2025 – Nov 2026) | ema_cross | 6.1 | 36.3% | −0.17R | −11.1% |
+| | breakout | 17.5 | 35.2% | −0.21R | −34.3% |
+| | pullback | 20.2 | 36.5% | −0.19R | −34.8% |
+| | retest | 15.3 | 35.7% | −0.17R | −26.0% |
+
+The retest rules (20-bar level, 12 bars to come back, within 0.25 ATR, a close back in the
+direction of the break) were written down before this was run and have not been changed since.
+A setup that trades more often with the same negative average loses more in total, which is why
+the bigger returns column belongs to the busier setups. As with the timeframe switch, this is
+for following a setup you already read on the chart, with the bot's sizing and stop.
 
 **Knowing early without acting early.** The bot decides only when a bar closes: a crossover on a
 bar that is still forming can appear and vanish several times, and v23 traded those. The early
@@ -216,7 +249,7 @@ signal, so its results did not describe the live bot.
 src/tradebot/
 ├── config.py        typed config sections, validation, per-symbol overrides
 ├── indicators.py    EMA, Wilder RSI/ATR/ADX, MACD (vectorised)
-├── strategy.py      signals for ema_cross / breakout / pullback + shared filters
+├── strategy.py      signals for ema_cross / breakout / pullback / retest + filters
 ├── engine.py        the decision procedure (live and backtest)
 ├── advisor.py       BUY/SELL/WAIT/SKIP advice and a priced trade plan, from the engine's own checks
 ├── ui/              `tradebot ui`: MT5 worker thread, hardened local server, dashboard page
@@ -240,6 +273,7 @@ src/tradebot/
 | `ema_cross` | fast EMA crosses slow EMA | trend, ADX, MACD, RSI cap, S/R room, Fibonacci (opt.) |
 | `breakout` | close breaks the prior N-bar high/low | trend, ADX, MACD |
 | `pullback` | fast RSI recovers from an extreme in the direction of the trend | trend, ADX, S/R room, Fibonacci (opt.) |
+| `retest` | a bar closes through the prior N-bar high/low; within the next 12 bars price returns to that level and a bar closes away from it again. A close back through the level cancels the setup | trend, ADX |
 
 The trend filter uses only **completed** higher-timeframe bars (for example the last closed H4
 bar). A test asserts that every signal is causal: computing on any prefix of the data gives
@@ -442,7 +476,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 170 tests
+pytest --cov=tradebot      # 191 tests
 ruff check . && ruff format --check .
 ```
 

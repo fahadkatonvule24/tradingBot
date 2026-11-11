@@ -185,6 +185,7 @@ button { font: inherit; color: inherit; }
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow), inset 0 0 0 1px var(--border); }
 .seg.tf { grid-template-columns: repeat(5, auto); margin: 0; padding: 2px; }
 .seg.tf button { padding: 3px 9px; font-size: 12px; }
+.seg.tf.setups { grid-template-columns: repeat(4, auto); }
 .seg small { display: block; font-weight: 500; font-size: 11px; color: var(--text-3); }
 .kv-list { display: grid; grid-template-columns: auto 1fr auto; gap: 7px 10px; align-items: baseline; }
 .kv-list .k { color: var(--text-2); }
@@ -485,26 +486,37 @@ function render() {
   drawChart();
 }
 
+const SETUPS = {
+  ema_cross: ["EMA cross", "Trend following: the fast average crosses the slow one. Late by design."],
+  breakout: ["Breakout", "A bar closes through the high or low of the last 20 bars: the start of a move."],
+  pullback: ["Pullback", "A dip against the higher-timeframe trend that turns back (fast RSI recovers)."],
+  retest: ["Break & retest", "A level breaks, price comes back to it, and a bar closes away from it again."],
+};
 let timeframeKey = "";
 function renderTimeframes() {   // rebuilt only when it changes, so a click is never lost to a re-render
   const trend = state.trend_timeframes || [];
-  const key = `${state.timeframe}|${(state.timeframes || []).join()}|${trend.join()}`;
+  const setups = state.strategies || [];
+  const key = `${state.timeframe}|${(state.timeframes || []).join()}|${trend.join()}|${state.strategy}|${setups.join()}`;
   if (key === timeframeKey) return;
   timeframeKey = key;
   const buttons = (state.timeframes || []).map((tf) => el("button", { type: "button", title: `Trade on ${tf} bars`,
-    "aria-pressed": tf === state.timeframe ? "true" : "false", onclick: () => switchTimeframe(tf) }, tf));
+    "aria-pressed": tf === state.timeframe ? "true" : "false", onclick: () => switchTo("timeframe", tf) }, tf));
+  const setupButtons = setups.map((name) => el("button", { type: "button", title: (SETUPS[name] || [])[1] || name,
+    "aria-pressed": name === state.strategy ? "true" : "false", onclick: () => switchTo("strategy", name) },
+    (SETUPS[name] || [name])[0]));
   $("#tfs").replaceChildren(
     el("div", { class: "seg tf", role: "group", "aria-label": "Trading timeframe" }, ...buttons),
-    el("span", { class: "chip", text: trend.length ? `direction from ${trend.join(" + ")}` : "no trend filter" }));
+    el("span", { class: "chip", text: trend.length ? `direction from ${trend.join(" + ")}` : "no trend filter" }),
+    ...(setups.length ? [el("div", { class: "seg tf setups", role: "group", "aria-label": "Setup to watch" }, ...setupButtons)] : []));
 }
-async function switchTimeframe(tf) {
-  if (tf === state.timeframe) return;
-  toast(`Switching to ${tf}…`, 4000);
+async function switchTo(what, value) {   // what: "timeframe" or "strategy"
+  if (value === state[what]) return;
+  toast(`Switching to ${what === "strategy" ? (SETUPS[value] || [value])[0] : value}…`, 4000);
   try {
-    const res = await fetch("/api/timeframe", {
+    const res = await fetch(`/api/${what}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Tradebot-Token": TOKEN },
-      body: JSON.stringify({ timeframe: tf }),
+      body: JSON.stringify({ [what]: value }),
     });
     const out = await res.json();
     if (!out.ok) { toast(`Could not switch: ${out.message}`); return; }
@@ -520,9 +532,7 @@ async function switchTimeframe(tf) {
 function renderHeader() {
   renderTimeframes();
   const a = state.account;
-  const names = { ema_cross: "EMA cross", breakout: "Breakout", pullback: "Pullback" };
   $("#chips").replaceChildren(
-    el("span", { class: "chip", text: names[state.strategy] || state.strategy }),
     el("span", { class: "chip", text: `Session ${state.session}` }),
     el("span", { class: "chip", text: `${a.server || "MT5"} · ${a.is_real ? "REAL MONEY" : "demo"}` }),
   );

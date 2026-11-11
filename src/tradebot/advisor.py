@@ -338,6 +338,8 @@ def watch_side(row: pd.Series, p: StrategyParams) -> int:
         return int(row["trend"])
     if p.name == "ema_cross":
         return -1 if row["ema_fast"] > row["ema_slow"] else 1  # the next cross goes the other way
+    if p.name == "retest" and int(row.get("retest_side", 0)):
+        return int(row["retest_side"])  # a level has broken and is being watched
     return 1 if row["macd_hist"] >= 0 else -1
 
 
@@ -450,6 +452,8 @@ def next_trigger(
             f"A {word} triggers when a {timeframe} bar closes {above} {level:.{spec.digits}f} ({where}).",
             level,
         )
+    if p.name == "retest":
+        return _retest_trigger(features, p, side, tick, spec, timeframe)
     period = p.pullback_rsi_period
     fast = float(rsi(features["close"], period).iloc[-1])
     threshold = p.pullback_buy_below if side > 0 else p.pullback_sell_above
@@ -463,4 +467,35 @@ def next_trigger(
         f"A {word} needs RSI({period}) to {'dip below' if side > 0 else 'rise above'} {threshold:g} "
         f"(now {fast:.0f}) and then turn back.",
         None,
+    )
+
+
+def _retest_trigger(
+    features: pd.DataFrame, p: StrategyParams, side: int, tick: Tick, spec: SymbolSpec, timeframe: str
+) -> tuple[str, float | None]:
+    """Break-and-retest wording: is a broken level being watched, and what completes the setup?"""
+    row = features.iloc[-1]
+    word, above = ("buy", "above") if side > 0 else ("sell", "below")
+    atr_ = float(row["atr"])
+    pending = int(row.get("retest_side", 0))
+    if pending == side:
+        level, left = float(row["retest_level"]), int(row["retest_left"])
+        price = tick.bid if side > 0 else tick.ask
+        away = abs(price - level) / atr_ if atr_ else 0.0
+        return (
+            f"Price broke {above} {level:.{spec.digits}f}. A {word} triggers when a {timeframe} bar comes back "
+            f"to that level and closes {above} it again (price is {away:.2f} ATR from it; the setup is "
+            f"watched for {left} more bar{'' if left == 1 else 's'}).",
+            level,
+        )
+    window = features.tail(p.retest_period)
+    level = float(window["high"].max() if side > 0 else window["low"].min())
+    price = tick.ask if side > 0 else tick.bid
+    away = (level - price) * side / atr_ if atr_ else 0.0
+    first = f"The last break was the other way ({'down' if side > 0 else 'up'}). " if pending == -side else ""
+    where = f"{away:.2f} ATR away" if away > 0 else "price is through it; the bar must close there"
+    return (
+        f"{first}A {word} setup starts when a {timeframe} bar closes {above} {level:.{spec.digits}f} "
+        f"({where}), and triggers when price then retests that level and holds.",
+        level,
     )

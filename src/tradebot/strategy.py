@@ -21,6 +21,7 @@ FILTERS = {
     "ema_cross": ("trend", "adx", "macd", "rsi", "sr", "fib"),
     "breakout": ("trend", "adx", "macd"),
     "pullback": ("trend", "adx", "sr", "fib"),
+    "retest": ("trend", "adx"),
 }
 
 BLOCK_LABELS = {
@@ -102,6 +103,8 @@ def _trigger(df: pd.DataFrame, p: StrategyParams) -> pd.Series:
         lower = df["low"].rolling(p.breakout_period).min().shift(1)
         up = (close > upper) & (close.shift(1) <= upper.shift(1))
         down = (close < lower) & (close.shift(1) >= lower.shift(1))
+    elif p.name == "retest":
+        return retest_setup(df, p)["trigger"].astype(int)
     elif p.name == "pullback":
         fast_rsi = rsi(close, p.pullback_rsi_period)
         up = (fast_rsi.shift(1) < p.pullback_buy_below) & (fast_rsi >= p.pullback_buy_below)
@@ -109,6 +112,54 @@ def _trigger(df: pd.DataFrame, p: StrategyParams) -> pd.Series:
     else:  # pragma: no cover - validated in config
         raise ValueError(f"unknown strategy {p.name!r}")
     return up.astype(int) - down.astype(int)
+
+
+def retest_setup(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
+    """Break and retest, one bar at a time.
+
+    A bar that closes through the prior ``retest_period``-bar high (or low) marks that level. For
+    the next ``retest_window`` bars the setup is *pending*: a buy triggers on the first bar that
+    dips to within ``retest_tolerance_atr`` ATR of the level and closes back above it as an up
+    bar. A close back through the level by more than the tolerance cancels the setup (a failed
+    break); a fresh break replaces the level.
+
+    Returns one row per bar: ``trigger`` (+1 / -1 / 0), and the setup still pending *after* that
+    bar closed: ``retest_side``, ``retest_level`` and ``retest_left`` (bars before it expires).
+    """
+    open_, high, low, close = (df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
+    atr_ = df["atr"].to_numpy(dtype=float)
+    upper = df["high"].rolling(p.retest_period).max().shift(1).to_numpy(dtype=float)
+    lower = df["low"].rolling(p.retest_period).min().shift(1).to_numpy(dtype=float)
+    n = len(df)
+    trigger = np.zeros(n, dtype=np.int8)
+    side_out = np.zeros(n, dtype=np.int8)
+    level_out = np.full(n, np.nan)
+    left_out = np.zeros(n, dtype=np.int32)
+    side, level, expires = 0, np.nan, -1
+    for i in range(1, n):
+        if side and i > expires:
+            side = 0
+        if side:
+            tolerance = p.retest_tolerance_atr * atr_[i]  # NaN while ATR warms up: nothing fires
+            if side > 0:
+                if close[i] < level - tolerance:
+                    side = 0  # closed back inside: the break failed
+                elif low[i] <= level + tolerance and close[i] > level and close[i] > open_[i]:
+                    trigger[i], side = 1, 0
+            elif close[i] > level + tolerance:
+                side = 0
+            elif high[i] >= level - tolerance and close[i] < level and close[i] < open_[i]:
+                trigger[i], side = -1, 0
+        if close[i] > upper[i] and close[i - 1] <= upper[i - 1]:
+            side, level, expires = 1, upper[i], i + p.retest_window
+        elif close[i] < lower[i] and close[i - 1] >= lower[i - 1]:
+            side, level, expires = -1, lower[i], i + p.retest_window
+        if side:
+            side_out[i], level_out[i], left_out[i] = side, level, expires - i
+    return pd.DataFrame(
+        {"trigger": trigger, "retest_side": side_out, "retest_level": level_out, "retest_left": left_out},
+        index=df.index,
+    )
 
 
 def trend_columns(frame: pd.DataFrame | pd.Series) -> list[str]:
@@ -150,7 +201,12 @@ def compute_signals(
     df["resistance"] = df["high"].rolling(p.sr_lookback).max().shift(1)
     df["support"] = df["low"].rolling(p.sr_lookback).min().shift(1)
 
-    raw = _trigger(df, p)
+    if p.name == "retest":
+        setup = retest_setup(df, p)
+        raw = setup.pop("trigger").astype(int)
+        df[setup.columns] = setup  # the level being watched, for the advisor and the chart
+    else:
+        raw = _trigger(df, p)
     long, short = raw > 0, raw < 0
     atr_ = df["atr"]
     applicable = FILTERS[p.name]
@@ -211,6 +267,7 @@ def explain(row: pd.Series, p: StrategyParams) -> str:
         "ema_cross": f"EMA {p.fast_ema}/{p.slow_ema} cross {'up' if side == 'buy' else 'down'}",
         "breakout": f"{p.breakout_period}-bar {'high' if side == 'buy' else 'low'} breakout",
         "pullback": f"RSI({p.pullback_rsi_period}) pullback {'recovered' if side == 'buy' else 'rolled over'}",
+        "retest": f"retest of the broken {p.retest_period}-bar {'high' if side == 'buy' else 'low'} held",
     }[p.name]
     parts = [trigger, f"RSI {row['rsi']:.1f}", f"ADX {row['adx']:.1f}"]
     names = "+".join(c[6:] for c in trend_columns(row)) or p.trend_timeframe

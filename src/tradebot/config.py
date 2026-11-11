@@ -30,7 +30,7 @@ SESSIONS = {
     "overlap": (12, 16),
 }
 
-STRATEGIES = ("ema_cross", "breakout", "pullback")
+STRATEGIES = ("ema_cross", "breakout", "pullback", "retest")
 
 # Top-down analysis: the two higher timeframes that set the direction for each trading timeframe.
 # Each step is roughly 4-12x the one below it, the usual spacing for multi-timeframe analysis.
@@ -72,6 +72,11 @@ class StrategyParams:
     pullback_rsi_period: int = 3
     pullback_buy_below: float = 15.0
     pullback_sell_above: float = 85.0
+    # retest (a bar closes through the prior N-bar high/low, then price comes back to that level
+    # within ``retest_window`` bars and a bar closes away from it again)
+    retest_period: int = 20
+    retest_window: int = 12
+    retest_tolerance_atr: float = 0.25
     # shared filters
     atr_period: int = 14
     use_adx: bool = True
@@ -114,6 +119,7 @@ class StrategyParams:
                 self.sr_lookback,
                 self.fib_lookback,
                 self.breakout_period,
+                self.retest_period,
             )
             + 5
         )
@@ -300,6 +306,8 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
     errors = []
     if s.name not in STRATEGIES:
         errors.append(f"strategy.name {s.name!r} is not one of {', '.join(STRATEGIES)}")
+    if s.retest_period < 2 or s.retest_window < 1 or s.retest_tolerance_atr < 0:
+        errors.append("strategy.retest_period must be >= 2, retest_window >= 1, retest_tolerance_atr >= 0")
     if s.fast_ema >= s.slow_ema:
         errors.append("strategy.fast_ema must be lower than slow_ema")
     if s.macd_fast >= s.macd_slow:

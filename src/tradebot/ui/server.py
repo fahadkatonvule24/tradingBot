@@ -101,7 +101,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return
         path = urlsplit(self.path).path
-        if path not in ("/api/order", "/api/timeframe"):
+        if path not in ("/api/order", "/api/timeframe", "/api/strategy"):
             return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         origin = self.headers.get("Origin")
         if origin and origin.removeprefix("http://") not in self.server.allowed_hosts():
@@ -110,12 +110,14 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(
                 HTTPStatus.FORBIDDEN, {"ok": False, "message": "missing or wrong session token"}
             )
-        if path == "/api/timeframe":
+        if path in ("/api/timeframe", "/api/strategy"):
+            key = path.rsplit("/", 1)[1]
             try:
-                timeframe = str(json.loads(raw or b"{}")["timeframe"])
+                value = str(json.loads(raw or b"{}")[key])
             except (ValueError, KeyError, TypeError) as exc:
                 return self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": f"bad request: {exc}"})
-            result = self.server.monitor.set_timeframe(timeframe)
+            monitor = self.server.monitor
+            result = monitor.set_timeframe(value) if key == "timeframe" else monitor.set_strategy(value)
             return self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST, result)
         try:
             body = json.loads(raw or b"{}")
