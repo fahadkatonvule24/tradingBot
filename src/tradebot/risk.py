@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
-from tradebot.broker.base import Position, SymbolSpec
+from tradebot.broker.base import Deal, Position, SymbolSpec
 from tradebot.config import RiskParams
 
 
@@ -67,6 +68,20 @@ def open_risk(positions: list[Position], specs: dict[str, SymbolSpec]) -> float:
         if adverse > 0:
             total += loss_per_lot(spec, adverse) * p.volume
     return total
+
+
+def drawdown_percent(deals: Iterable[Deal], balance: float) -> float:
+    """How far ``balance`` is below its highest point since the first of ``deals``, in percent.
+
+    The balance curve is rebuilt backwards from today's balance and the deals' net results, so it
+    needs no stored state and survives restarts, like the daily and weekly loss limits.
+    """
+    ordered = sorted(deals, key=lambda d: d.time)
+    level = peak = balance - sum(d.profit for d in ordered)
+    for deal in ordered:
+        level += deal.profit
+        peak = max(peak, level)
+    return (peak - balance) / peak * 100 if peak > 0 else 0.0
 
 
 def tighter_stop(side: int, current: float, candidate: float) -> float:

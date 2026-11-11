@@ -21,7 +21,7 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
 ## Contents
 
 - [What it does](#what-it-does) · [Quick start](#quick-start) · [Advisor dashboard](#advisor-dashboard) · [Safety model](#safety-model)
-- [Architecture](#architecture) · [Strategies](#strategies) · [Risk and trade management](#risk-and-trade-management)
+- [Architecture](#architecture) · [Strategies](#strategies) · [Risk and trade management](#risk-and-trade-management) · [Trading principles](#trading-principles)
 - [Backtesting model](#backtesting-model) · [Results on real data](#results-on-real-data)
 - [Bugs fixed from v23](#bugs-fixed-from-v23) · [Testing](#testing) · [Limitations](#limitations-and-next-steps)
 
@@ -39,9 +39,13 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
 - **Sizes every trade from risk.** The volume is chosen so that hitting the stop loses
   `risk_percent` of equity. Per-lot risk comes from the terminal's own profit calculator, and the
   bot never rounds up to the broker's minimum lot.
-- **Layered guards:** session hours, news blackouts, daily and weekly loss limits, losing-streak
-  pause, trades per day, positions per symbol and in total, total open risk, margin, spread vs
-  ATR, and a `STOP`-file kill switch.
+- **Layered guards:** session hours, news blackouts, daily and weekly loss limits, a drawdown
+  limit, losing-streak pause, trades per day, positions per symbol and in total, total open risk,
+  margin, spread vs ATR, and a `STOP`-file kill switch.
+- **Writes its own trading plan.** `tradebot plan` states every rule in plain words, generated
+  from the settings the engine reads, so the written plan and the executed plan cannot differ.
+  `tradebot review` then reports closed trades in R and compares the bot's signals with trades
+  placed by hand.
 - **Manages open trades:** partial take-profit, breakeven, ATR trailing stop, exit on an opposite
   signal, and an optional time stop. Stops only ever tighten.
 - **Backtests realistically:** bid/ask spread, slippage, commission on actual lot size, gaps
@@ -72,6 +76,8 @@ tradebot fetch --bars 60000        # history to data/: trading + trend timeframe
 tradebot backtest                  # backtest config/config.json on data/ -> reports/*.html
 tradebot optimize --folds 4        # walk-forward optimisation -> out-of-sample report
 tradebot journal --days 7          # what the bot did this week
+tradebot plan --out PLAN.md        # the written trading plan, generated from the config
+tradebot review --days 30          # closed trades in R: the bot's signals against your own calls
 ```
 
 No MetaTrader terminal? `python scripts/make_demo_data.py --out demo-data`, then run
@@ -101,6 +107,8 @@ symbol, once a second:
 | Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
 | Recent signals | the last triggers across all symbols, taken or blocked, and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
 | Early warning | while a bar is still forming: the exact close that would fire the next trigger, and a "forming, not confirmed" notice when the current price would fire it, with whether the filters would pass or block it |
+| Risk limits | how much of each account limit is used: today's and this week's result against the loss limits, drawdown, losses in a row, entries today, open risk. The tile of a limit that is hit turns red and the card says entries are stopped |
+| Plan | the written trading plan for the setup and timeframe on screen, with what those rules measured on your stored history |
 | Alerts | browser notifications, and optionally Telegram messages to your phone, when a signal fires, a filter blocks a trigger, a trigger is forming, or an order is placed |
 | Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
 
@@ -279,7 +287,9 @@ src/tradebot/
 ├── engine.py        the decision procedure (live and backtest)
 ├── advisor.py       BUY/SELL/WAIT/SKIP advice and a priced trade plan, from the engine's own checks
 ├── ui/              `tradebot ui`: MT5 worker thread, hardened local server, dashboard page
-├── risk.py          position sizing and portfolio risk
+├── risk.py          position sizing, portfolio risk, drawdown
+├── plan.py          the written trading plan, generated from the config
+├── review.py        closed trades in R, bot signals against manual trades
 ├── broker/          base.py (interface) · mt5.py (MetaTrader 5) · sim.py (simulation)
 ├── backtest.py      multi-symbol event-driven backtester
 ├── optimize.py      grid search + walk-forward (process pool)
@@ -315,9 +325,59 @@ exactly the same rows as computing on the full history.
   usage, positions per symbol and in total.
 - **Loss limits** use realized P/L net of commission, swap and fees, per UTC day and ISO week. A
   losing streak pauses entries until the next UTC day.
+- **Drawdown limit:** live trading stops opening positions while the bot's realised result is
+  `max_drawdown_percent` (10%) below its highest point of the last `drawdown_days` (365). Like
+  the loss limits it is rebuilt from the broker's deal history, so it needs no saved state and
+  survives restarts. Backtests do not apply it, because it would only cut a research run short;
+  `tradebot backtest` prints the date it would have tripped.
 - **Management is in R** (multiples of the initial risk): partial profit at `partial_tp_r`,
   breakeven plus a buffer at `breakeven_r`, ATR trail from `trail_start_r`. The original stop and
   volume are read back from MT5 order history, so this survives restarts.
+
+## Trading principles
+
+The usual list of trading principles (protect capital, follow a written plan, stay disciplined,
+cut losses and let profits run, be selective, journal and review, trade with the larger trend),
+checked against what the code does. One rule and two commands were missing and were added in
+v3.9; one principle cannot be met by code.
+
+| Principle | How the bot handles it |
+|---|---|
+| Risk a small fixed share per trade | 0.25% of equity by default; the config refuses more than 5% |
+| Stop where the idea is wrong; size from the stop | stop at 1.5 ATR sent with the order; `volume = equity × risk ÷ loss per lot at the stop`, rounded down, skipped if the minimum lot would over-risk |
+| Reward at least twice the risk | target at 3 ATR against a 1.5 ATR stop |
+| Daily and weekly loss limits | 2% and 5%, from the broker's deal history |
+| Maximum drawdown rule | **added in v3.9:** entries stop 10% below the 365-day peak (live trading) |
+| Limit leverage and correlated exposure | margin cap 30%; total open risk capped at 1% of equity and three positions. All six default instruments are US-dollar pairs, so the cap is the protection: if they all move together the loss is at most 0.75% |
+| A written plan | **added in v3.9:** `tradebot plan`, generated from the config: what is traded, entry, exit, size, limits, when not to trade, review, and what the rules have measured. Also on the dashboard, following the setup and timeframe switches |
+| Discipline, no revenge trading | decisions only on closed bars; stops only ever tighten; four losses in a row pause entries for the day; at most eight entries a day. A trade placed by hand from the dashboard goes through the same guards and the same sizing |
+| Cut losses, let profits run | breakeven at +1R, half off at +1.5R, a 2 ATR trailing stop on the rest. Removing the target altogether was tested ("run" in [the results](#trying-to-improve-the-strategy)) and did not help |
+| Patience and selectivity | every setup has filters, and WAIT is the normal state: about one to seven signals a week per setup on H1 |
+| Journal and review | every order is journalled with its stop and target. **Added in v3.9:** `tradebot review` reports closed trades in R, split into the bot's signals and your own calls, and says when the sample is too small to mean anything |
+| Trade with structure and context | direction comes from two higher timeframes that must agree |
+| Paper-trade first, start small | dry run is the default; orders need three separate switches and real-money accounts are refused unless allowed |
+| **Positive expectancy** | **not met.** Every setup loses on ten years of history ([results](#results-on-real-data)). The plan prints the measured figure and says to stay in dry run. Risk rules limit what a losing system costs; they cannot make it a winning one |
+
+Two things from the usual advice are deliberately absent. **Volume confirmation** for breakouts:
+spot FX has no central volume, only the broker's tick count, and the stored history does not
+include it. **Mean reversion**, the third common family next to trend following and breakouts,
+was measured before deciding whether to build it. The textbook template (only when ADX(14) is
+below 25; a bar closes outside the 20-period, 2-deviation Bollinger band with RSI(14) below 30 or
+above 70; enter when the next bar closes back inside; stop 1 ATR beyond the extreme; target the
+middle band) was written down first and run once per variant on the six instruments:
+
+| Variant | H1 trades a week | H1 winners | H1 average trade | M15 winners | M15 average trade |
+|---|---:|---:|---:|---:|---:|
+| The template | 2.1 | 51.5% | −0.06R | 48.7% | −0.11R |
+| Only trades with reward:risk of 1.5 or more | 0.5 | 29.4% | −0.19R | 33.9% | −0.04R |
+| Without the ADX regime filter | 10.4 | 44.6% | −0.09R | 44.2% | −0.11R |
+
+It loses in all six cells (H1 2016 to 2026, 1,131 trades for the template; M15 2024 to 2026, 876
+trades), so it was not added as a setup. The regime filter does what it should, since leaving it
+out makes H1 worse, but not enough. The numbers come from `scripts/research_mean_reversion.py`,
+which uses a simpler fill model than the backtester (stop or target, whichever is touched first,
+with the same spread and commission) and the whole history, holdout years included. Nothing was
+tuned on it and nothing was adopted from it.
 
 ## Backtesting model
 
@@ -434,7 +494,8 @@ bars. On the 1% of bars where it was most confident it reached 55.2% in research
 on the holdout: the confidence was fitted noise.
 
 Fifteen strategy variants across five kinds of idea have now been tested this way and none
-predicts direction on these instruments after costs. **The default config is unchanged.**
+predicts direction on these instruments after costs. (The Bollinger mean-reversion template was
+checked later, more simply, and is reported under [Trading principles](#trading-principles).) **The default config is unchanged.**
 Reproduce with `scripts/research_families.py`, `scripts/research_holdout.py` and
 `scripts/research_round2.py` (`pip install -e ".[research]"`). The holdout has now been used
 for four final tests, so the next idea needs fresh out-of-sample data: the honest source is
@@ -503,7 +564,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 207 tests
+pytest --cov=tradebot      # 230 tests
 ruff check . && ruff format --check .
 ```
 
@@ -520,6 +581,8 @@ Linux and Windows without a terminal.
 
 - **Bar-level simulation:** fills inside a bar are approximated (conservatively). Tick data would
   tighten this for scalping timeframes.
+- **The drawdown limit looks at realised results.** A position that is deep in loss but still
+  open does not count until it closes; the stop on each position bounds that.
 - **No regime model yet:** the strategies are classic technical rules. The results above show
   they are not enough on their own; the tooling is built to evaluate better ideas honestly.
 - **News calendar is a JSON file you maintain.** An economic-calendar feed would be a natural

@@ -244,6 +244,20 @@ dialog h3 { margin: 0 0 12px; }
 dialog .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 dialog .actions button { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; }
 dialog .actions .go { border: 0; font-weight: 650; }
+dialog.wide { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+dialog.wide h4 { margin: 16px 0 6px; font-size: 12px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.05em; }
+dialog.wide ul { margin: 0; padding-left: 18px; }
+dialog.wide li { margin: 4px 0; }
+.limits { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.limit { background: var(--surface-2); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.limit .label { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.04em; }
+.limit .value { font-size: 15px; font-weight: 650; }
+.limit .of { font-size: 12px; color: var(--text-3); }
+.limit .track { height: 4px; border-radius: 2px; background: var(--border); margin-top: 6px; overflow: hidden; }
+.limit .fill { height: 100%; border-radius: 2px; background: var(--good); }
+.limit.near .fill { background: var(--warning); }
+.limit.hit .fill { background: var(--down); }
+.limit.hit { box-shadow: inset 0 0 0 1.5px var(--down); }
 .toast { position: fixed; right: 20px; bottom: 20px; max-width: 420px; padding: 12px 14px; border-radius: 10px; background: var(--text); color: var(--surface); display: none; z-index: 5; }
 .toast.show { display: block; }
 
@@ -262,6 +276,7 @@ dialog .actions .go { border: 0; font-weight: 650; }
   .notice { grid-column: 1 / -1; }
   .chart-wrap { height: 300px; }
   .figures { grid-template-columns: repeat(2, 1fr); }
+  .limits { grid-template-columns: repeat(2, 1fr); }
   footer { padding: 0 16px 16px; }
 }
 </style>
@@ -277,6 +292,7 @@ dialog .actions .go { border: 0; font-weight: 650; }
   <div class="chips" id="chips"></div>
   <div class="account" id="account"></div>
   <div class="gate" id="gate"><span class="dot"></span><span>Connecting to MetaTrader 5…</span></div>
+  <button class="icon-btn text" id="plan-open" type="button" title="The written trading plan: every rule the bot follows, generated from its settings">Plan</button>
   <button class="icon-btn text" id="alerts" type="button" title="Browser notification when a BUY or SELL appears">Alerts off</button>
   <button class="icon-btn" id="theme" type="button" title="Switch theme" aria-label="Switch theme">◐</button>
 </header>
@@ -311,6 +327,9 @@ dialog .actions .go { border: 0; font-weight: 650; }
   <div class="card"><h2>Activity</h2><div id="activity"></div></div>
 </section>
 <section class="bottom single">
+  <div class="card"><h2>Risk limits</h2><div id="limits"></div></div>
+</section>
+<section class="bottom single">
   <div class="card"><h2>Open positions</h2><div id="positions" class="table-scroll"></div></div>
 </section>
 <footer id="footer">Advice comes from the bot's own engine and risk rules. It is not financial advice; the README documents that these strategies lost money out-of-sample.</footer>
@@ -322,6 +341,11 @@ dialog .actions .go { border: 0; font-weight: 650; }
     <button type="button" id="confirm-cancel">Cancel</button>
     <button type="button" class="go" id="confirm-go">Place order</button>
   </div>
+</dialog>
+<dialog id="plan-dialog" class="wide">
+  <h3 id="plan-title">Trading plan</h3>
+  <div id="plan-body"></div>
+  <div class="actions"><button type="button" id="plan-close">Close</button></div>
 </dialog>
 <div class="toast" id="toast" role="status"></div>
 
@@ -479,6 +503,7 @@ function render() {
   } else if (row && row.error) {
     $("#advice").replaceChildren(el("div", { class: "muted", text: `${row.symbol}: ${row.error}` }));
   }
+  renderLimits();
   renderPositions();
   renderSignals();
   renderActivity();
@@ -752,6 +777,53 @@ function renderRecord(row) {
     el("div", { class: "fine", text: "In-sample results with the current settings. The walk-forward test in the README is the honest estimate, and it was negative." }),
   );
 }
+
+// One tile per account-level limit: how much of it is used, and which one has stopped entries.
+function renderLimits() {
+  const r = state.risk;
+  const box = $("#limits");
+  if (!r) { box.replaceChildren(el("div", { class: "empty", text: "Not available yet." })); return; }
+  const tile = (label, value, limitText, used, limit) => {
+    const share = limit > 0 ? Math.max(0, Math.min(1, used / limit)) : 0;
+    const cls = limit > 0 && used >= limit ? "hit" : share >= 0.75 ? "near" : "";
+    return el("div", { class: `limit ${cls}` },
+      el("div", { class: "label", text: label }),
+      el("div", {}, el("span", { class: "value", text: value }), el("span", { class: "of", text: limit > 0 ? ` ${limitText}` : " no limit" })),
+      el("div", { class: "track" }, el("div", { class: "fill", style: `width:${(share * 100).toFixed(0)}%` })));
+  };
+  const pct = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(2)}%`;
+  box.replaceChildren(
+    el("div", { class: "limits" },
+      tile("Today", pct(r.day_percent), `stop at −${num(r.daily_limit, 1)}%`, Math.max(0, -r.day_percent), r.daily_limit),
+      tile("This week", pct(r.week_percent), `stop at −${num(r.weekly_limit, 1)}%`, Math.max(0, -r.week_percent), r.weekly_limit),
+      tile(`Drawdown (${r.drawdown_days} days)`, `${r.drawdown.toFixed(2)}%`, `stop at ${num(r.drawdown_limit, 1)}%`, r.drawdown, r.drawdown_limit),
+      tile("Losses in a row", String(r.losing_streak), `stop at ${r.streak_limit}`, r.losing_streak, r.streak_limit),
+      tile("Entries today", String(r.entries_today), `of ${r.entries_limit}`, r.entries_today, r.entries_limit),
+      tile("Open risk", `${r.open_risk_percent.toFixed(2)}%`, `of ${num(r.open_risk_limit, 1)}% · ${r.positions}/${r.positions_limit} positions`, r.open_risk_percent, r.open_risk_limit)),
+    el("div", { class: "fine", text: r.blocked
+      ? `New entries are stopped: ${r.blocked}.`
+      : "No limit is hit. When one is, new entries stop, for the bot's signals and for trades you place from this page alike." }),
+  );
+}
+
+async function openPlan() {
+  const dialog = $("#plan-dialog");
+  $("#plan-body").replaceChildren(el("div", { class: "muted", text: "Loading…" }));
+  dialog.showModal();
+  try {
+    const res = await fetch("/api/plan", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const plan = await res.json();
+    $("#plan-title").textContent = plan.title;
+    $("#plan-body").replaceChildren(
+      el("div", { class: "fine", text: "Generated from the settings the bot is running on, so the written rules and the executed rules cannot differ. It follows the setup and timeframe switches." }),
+      ...plan.sections.flatMap((s) => [el("h4", { text: s.title }), el("ul", {}, ...s.lines.map((line) => el("li", { text: line })))]));
+  } catch (e) {
+    $("#plan-body").replaceChildren(el("div", { class: "muted", text: `Could not load the plan: ${e.message}` }));
+  }
+}
+$("#plan-open").addEventListener("click", openPlan);
+$("#plan-close").addEventListener("click", () => $("#plan-dialog").close());
 
 function renderPositions() {
   const rows = state.positions || [];

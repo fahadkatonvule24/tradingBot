@@ -75,6 +75,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, self.server.page(), "text/html; charset=utf-8")
         elif url.path == "/api/state":
             self._json(HTTPStatus.OK, self.server.monitor.snapshot())
+        elif url.path == "/api/plan":
+            self._json(HTTPStatus.OK, self.server.monitor.plan())
         elif url.path == "/api/chart":
             symbol = parse_qs(url.query).get("symbol", [""])[0]
             chart = self.server.monitor.chart(symbol)

@@ -89,6 +89,7 @@ class Monitor:
         self.notifier = notifier
         self._previews: dict[str, tuple[float, pd.DataFrame | None]] = {}
         self._track_args: tuple[Any, Any] | None = None
+        self._track_pending = False
         self._htf: dict[str, dict[str, pd.DataFrame]] = {}
         self._forming_seen: set[tuple[str, Any, Any]] = set()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
@@ -134,6 +135,7 @@ class Monitor:
         self._forming_seen.clear()
         self.track_record = {}
         if self._track_args:
+            self._track_pending = True
             threading.Thread(
                 target=self.load_track_record, args=self._track_args, name="track-record", daemon=True
             ).start()
@@ -171,6 +173,17 @@ class Monitor:
     def trend_timeframes(self) -> list[str]:
         strategy = self.config.strategy
         return list(strategy.trend_ladder(self.config.timeframe)) if strategy.use_trend_filter else []
+
+    def plan(self) -> dict[str, Any]:
+        """The written trading plan for the setup and timeframe on screen."""
+        from tradebot.plan import plan_title, trading_plan
+
+        config = self.config
+        sections = trading_plan(config, self.track_record or None, measuring=self._track_pending)
+        return {
+            "title": plan_title(config),
+            "sections": [{"title": s.title, "lines": list(s.lines)} for s in sections],
+        }
 
     def chart(self, symbol: str) -> dict[str, Any] | None:
         with self._lock:
@@ -282,6 +295,7 @@ class Monitor:
             "gate": {"execute": gate.execute, "reason": gate.reason, "live_flag": self.live_flag},
             "symbols": rows,
             "positions": positions,
+            "risk": self.engine.risk_status(now),
             "activity": list(self.activity)[::-1],
             "track_record": self.track_record,
             "error": None,
@@ -521,6 +535,7 @@ class Monitor:
         from tradebot.data import load_dataset, load_trend_bars
 
         self._track_args = (data_dir, names)
+        self._track_pending = True
         config = self.config  # the timeframe may be switched while this runs
         try:
             data, specs = load_dataset(data_dir, list(config.symbols), config.timeframe)
@@ -528,9 +543,11 @@ class Monitor:
             result = run_backtest(config, data, specs, htf=htf)
         except (FileNotFoundError, ValueError) as exc:
             log.info("no track record: %s", exc)
+            if config is self.config:
+                self._track_pending = False
             return
         if config is not self.config:
-            return
+            return  # switched while this ran: the newer run owns the result
         per = result.per_symbol
         m = result.metrics
         record = {
@@ -553,6 +570,7 @@ class Monitor:
             },
         }
         self.track_record = clean(record)
+        self._track_pending = False
 
 
 def clean(value: Any) -> Any:

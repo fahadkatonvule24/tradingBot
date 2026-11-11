@@ -43,6 +43,8 @@
     "max_margin_percent": 30,
     "daily_loss_limit_percent": 2.0,
     "weekly_loss_limit_percent": 5.0,
+    "max_drawdown_percent": 10.0,
+    "drawdown_days": 365,
     "max_consecutive_losses": 4,
     "max_trades_per_day": 8
   },

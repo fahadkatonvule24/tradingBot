@@ -6,6 +6,8 @@ tradebot fetch --bars 60000             # download history to data/ for backtest
 tradebot backtest --data data           # event-driven backtest + HTML report
 tradebot optimize --data data --folds 4 # walk-forward optimisation (out-of-sample report)
 tradebot journal --days 7               # summarise the trade journal
+tradebot plan [--out PLAN.md]           # the written trading plan, generated from the config
+tradebot review --days 30               # closed trades in R: the bot's signals and your own calls
 """
 
 from __future__ import annotations
@@ -104,6 +106,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     journal = sub.add_parser("journal", help="summarise the trade journal")
     journal.add_argument("--days", type=int, default=7)
+
+    plan = sub.add_parser("plan", help="the written trading plan, generated from the config")
+    plan.add_argument("--strategy", choices=STRATEGIES, help="override strategy.name")
+    plan.add_argument("--timeframe", type=str.upper, help="override the config timeframe (e.g. H1)")
+    plan.add_argument("--data", type=Path, default=Path("data"), help="history used to measure the rules")
+    plan.add_argument("--no-backtest", action="store_true", help="skip measuring the rules on stored history")
+    plan.add_argument("-o", "--out", type=Path, help="also write the plan to this Markdown file")
+
+    review = sub.add_parser("review", help="closed trades in R: the bot's signals against your own calls")
+    review.add_argument("--days", type=int, default=30)
     return parser
 
 
@@ -151,6 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         handler = {
             "check": cmd_check, "run": cmd_run, "ui": cmd_ui, "fetch": cmd_fetch, "backtest": cmd_backtest,
             "optimize": cmd_optimize, "journal": cmd_journal, "telegram": cmd_telegram,
+            "plan": cmd_plan, "review": cmd_review,
         }[args.command]  # fmt: skip
         return handler(config, args)
     except (ConfigError, FileNotFoundError, ValueError) as exc:
@@ -411,6 +424,13 @@ def cmd_backtest(config: BotConfig, args: argparse.Namespace) -> int:
             "[grey50]Signals skipped by guards:[/] "
             + ", ".join(f"{k} {v}" for k, v in sorted(result.skips.items(), key=lambda kv: -kv[1]))
         )
+    tripped = _drawdown_trip(result.equity, config.risk.max_drawdown_percent, config.risk.drawdown_days)
+    if tripped is not None:
+        console.print(
+            f"[grey50]Drawdown limit:[/] live trading would have paused entries on {tripped:%Y-%m-%d} "
+            f"({config.risk.max_drawdown_percent:g}% below the {config.risk.drawdown_days}-day peak). "
+            f"The backtest trades on, to show what the rules do."
+        )
     report = write_report(
         render_backtest(result), args.out, f"backtest_{config.strategy.name}_{config.timeframe}.html"
     )
@@ -499,6 +519,102 @@ def cmd_journal(config: BotConfig, args: argparse.Namespace) -> int:
     console.print(table if rows else "No events in that period.")
     journal.close()
     return 0
+
+
+def cmd_plan(config: BotConfig, args: argparse.Namespace) -> int:
+    from tradebot.plan import backtest_record, plan_title, to_markdown, trading_plan
+
+    record = None
+    if not args.no_backtest:
+        from tradebot.backtest import run_backtest
+        from tradebot.data import load_dataset, load_trend_bars
+
+        try:
+            data, specs = load_dataset(args.data, list(config.symbols), config.timeframe)
+            with console.status("Measuring the rules on stored history…"):
+                result = run_backtest(config, data, specs, htf=load_trend_bars(args.data, config))
+            record = backtest_record(result)
+        except (FileNotFoundError, ValueError) as exc:
+            log.debug("plan: no backtest (%s)", exc)
+    sections = trading_plan(config, record)
+    console.print(f"[bold]{escape(plan_title(config))}[/]")
+    for section in sections:
+        console.print(f"\n[bold]{escape(section.title)}[/]")
+        for line in section.lines:
+            console.print(f"  - {escape(line)}")
+    if args.out:
+        args.out.write_text(to_markdown(config, sections), encoding="utf-8")
+        console.print(f"\n[grey50]Written to[/] {args.out}")
+    return 0
+
+
+def cmd_review(config: BotConfig, args: argparse.Namespace) -> int:
+    from datetime import timedelta
+
+    from tradebot.review import closed_trades, summarize, verdict
+
+    broker, _, _ = _connect(config)
+    try:
+        now = broker.now()
+        since = now - timedelta(days=args.days)
+        trades = closed_trades(broker, config.magic, since)
+    finally:
+        broker.shutdown()
+    overall = summarize(trades)
+    figures = f"{overall.trades} closed trades · {overall.win_rate:.1f}% winners · net {overall.net:+,.2f}\n"
+    console.print(
+        Panel.fit(
+            f"{figures if trades else ''}{escape(verdict(overall))}",
+            title=f"Review · last {args.days} days",
+            border_style="grey50",
+        )
+    )
+    if trades:
+        table = Table(box=None, header_style="bold grey50", pad_edge=False)
+        for col in ("", "Trades", "Win %", "Net", "PF", "Avg R", "Stopped", "Target", "Longest losing run"):
+            table.add_column(col, justify="left" if col == "" else "right")
+        groups = [
+            ("The bot's signals", [t for t in trades if not t.manual]),
+            ("Your own calls", [t for t in trades if t.manual]),
+            *[
+                (symbol, [t for t in trades if t.symbol == symbol])
+                for symbol in sorted({t.symbol for t in trades})
+            ],
+        ]
+        for label, group in groups:
+            if not group:
+                continue
+            s = summarize(group)
+            table.add_row(
+                label, str(s.trades), f"{s.win_rate:.1f}", f"{s.net:+,.2f}",
+                "n/a" if s.profit_factor is None else f"{s.profit_factor:.2f}",
+                "n/a" if s.avg_r is None else f"{s.avg_r:+.2f}",
+                str(s.stops), str(s.targets), str(s.longest_losing_streak),
+            )  # fmt: skip
+        console.print(table)
+    dry = 0
+    if Path(config.journal).exists():
+        from tradebot.journal import Journal
+
+        journal = Journal(config.journal)
+        dry = sum(count for _, kind, count, _ in journal.summary(args.days, now) if kind == "DRY_OPEN")
+        journal.close()
+    if dry:
+        console.print(
+            f"[grey50]Dry run:[/] the bot logged {dry} signal{'' if dry == 1 else 's'} in this period without "
+            f"sending an order. To see how they would have done: `tradebot fetch`, then "
+            f"`tradebot backtest --from {since:%Y-%m-%d}`."
+        )
+    return 0
+
+
+def _drawdown_trip(equity: pd.Series, limit_percent: float, days: int) -> pd.Timestamp | None:
+    """The first moment equity was ``limit_percent`` below its highest point of the last ``days`` days."""
+    if not limit_percent or equity.empty:
+        return None
+    peak = equity.rolling(f"{days}D").max()
+    below = equity[equity <= peak * (1 - limit_percent / 100)]
+    return below.index[0] if len(below) else None
 
 
 # --- output helpers -------------------------------------------------------------------------------

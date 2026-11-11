@@ -278,7 +278,7 @@ class MT5Broker:
         for p in self.mt5.positions_get() or []:
             if magic is not None and p.magic != magic:
                 continue
-            initial_volume, initial_sl = self._opening(p.ticket)
+            initial_volume, initial_sl = self.opening(p.ticket)
             out.append(
                 Position(
                     ticket=p.ticket,
@@ -298,7 +298,8 @@ class MT5Broker:
             )
         return out
 
-    def _opening(self, ticket: int) -> tuple[float | None, float | None]:
+    def opening(self, ticket: int) -> tuple[float | None, float | None]:
+        """(volume, stop) of the order that opened a position, open or closed: the trade's 1R."""
         if ticket not in self._origin:
             orders = sorted(self.mt5.history_orders_get(position=ticket) or [], key=lambda o: o.time_setup)
             first = orders[0] if orders else None

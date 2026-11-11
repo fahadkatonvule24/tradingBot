@@ -141,6 +141,11 @@ class RiskParams:
     max_margin_percent: float = 30.0
     daily_loss_limit_percent: float = 2.0
     weekly_loss_limit_percent: float = 5.0
+    max_drawdown_percent: float = 10.0
+    """Live only: no new entries while the bot's realised result is this far below its highest
+    point of the last ``drawdown_days`` days. 0 = off. Backtests do not apply it, so a backtest
+    shows the full drawdown of the rules; ``tradebot backtest`` says when it would have tripped."""
+    drawdown_days: int = 365
     max_consecutive_losses: int = 4
     max_trades_per_day: int = 8
     allow_min_lot_overrisk: bool = False
@@ -330,6 +335,8 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
         errors.append("risk.sl_atr and risk.tp_atr must be positive")
     if r.max_total_risk_percent < (r.risk_percent if r.fixed_lot is None else 0):
         errors.append("risk.max_total_risk_percent is below risk_percent, so no trade could open")
+    if r.max_drawdown_percent < 0 or r.drawdown_days < 1:
+        errors.append("risk.max_drawdown_percent must be >= 0 and risk.drawdown_days >= 1")
     if not 0 < m.partial_tp_fraction < 1:
         errors.append("management.partial_tp_fraction must be between 0 and 1")
     return errors

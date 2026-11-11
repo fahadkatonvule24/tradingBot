@@ -5,8 +5,8 @@ Per symbol, once per *closed* bar:
 1. Manage open positions: exit on an opposite signal or time stop, take partial profit,
    move the stop to breakeven, trail it. Stops only ever tighten.
 2. If the bar produced a signal, run it through the guards (kill switch, session, news,
-   loss limits, streaks, trade count, position limits, spread, portfolio risk, margin)
-   and, if everything passes, size the position from the stop distance and open it.
+   loss limits, drawdown, streaks, trade count, position limits, spread, portfolio risk,
+   margin) and, if everything passes, size the position from the stop distance and open it.
 
 The engine only talks to the ``Broker`` interface, so the backtester drives this exact code
 through ``SimBroker``.
@@ -16,17 +16,17 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from tradebot.broker.base import BUY, Broker, OrderRequest, Position, SymbolSpec
+from tradebot.broker.base import BUY, Account, Broker, Deal, OrderRequest, Position, SymbolSpec
 from tradebot.config import BotConfig, RiskParams, SymbolParams
 from tradebot.journal import Journal, JournalEvent
 from tradebot.news import NewsCalendar
-from tradebot.risk import loss_per_lot, open_risk, position_size, tighter_stop
+from tradebot.risk import drawdown_percent, loss_per_lot, open_risk, position_size, tighter_stop
 from tradebot.strategy import explain
 
 log = logging.getLogger(__name__)
@@ -71,6 +71,33 @@ class Rejection:
     message: str
 
 
+@dataclass(frozen=True)
+class RiskStatus:
+    """Where the account stands against each account-level limit. A limit of 0 is switched off."""
+
+    day_pnl: float
+    day_percent: float
+    """Today's realised result (UTC day) as a percentage of the balance the day started with."""
+    daily_limit: float
+    week_pnl: float
+    week_percent: float
+    weekly_limit: float
+    drawdown: float
+    """Percent below the highest balance of the last ``drawdown_days`` days (live mode only)."""
+    drawdown_limit: float
+    drawdown_days: int
+    losing_streak: int
+    streak_limit: int
+    entries_today: int
+    entries_limit: int
+    open_risk_percent: float = 0.0
+    open_risk_limit: float = 0.0
+    positions: int = 0
+    positions_limit: int = 0
+    blocked: str = ""
+    """The first limit that forbids a new entry right now, as the engine words it."""
+
+
 @dataclass
 class Engine:
     config: BotConfig
@@ -83,6 +110,7 @@ class Engine:
     events: list[Event] = field(default_factory=list)
     skips: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     _acted_bar: dict[str, pd.Timestamp] = field(default_factory=dict)
+    _older_deals: tuple[datetime, int, list[Deal]] | None = None
     _news: NewsCalendar | None = None
 
     def __post_init__(self) -> None:
@@ -198,24 +226,9 @@ class Engine:
         if event:
             return f"news: {event.currency} {event.title} at {event.time:%H:%M} UTC"
 
-        account = self.broker.account()
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_start = day_start - timedelta(days=day_start.weekday())
-        week_deals = self.broker.deals(week_start, self.config.magic)
-        today = [d for d in week_deals if d.time >= day_start]
-        for label, deals, limit in (
-            ("daily", today, r.daily_loss_limit_percent),
-            ("weekly", week_deals, r.weekly_loss_limit_percent),
-        ):
-            realized = sum(d.profit for d in deals)
-            starting_balance = account.balance - realized
-            if limit > 0 and starting_balance > 0 and realized <= -starting_balance * limit / 100:
-                return f"{label} loss limit: {realized:,.2f} ({realized / starting_balance:.1%})"
-        if r.max_consecutive_losses and self._losing_streak_today(day_start) >= r.max_consecutive_losses:
-            return f"losing streak: {r.max_consecutive_losses} losses in a row, paused until 00:00 UTC"
-        entries_today = sum(1 for d in today if d.entry == "in")
-        if r.max_trades_per_day and entries_today >= r.max_trades_per_day:
-            return f"trade count: {entries_today} entries today"
+        status, today = self._limits(r, now, self.broker.account())
+        if status.blocked:
+            return status.blocked
         if self.live and any(
             d.entry == "in" and d.symbol == symbol for d in today if d.time >= _bar_close(row, self.config)
         ):
@@ -233,9 +246,95 @@ class Engine:
             return f"spread: {spread / atr_:.2f} ATR > {r.max_spread_atr} ATR"
         return None
 
-    def _losing_streak_today(self, day_start: datetime) -> int:
+    def _limits(self, r: RiskParams, now: datetime, account: Account) -> tuple[RiskStatus, list[Deal]]:
+        """The account-level limits, from the broker's own deal history (so they survive restarts).
+
+        Returns the figures and today's deals. The drawdown limit is a live-only circuit breaker:
+        applied to a research backtest it would only cut the test short.
+        """
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = day_start - timedelta(days=day_start.weekday())
+        breaker = self.live and r.max_drawdown_percent > 0
+        lookback = max(30, r.drawdown_days) if breaker else 30
+        history = self._deal_history(day_start, lookback)
+        week = [d for d in history if d.time >= week_start]
+        today = [d for d in week if d.time >= day_start]
+        blocked = ""
+        figures = {}
+        for label, deals, limit in (
+            ("daily", today, r.daily_loss_limit_percent),
+            ("weekly", week, r.weekly_loss_limit_percent),
+        ):
+            realized = sum(d.profit for d in deals)
+            starting_balance = account.balance - realized
+            figures[label] = (realized, realized / starting_balance * 100 if starting_balance > 0 else 0.0)
+            hit = limit > 0 and starting_balance > 0 and realized <= -starting_balance * limit / 100
+            if hit and not blocked:
+                blocked = f"{label} loss limit: {realized:,.2f} ({realized / starting_balance:.1%})"
+        drawdown = 0.0
+        if breaker:
+            since = day_start - timedelta(days=r.drawdown_days)
+            drawdown = drawdown_percent([d for d in history if d.time >= since], account.balance)
+            if drawdown >= r.max_drawdown_percent and not blocked:
+                blocked = (
+                    f"drawdown limit: {drawdown:.1f}% below the {r.drawdown_days}-day peak "
+                    f"(limit {r.max_drawdown_percent:g}%), entries paused"
+                )
+        streak = self._losing_streak_today(history, day_start)
+        if r.max_consecutive_losses and streak >= r.max_consecutive_losses and not blocked:
+            blocked = f"losing streak: {r.max_consecutive_losses} losses in a row, paused until 00:00 UTC"
+        entries_today = sum(1 for d in today if d.entry == "in")
+        if r.max_trades_per_day and entries_today >= r.max_trades_per_day and not blocked:
+            blocked = f"trade count: {entries_today} entries today"
+        status = RiskStatus(
+            day_pnl=figures["daily"][0],
+            day_percent=figures["daily"][1],
+            daily_limit=r.daily_loss_limit_percent,
+            week_pnl=figures["weekly"][0],
+            week_percent=figures["weekly"][1],
+            weekly_limit=r.weekly_loss_limit_percent,
+            drawdown=drawdown,
+            drawdown_limit=r.max_drawdown_percent if breaker else 0.0,
+            drawdown_days=r.drawdown_days,
+            losing_streak=streak,
+            streak_limit=r.max_consecutive_losses,
+            entries_today=entries_today,
+            entries_limit=r.max_trades_per_day,
+            blocked=blocked,
+        )
+        return status, today
+
+    def _deal_history(self, day_start: datetime, lookback: int) -> list[Deal]:
+        """The bot's deals of the last ``lookback`` days, oldest first.
+
+        Live, the limits are checked for every symbol every second. Deals from before today can no
+        longer change, so they are read from the terminal once a day and only today's are re-read.
+        """
+        since = day_start - timedelta(days=lookback)
+        if not self.live:
+            return self.broker.deals(since, self.config.magic)
+        if self._older_deals is None or self._older_deals[:2] != (day_start, lookback):
+            older = [d for d in self.broker.deals(since, self.config.magic) if d.time < day_start]
+            self._older_deals = (day_start, lookback, older)
+        return self._older_deals[2] + self.broker.deals(day_start, self.config.magic)
+
+    def risk_status(self, now: datetime) -> RiskStatus:
+        """The limits plus what is open right now, for a person to read (the dashboard shows it)."""
+        r = self.config.risk
+        account = self.broker.account()
+        status, _ = self._limits(r, now, account)
+        positions = self.broker.positions(self.config.magic)
+        committed = open_risk(positions, {p.symbol: self.broker.symbol(p.symbol) for p in positions})
+        return replace(
+            status,
+            open_risk_percent=committed / account.equity * 100 if account.equity > 0 else 0.0,
+            open_risk_limit=r.max_total_risk_percent,
+            positions=len(positions),
+            positions_limit=r.max_total_positions,
+        )
+
+    def _losing_streak_today(self, deals: list[Deal], day_start: datetime) -> int:
         """Losing positions in a row (by close time). Only a streak that ends today pauses trading."""
-        deals = self.broker.deals(day_start - timedelta(days=30), self.config.magic)
         open_tickets = {p.ticket for p in self.broker.positions(self.config.magic)}
         net: dict[int, float] = defaultdict(float)
         closed_at: dict[int, datetime] = {}
@@ -346,7 +445,9 @@ class Engine:
                 volume,
                 float(row["close"]),
             )
-            self._journal(now, "DRY_OPEN", symbol, side, volume, float(row["close"]), None, reason)
+            entry = float(row["close"]) + (spread if side > 0 else 0.0)
+            levels = self._levels(spec, plan, entry)
+            self._journal(now, "DRY_OPEN", symbol, side, volume, entry, None, reason, *levels)
             return
         request = OrderRequest(symbol, side, volume, plan.sl_distance, plan.tp_distance, self.config.comment)
         result = self.broker.open(request, self.config.magic)
@@ -357,7 +458,16 @@ class Engine:
         self._emit(
             now, "open", symbol, f"{word} {volume} @ {result.price} · {reason}", side, volume, result.price
         )
-        self._journal(now, "OPEN", symbol, side, volume, result.price, result.ticket, reason)
+        levels = self._levels(spec, plan, result.price) if result.price else (None, None)
+        self._journal(now, "OPEN", symbol, side, volume, result.price, result.ticket, reason, *levels)
+
+    @staticmethod
+    def _levels(spec: SymbolSpec, plan: EntryPlan, entry: float) -> tuple[float, float]:
+        """Stop and target prices for an entry at ``entry``."""
+        return (
+            spec.round_price(entry - plan.side * plan.sl_distance),
+            spec.round_price(entry + plan.side * plan.tp_distance),
+        )
 
     def _close(self, position: Position, volume: float | None, now: datetime, why: str) -> None:
         kind = "partial" if volume is not None else "close"
@@ -428,6 +538,8 @@ class Engine:
         price: float | None,
         ticket: int | None,
         reason: str,
+        sl: float | None = None,
+        tp: float | None = None,
     ) -> None:
         if self.journal:
             self.journal.record(
@@ -438,8 +550,8 @@ class Engine:
                     "BUY" if side > 0 else "SELL",
                     volume,
                     price,
-                    None,
-                    None,
+                    sl,
+                    tp,
                     ticket,
                     None,
                     reason,
