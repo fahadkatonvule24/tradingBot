@@ -86,7 +86,8 @@ def summarise(wf) -> dict:
 
 def main() -> None:
     base = load_config("config/config.json")
-    base = base.with_strategy(trend_timeframes=("H4",))  # the single H4 filter these runs used
+    # the rules these runs used: a single H4 trend filter, and any close through a level is a break
+    base = base.with_strategy(trend_timeframes=("H4",), breakout_min_atr=0.0)
     only = sys.argv[1:]
     OUT.parent.mkdir(exist_ok=True)
     results = json.loads(OUT.read_text()) if OUT.exists() else {}

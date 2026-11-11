@@ -103,6 +103,10 @@ def _trigger(df: pd.DataFrame, p: StrategyParams) -> pd.Series:
         lower = df["low"].rolling(p.breakout_period).min().shift(1)
         up = (close > upper) & (close.shift(1) <= upper.shift(1))
         down = (close < lower) & (close.shift(1) >= lower.shift(1))
+        if p.breakout_min_atr > 0:  # a marginal poke through the level is not a break
+            margin = p.breakout_min_atr * df["atr"]
+            up &= (close - upper) >= margin
+            down &= (lower - close) >= margin
     elif p.name == "retest":
         return retest_setup(df, p)["trigger"].astype(int)
     elif p.name == "pullback":
@@ -125,6 +129,7 @@ def retest_setup(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
 
     Returns one row per bar: ``trigger`` (+1 / -1 / 0), and the setup still pending *after* that
     bar closed: ``retest_side``, ``retest_level`` and ``retest_left`` (bars before it expires).
+    ``failed_side`` / ``failed_level`` mark the bar on which a break failed.
     """
     open_, high, low, close = (df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
     atr_ = df["atr"].to_numpy(dtype=float)
@@ -135,6 +140,8 @@ def retest_setup(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
     side_out = np.zeros(n, dtype=np.int8)
     level_out = np.full(n, np.nan)
     left_out = np.zeros(n, dtype=np.int32)
+    failed_side = np.zeros(n, dtype=np.int8)
+    failed_level = np.full(n, np.nan)
     side, level, expires = 0, np.nan, -1
     for i in range(1, n):
         if side and i > expires:
@@ -142,12 +149,12 @@ def retest_setup(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
         if side:
             tolerance = p.retest_tolerance_atr * atr_[i]  # NaN while ATR warms up: nothing fires
             if side > 0:
-                if close[i] < level - tolerance:
-                    side = 0  # closed back inside: the break failed
+                if close[i] < level - tolerance:  # closed back inside: the break failed
+                    failed_side[i], failed_level[i], side = side, level, 0
                 elif low[i] <= level + tolerance and close[i] > level and close[i] > open_[i]:
                     trigger[i], side = 1, 0
             elif close[i] > level + tolerance:
-                side = 0
+                failed_side[i], failed_level[i], side = side, level, 0
             elif high[i] >= level - tolerance and close[i] < level and close[i] < open_[i]:
                 trigger[i], side = -1, 0
         if close[i] > upper[i] and close[i - 1] <= upper[i - 1]:
@@ -157,9 +164,43 @@ def retest_setup(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
         if side:
             side_out[i], level_out[i], left_out[i] = side, level, expires - i
     return pd.DataFrame(
-        {"trigger": trigger, "retest_side": side_out, "retest_level": level_out, "retest_left": left_out},
+        {
+            "trigger": trigger,
+            "retest_side": side_out,
+            "retest_level": level_out,
+            "retest_left": left_out,
+            "failed_side": failed_side,
+            "failed_level": failed_level,
+        },
         index=df.index,
     )
+
+
+def break_failures(df: pd.DataFrame, p: StrategyParams, raw: pd.Series) -> pd.DataFrame:
+    """For the breakout setup: the bar on which a recent break stopped holding.
+
+    After a breakout trigger its level is watched for ``retest_window`` bars. A bar that closes
+    back through it by ``breakout_min_atr`` ATR marks the failure: ``failed_side`` is the side of
+    the break that failed and ``failed_level`` the level. Most breakouts end this way, so the
+    advisor says so when it happens.
+    """
+    close, atr_ = df["close"].to_numpy(dtype=float), df["atr"].to_numpy(dtype=float)
+    upper = df["high"].rolling(p.breakout_period).max().shift(1).to_numpy(dtype=float)
+    lower = df["low"].rolling(p.breakout_period).min().shift(1).to_numpy(dtype=float)
+    fired = raw.to_numpy()
+    n = len(df)
+    failed_side = np.zeros(n, dtype=np.int8)
+    failed_level = np.full(n, np.nan)
+    side, level, expires = 0, np.nan, -1
+    for i in range(n):
+        if side and i > expires:
+            side = 0
+        if side and (close[i] - level) * side < -p.breakout_min_atr * atr_[i]:
+            failed_side[i], failed_level[i], side = side, level, 0
+        if fired[i]:
+            side, expires = int(fired[i]), i + p.retest_window
+            level = upper[i] if side > 0 else lower[i]
+    return pd.DataFrame({"failed_side": failed_side, "failed_level": failed_level}, index=df.index)
 
 
 def trend_columns(frame: pd.DataFrame | pd.Series) -> list[str]:
@@ -207,6 +248,8 @@ def compute_signals(
         df[setup.columns] = setup  # the level being watched, for the advisor and the chart
     else:
         raw = _trigger(df, p)
+        if p.name == "breakout":
+            df[["failed_side", "failed_level"]] = break_failures(df, p, raw)
     long, short = raw > 0, raw < 0
     atr_ = df["atr"]
     applicable = FILTERS[p.name]

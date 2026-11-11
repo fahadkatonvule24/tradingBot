@@ -68,6 +68,9 @@ class StrategyParams:
     rsi_sell_min: float = 32.0
     # breakout
     breakout_period: int = 20
+    breakout_min_atr: float = 0.25
+    """A break only counts if the bar closes at least this many ATR beyond the level, and it has
+    failed if a later bar closes back through the level by the same margin. 0 = any close through."""
     # pullback (RSI dips against the higher-timeframe trend, then recovers)
     pullback_rsi_period: int = 3
     pullback_buy_below: float = 15.0
@@ -306,6 +309,8 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
     errors = []
     if s.name not in STRATEGIES:
         errors.append(f"strategy.name {s.name!r} is not one of {', '.join(STRATEGIES)}")
+    if s.breakout_min_atr < 0:
+        errors.append("strategy.breakout_min_atr must be >= 0")
     if s.retest_period < 2 or s.retest_window < 1 or s.retest_tolerance_atr < 0:
         errors.append("strategy.retest_period must be >= 2, retest_window >= 1, retest_tolerance_atr >= 0")
     if s.fast_ema >= s.slow_ema:

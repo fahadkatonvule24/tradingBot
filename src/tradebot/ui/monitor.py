@@ -90,7 +90,7 @@ class Monitor:
         self._previews: dict[str, tuple[float, pd.DataFrame | None]] = {}
         self._track_args: tuple[Any, Any] | None = None
         self._htf: dict[str, dict[str, pd.DataFrame]] = {}
-        self._forming_seen: set[tuple[str, Any, int]] = set()
+        self._forming_seen: set[tuple[str, Any, Any]] = set()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
         self._orders: queue.Queue[_Order] = queue.Queue()
@@ -299,6 +299,7 @@ class Monitor:
         )
         self._note(symbol, advice, now, spec)
         self._note_forming(symbol, advice, now, spec)
+        self._note_failed(symbol, advice, now, spec)
         last = features.iloc[-1]
         forming = getattr(self.broker, "forming_bar", None)
         return {
@@ -392,6 +393,25 @@ class Monitor:
         )
         self.activity.append({"time": now, "symbol": symbol, "action": "FORMING", "text": text})
         self._send(f"FORMING (unconfirmed) · {symbol}\n{text}")
+
+    def _note_failed(self, symbol: str, advice: Advice, now: datetime, spec: SymbolSpec) -> None:
+        """Announce, once, a break that has just closed back through its level."""
+        failed = advice.failed_break
+        if not failed or failed["bars_ago"] != 0:
+            return
+        key = (symbol, failed["time"], f"failed{failed['side']}")
+        if key in self._forming_seen:
+            return
+        self._forming_seen.add(key)
+        up = failed["side"] > 0
+        text = (
+            f"The {WORD[failed['side']].lower()} break {'above' if up else 'below'} "
+            f"{failed['level']:.{spec.digits}f} has failed: the {self.config.timeframe} bar that closed at "
+            f"{failed['time']:%H:%M} UTC finished back {'below' if up else 'above'} it at "
+            f"{failed['price']:.{spec.digits}f}. The breakout is not holding."
+        )
+        self.activity.append({"time": now, "symbol": symbol, "action": "FAILED", "text": text})
+        self._send(f"BREAK FAILED · {symbol}\n{text}")
 
     def _send(self, text: str) -> None:
         if self.notifier:

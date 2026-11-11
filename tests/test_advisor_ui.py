@@ -157,7 +157,8 @@ def test_breakout_trigger_has_a_price_level(cfg, broker):
     cfg = cfg.with_strategy(name="breakout", breakout_period=20)
     frame = features()
     a = advice_for(cfg, broker, frame)
-    assert a.trigger_level == pytest.approx(frame["high"].tail(20).max())
+    # the close that counts: the 20-bar high plus 0.25 ATR (ATR is 0.0010 here)
+    assert a.trigger_level == pytest.approx(frame["high"].tail(20).max() + 0.00025)
     assert "closes above" in a.trigger
 
 

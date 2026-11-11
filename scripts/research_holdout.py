@@ -75,7 +75,8 @@ def report(name: str, result) -> None:
 
 def main() -> None:
     base = load_config("config/config.json")
-    base = base.with_strategy(trend_timeframes=("H4",))  # the single H4 filter these runs used
+    # the rules these runs used: a single H4 trend filter, and any close through a level is a break
+    base = base.with_strategy(trend_timeframes=("H4",), breakout_min_atr=0.0)
     data = {s: load_bars(DATA / f"{s}_H1.csv") for s in base.symbols}
     specs = {s: load_spec(DATA, s) for s in base.symbols}
     htf = {(s, "H4"): load_bars(DATA / f"{s}_H4.csv") for s in base.symbols}

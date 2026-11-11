@@ -81,6 +81,8 @@ class Advice:
     """The most recent entry trigger in the last few bars, taken or filtered, and the move since."""
     early: dict | None = None
     """What the bar that is still forming would do: see ``early_warning``."""
+    failed_break: dict | None = None
+    """A break in the last few bars that has closed back through its level: see ``failed_break``."""
     """When trading hours are closed: the first bar close at which an entry is allowed again."""
 
 
@@ -194,6 +196,7 @@ def advise(
         "plans": plans,
         "last_trigger": last_trigger(features, params, tick, config.bar_minutes),
         "early": early_warning(features, preview, params, spec, config.bar_minutes),
+        "failed_break": failed_break(features, config.bar_minutes),
     }
 
     if signal:
@@ -213,6 +216,17 @@ def advise(
             symbol, "BLOCKED", f"{word} trigger fired, blocked by a filter",
             f"The {word.lower()} trigger fired on the last bar, but the bot did not take it: {label}. "
             f"The plan shows the {word.lower()} if you want to take it on your own call.",
+            actionable=False, **common,
+        )  # fmt: skip
+    failed = common["failed_break"]
+    if failed and not failed["recovered"]:
+        ago = "on the last bar" if failed["bars_ago"] == 0 else _bars_ago(failed["bars_ago"])
+        level = f"{failed['level']:.{spec.digits}f}"
+        back = "below" if failed["side"] > 0 else "above"
+        return Advice(
+            symbol, "WAIT", f"{WORD[failed['side']].title()} break failed {ago}",
+            f"Price broke {'above' if failed['side'] > 0 else 'below'} {level} and has closed back {back} it, "
+            f"so that break no longer holds. {trigger}",
             actionable=False, **common,
         )  # fmt: skip
     recent = common["last_trigger"]
@@ -272,6 +286,38 @@ def early_warning(
 
 
 TRIGGER_LOOKBACK = 12
+
+
+def _bars_ago(n: int) -> str:
+    return f"{n} bar{'' if n == 1 else 's'} ago"
+
+
+def failed_break(features: pd.DataFrame, bar_minutes: int) -> dict | None:
+    """The latest break in the last 12 bars that closed back through its level, unless a newer
+    break has replaced it. Only the breakout and retest setups track this."""
+    if "failed_side" not in features.columns:
+        return None
+    recent = features.tail(TRIGGER_LOOKBACK)
+    failed = recent[recent["failed_side"].fillna(0) != 0]
+    if failed.empty:
+        return None
+    row, at = failed.iloc[-1], failed.index[-1]
+    after = features.loc[features.index > at]
+    newer = (after["raw_signal"] != 0).any()
+    if "retest_side" in after.columns:
+        newer = newer or (after["retest_side"].fillna(0) != 0).any()
+    if newer:
+        return None
+    side = int(row["failed_side"])
+    return {
+        "time": (row["time"] + pd.Timedelta(minutes=bar_minutes)).to_pydatetime(),
+        "bars_ago": int((features.index > at).sum()),
+        "side": side,
+        "level": float(row["failed_level"]),
+        "price": float(row["close"]),
+        # the last closed bar is back beyond the level: the failure did not stick
+        "recovered": bool((float(features["close"].iloc[-1]) - float(row["failed_level"])) * side > 0),
+    }
 
 
 def last_trigger(features: pd.DataFrame, params: SymbolParams, tick: Tick, bar_minutes: int) -> dict | None:
@@ -444,12 +490,20 @@ def next_trigger(
         )
     if p.name == "breakout":
         window = features.tail(p.breakout_period)
-        level = float(window["high"].max() if side > 0 else window["low"].min())
+        edge = float(window["high"].max() if side > 0 else window["low"].min())
+        level = spec.round_price(edge + side * p.breakout_min_atr * atr_)  # the close that counts
         price = tick.ask if side > 0 else tick.bid
         away = (level - price) * side
         where = f"{away / atr_:.2f} ATR away" if away > 0 else "price is through it; the bar must close there"
+        margin = ""
+        if p.breakout_min_atr > 0:
+            margin = (
+                f": the {p.breakout_period}-bar {'high' if side > 0 else 'low'} {edge:.{spec.digits}f} "
+                f"{'plus' if side > 0 else 'minus'} {p.breakout_min_atr:g} ATR, so a marginal poke through it "
+                f"does not count"
+            )
         return (
-            f"A {word} triggers when a {timeframe} bar closes {above} {level:.{spec.digits}f} ({where}).",
+            f"A {word} triggers when a {timeframe} bar closes {above} {level:.{spec.digits}f} ({where}){margin}.",
             level,
         )
     if p.name == "retest":

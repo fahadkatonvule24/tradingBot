@@ -144,8 +144,8 @@ button { font: inherit; color: inherit; }
 }
 .badge.BUY, .badge.ORDER { background: var(--up); color: var(--on-color); }
 .badge.SELL, .badge.REJECTED { background: var(--down); color: var(--on-color); }
-.badge.SKIP, .badge.BLOCKED { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
-.badge.SKIP::before, .badge.BLOCKED::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
+.badge.SKIP, .badge.BLOCKED, .badge.FAILED { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
+.badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
 .badge.big { font-size: 15px; padding: 7px 14px; border-radius: 8px; }
 
 /* --- advice --- */
@@ -563,6 +563,7 @@ function sparkline(row) {
   return svg;
 }
 
+const barsAgo = (n) => (n === 0 ? "on the last bar" : `${n} bar${n === 1 ? "" : "s"} ago`);
 const badgeText = (a) => (a.action === "BLOCKED" ? `${a.side > 0 ? "BUY" : "SELL"} BLOCKED` : a.action);
 
 function renderWatchlist() {
@@ -577,6 +578,9 @@ function renderWatchlist() {
     const recentNote = recent && !row.advice.actionable
       ? `${recent.side > 0 ? "Buy" : "Sell"} trigger ${recent.bars_ago === 0 ? "on the last bar" : `${recent.bars_ago} bar${recent.bars_ago === 1 ? "" : "s"} ago`} · ${recent.taken ? "taken" : "blocked"}`
       : null;
+    const failed = row.advice.failed_break;
+    const failedNote = failed && !failed.recovered && !row.advice.actionable && row.advice.action !== "BLOCKED"
+      ? `${failed.side > 0 ? "Buy" : "Sell"} break failed · ${barsAgo(failed.bars_ago)}` : null;
     const early = row.advice.early;
     const formingNote = early && early.firing && !row.advice.actionable ? `${early.side > 0 ? "Buy" : "Sell"} trigger forming · not confirmed` : null;
     const pxEl = el("span", { class: "px", text: px(row.bid, row.digits) });
@@ -595,6 +599,7 @@ function renderWatchlist() {
       el("span", { class: "chg muted", title: `Change over the last ${(row.spark || []).length - 1} ${state.timeframe} bars`, text: `${change > 0 ? "+" : change < 0 ? "−" : ""}${Math.abs(change).toFixed(2)}%` }),
       el("span", { class: "sub" }, el("span", { text: `spread ${distance(row, row.spread)}` }), sparkline(row)),
       formingNote ? el("span", { class: "sub", style: "color:var(--text)", text: formingNote })
+        : failedNote ? el("span", { class: "sub", style: "color:var(--text)", text: failedNote })
         : recentNote ? el("span", { class: "sub", style: "color:var(--text-2)", text: recentNote }) : null,
     );
   });
@@ -616,7 +621,7 @@ function renderAdvice(row) {
     el("span", { class: `badge big ${a.action}`, text: badgeText(a) }),
     el("div", {}, el("div", { class: "headline", text: a.headline }), el("div", { class: "detail", text: a.detail }),
       a.direction_note ? el("div", { class: "detail", text: a.direction_note }) : null,
-      triggerLine(row), earlyLine(row)),
+      triggerLine(row), failedLine(row), earlyLine(row)),
     when,
   ];
   if (a.blocker && a.action !== "SKIP") {
@@ -640,6 +645,18 @@ function earlyLine(row) {
   const away = Math.abs((e.side > 0 ? row.ask : row.bid) - e.level);
   if (away > 2 * row.atr) return null;   // out of reach for this bar: the trigger text above covers it
   return el("div", { class: "detail" }, el("strong", { text: "Early warning: " }), `a ${word} trigger fires${where} (${distance(row, away)} from the current price).`);
+}
+
+function failedLine(row) {
+  const a = row.advice, f = a.failed_break;
+  if (!f || a.actionable) return null;
+  const up = f.side > 0;
+  return el("div", { class: "notice", style: "margin-top:6px" }, el("span", {},
+    el("strong", { text: `Break failed ${barsAgo(f.bars_ago)}: ` }),
+    `price broke ${up ? "above" : "below"} ${px(f.level, row.digits)}, then the bar that closed at ${localTime(f.time)} finished back ${up ? "below" : "above"} it at ${px(f.price, row.digits)}. `
+    + (f.recovered
+      ? `The last bar closed back ${up ? "above" : "below"} the level, so the break is unsettled, not clean.`
+      : `Price has not closed back ${up ? "above" : "below"} it since: the breakout is not holding. About six in ten breakouts do this.`)));
 }
 
 function triggerLine(row) {
@@ -834,6 +851,16 @@ function announce() {
     announced[key] = true;
     if (!alertsOn || Notification.permission !== "granted") continue;
     try { new Notification(`${badgeText(sym.advice)} · ${sym.symbol}`, { body: sym.advice.detail, tag: key }); } catch (e) { /* unavailable */ }
+  }
+  for (const sym of state.symbols) {   // a break that has just closed back through its level
+    const f = sym.advice && sym.advice.failed_break;
+    if (!f || f.bars_ago !== 0) continue;
+    const key = `${sym.symbol}:${f.time}:${f.side}:failed`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    const body = `Price closed back ${f.side > 0 ? "below" : "above"} ${px(f.level, sym.digits)} at ${px(f.price, sym.digits)}.`;
+    try { new Notification(`Break failed · ${sym.symbol}`, { body, tag: key }); } catch (err) { /* unavailable */ }
   }
   for (const sym of state.symbols) {   // heads-up while the bar is still forming
     const e = sym.advice && sym.advice.early;

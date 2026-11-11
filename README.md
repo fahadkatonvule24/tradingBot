@@ -133,25 +133,25 @@ it is not a way to make these triggers profitable.
 design: it fires after a move is under way. The setup switch (or `--strategy`, or
 `"strategy": {"name": ...}`) changes what the advisor watches: `breakout` for the bar that starts
 a move, `pullback` for a dip inside a trend, and `retest` for a broken level that price comes
-back to and holds. They fire five to ten times as often, and they lose too. Default parameters,
+back to and holds. They fire four to ten times as often, and they lose too. Default parameters,
 nothing tuned, six instruments, direction from the automatic two-timeframe ladder:
 
 | Timeframe (period) | Setup | Trades a week | Winners | Average trade | Return |
 |---|---|---:|---:|---:|---:|
 | H1 (Aug 2016 – Nov 2026) | ema_cross | 1.2 | 37.1% | −0.18R | −26.1% |
-| | breakout | 6.1 | 40.0% | −0.09R | −53.7% |
+| | breakout | 4.7 | 42.1% | −0.04R | −26.5% |
 | | pullback | 6.9 | 40.3% | −0.11R | −62.5% |
 | | retest | 4.5 | 39.4% | −0.10R | −47.4% |
 | M30 (Oct 2021 – Nov 2026) | ema_cross | 2.3 | 36.5% | −0.24R | −29.9% |
-| | breakout | 12.0 | 38.6% | −0.16R | −69.2% |
+| | breakout | 9.3 | 39.5% | −0.13R | −54.2% |
 | | pullback | 10.2 | 40.0% | −0.13R | −58.0% |
 | | retest | 9.2 | 38.2% | −0.17R | −63.3% |
 | M15 (Apr 2024 – Nov 2026) | ema_cross | 3.4 | 34.5% | −0.27R | −26.1% |
-| | breakout | 15.1 | 35.1% | −0.24R | −69.4% |
+| | breakout | 12.0 | 36.4% | −0.19R | −51.8% |
 | | pullback | 17.4 | 39.2% | −0.15R | −57.6% |
 | | retest | 12.0 | 36.1% | −0.22R | −58.7% |
 | M5 (Dec 2025 – Nov 2026) | ema_cross | 6.1 | 36.3% | −0.17R | −11.1% |
-| | breakout | 17.5 | 35.2% | −0.21R | −34.3% |
+| | breakout | 15.1 | 36.7% | −0.16R | −25.5% |
 | | pullback | 20.2 | 36.5% | −0.19R | −34.8% |
 | | retest | 15.3 | 35.7% | −0.17R | −26.0% |
 
@@ -160,6 +160,32 @@ direction of the break) were written down before this was run and have not been 
 A setup that trades more often with the same negative average loses more in total, which is why
 the bigger returns column belongs to the busier setups. As with the timeframe switch, this is
 for following a setup you already read on the chart, with the bot's sizing and stop.
+
+**False breakouts.** On this history they are the normal case: 60% of H1 breakouts (65% on M15)
+close back through the level within 12 bars, and after a breakout price moves one ATR further
+in the same direction first only 48% of the time. Trading with the higher-timeframe trend makes
+no difference to that (60.1% against 60.6%). Five ways of dealing with it were written down and
+run once each, on six instruments with default risk settings:
+
+| Approach | H1 trades a week | H1 average trade | M15 average trade |
+|---|---:|---:|---:|
+| Any close through the level (the rule until v3.7) | 6.1 | −0.09R | −0.24R |
+| **Decisive close:** at least 0.25 ATR beyond the level | 4.7 | −0.04R | −0.19R |
+| Two closes: enter only if the next bar also closes beyond it | 5.7 | −0.06R | −0.21R |
+| Break and retest | 4.5 | −0.10R | −0.22R |
+| Trade against the failed break | 3.7 | −0.13R | −0.11R |
+
+The decisive close is now the breakout rule (`"breakout_min_atr": 0.25`; `0` restores the old
+one). It was the best of five, so part of its lead may be luck; on M30 and M5, which were not
+part of the comparison, it improved the average trade from −0.16R to −0.13R and from −0.21R to
+−0.16R. It is still a losing rule. The first close through the level must itself be decisive: a
+marginal poke followed by a strong bar is not treated as a fresh break.
+
+Because most breaks fail, the advisor says so when one does. For the breakout and retest setups
+a broken level is watched for 12 bars, and a close back through it puts "Break failed" on the
+card and the watchlist, in the activity feed, and in the Telegram and browser alerts. If a later
+bar closes beyond the level again, the card calls the break unsettled instead. Stops are
+unchanged: 1.5 ATR, moved to breakeven at +1R, already bound what a false break costs.
 
 **Knowing early without acting early.** The bot decides only when a bar closes: a crossover on a
 bar that is still forming can appear and vanish several times, and v23 traded those. The early
@@ -271,7 +297,7 @@ src/tradebot/
 | `strategy.name` | Entry trigger | Filters applied |
 |---|---|---|
 | `ema_cross` | fast EMA crosses slow EMA | trend, ADX, MACD, RSI cap, S/R room, Fibonacci (opt.) |
-| `breakout` | close breaks the prior N-bar high/low | trend, ADX, MACD |
+| `breakout` | a bar closes at least `breakout_min_atr` (0.25) ATR beyond the prior N-bar high/low | trend, ADX, MACD |
 | `pullback` | fast RSI recovers from an extreme in the direction of the trend | trend, ADX, S/R room, Fibonacci (opt.) |
 | `retest` | a bar closes through the prior N-bar high/low; within the next 12 bars price returns to that level and a bar closes away from it again. A close back through the level cancels the setup | trend, ADX |
 
@@ -315,8 +341,9 @@ position sizes below the minimum lot, the losing-streak pause, and position limi
 
 ## Results on real data
 
-These runs used a single H4 trend filter (`"trend_timeframes": ["H4"]`), which was the default
-when they were made; the research scripts pin it. The automatic two-timeframe ladder that is
+These runs used a single H4 trend filter (`"trend_timeframes": ["H4"]`) and counted any close
+through a level as a breakout (`"breakout_min_atr": 0`), which were the defaults when they were
+made; the research scripts pin both. The automatic two-timeframe ladder that is
 now the default is measured [under the advisor dashboard](#advisor-dashboard).
 
 Every strategy was walk-forward tested on six instruments (EURUSD, GBPUSD, USDJPY, AUDUSD,
@@ -476,7 +503,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 191 tests
+pytest --cov=tradebot      # 207 tests
 ruff check . && ruff format --check .
 ```
 
