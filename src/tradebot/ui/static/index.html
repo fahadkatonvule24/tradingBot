@@ -144,8 +144,9 @@ button { font: inherit; color: inherit; }
 }
 .badge.BUY, .badge.ORDER { background: var(--up); color: var(--on-color); }
 .badge.SELL, .badge.REJECTED { background: var(--down); color: var(--on-color); }
-.badge.SKIP, .badge.BLOCKED, .badge.FAILED { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
-.badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
+.badge.EXIT { background: var(--down); color: var(--on-color); }
+.badge.SKIP, .badge.BLOCKED, .badge.FAILED, .badge.REVERSAL { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
+.badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before, .badge.REVERSAL::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
 .badge.big { font-size: 15px; padding: 7px 14px; border-radius: 8px; }
 
 /* --- advice --- */
@@ -237,6 +238,18 @@ th.n, td.n { text-align: right; }
 footer { padding: 0 20px 20px; color: var(--text-3); font-size: 12px; }
 .banner { display: none; padding: 8px 20px; background: var(--down); color: var(--on-color); font-weight: 600; }
 .banner.show { display: block; }
+.revbar { display: none; width: 100%; border: 0; text-align: left; padding: 8px 20px; background: var(--down); color: var(--on-color); font-weight: 600; cursor: pointer; }
+.revbar.warn { background: var(--warning); color: #000; }
+.revbar.show { display: block; }
+.rev { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: start; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); box-shadow: inset 0 0 0 1.5px var(--warning); }
+.rev.exit { box-shadow: inset 0 0 0 1.5px var(--down); }
+.rev.forming { box-shadow: none; }
+.rev .head { font-weight: 650; }
+.rev ul { margin: 2px 0 0; padding-left: 18px; }
+.rev li { margin: 2px 0; }
+.rev .fine { margin-top: 4px; }
+.advice > .rev { grid-column: 1 / -1; }
+tr.revrow td { border-top: 0; padding-top: 0; }
 
 dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); padding: 20px; width: min(420px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
@@ -283,6 +296,7 @@ dialog.wide li { margin: 4px 0; }
 </head>
 <body>
 <div class="banner" id="banner" role="status"></div>
+<button class="revbar" id="revbar" type="button" role="status"></button>
 <header class="top">
   <div class="brand">
     <svg width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="4" fill="var(--up)"/><path d="M3 11l3-3 2 2 5-5" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
@@ -505,6 +519,7 @@ function render() {
   }
   renderLimits();
   renderPositions();
+  renderReversalBar();
   renderSignals();
   renderActivity();
   announce();
@@ -608,6 +623,9 @@ function renderWatchlist() {
       ? `${failed.side > 0 ? "Buy" : "Sell"} break failed · ${barsAgo(failed.bars_ago)}` : null;
     const early = row.advice.early;
     const formingNote = early && early.firing && !row.advice.actionable ? `${early.side > 0 ? "Buy" : "Sell"} trigger forming · not confirmed` : null;
+    const held = reversals(row.symbol);
+    const turned = held.find((p) => p.reversal.level === "exit") || held.find((p) => p.reversal.level) || held[0];
+    const turnedNote = turned ? `${turned.reversal.level === "exit" ? "Get out" : turned.reversal.level ? "Reversal warning" : "Reversal sign forming"} · your ${turned.side > 0 ? "buy" : "sell"}` : null;
     const pxEl = el("span", { class: "px", text: px(row.bid, row.digits) });
     const prev = lastBid[row.symbol];
     if (prev != null && prev !== row.bid) {
@@ -623,7 +641,8 @@ function renderWatchlist() {
       pxEl,
       el("span", { class: "chg muted", title: `Change over the last ${(row.spark || []).length - 1} ${state.timeframe} bars`, text: `${change > 0 ? "+" : change < 0 ? "−" : ""}${Math.abs(change).toFixed(2)}%` }),
       el("span", { class: "sub" }, el("span", { text: `spread ${distance(row, row.spread)}` }), sparkline(row)),
-      formingNote ? el("span", { class: "sub", style: "color:var(--text)", text: formingNote })
+      turnedNote ? el("span", { class: "sub", style: "color:var(--text);font-weight:650", text: turnedNote })
+        : formingNote ? el("span", { class: "sub", style: "color:var(--text)", text: formingNote })
         : failedNote ? el("span", { class: "sub", style: "color:var(--text)", text: failedNote })
         : recentNote ? el("span", { class: "sub", style: "color:var(--text-2)", text: recentNote }) : null,
     );
@@ -652,7 +671,47 @@ function renderAdvice(row) {
   if (a.blocker && a.action !== "SKIP") {
     parts.push(el("div", { class: "notice", text: `Entries are paused right now: ${a.blocker}.` }));
   }
-  $("#advice").replaceChildren(...parts);
+  $("#advice").replaceChildren(...reversals(row.symbol).map((p) => reversalBox(p, row.digits)), ...parts);
+}
+
+// --- reversal against an open position -------------------------------------------------------
+// Positions on `symbol` (or on every symbol) with something against them, confirmed or forming.
+function reversals(symbol) {
+  return (state.positions || []).filter((p) => p.reversal && (p.reversal.level || p.reversal.forming.length) && (!symbol || p.symbol === symbol));
+}
+function reversalBox(p, digits) {
+  const v = p.reversal;
+  const side = p.side > 0 ? "BUY" : "SELL";
+  const badge = v.level === "exit" ? el("span", { class: "badge EXIT", text: "GET OUT" })
+    : el("span", { class: "badge REVERSAL", text: v.level ? "REVERSAL WARNING" : "FORMING" });
+  const signs = v.signs.map((s) => el("li", { text: `${s.text} Bar closed ${localTime(s.time)}.` }));
+  const forming = v.forming.length ? el("div", { class: "fine" },
+    el("strong", { text: "Forming, not confirmed: " }),
+    `if this ${state.timeframe} bar closes at the current price at ${localTime(v.forming_closes_at)}, ${v.forming.map((s) => s.text).join(" ")} It can still disappear before the close.`) : null;
+  const result = `${money(p.profit, true)}${p.r == null ? "" : ` (${p.r >= 0 ? "+" : "−"}${Math.abs(p.r).toFixed(1)}R)`}`;
+  const stop = p.sl ? `Its stop is at ${px(p.sl, digits)}.` : "It has no stop.";
+  const advice = v.level === "exit"
+    ? "This is the level at which the rules say to get out. Closing is your call and is done in MetaTrader; this page does not close positions."
+    : v.level ? "One sign is a warning, not a verdict. A second sign, or an opposite signal, raises it to get out."
+    : "Nothing is confirmed yet.";
+  return el("div", { class: `rev ${v.level || "forming"}` }, badge,
+    el("div", {},
+      el("div", { class: "head", text: `${v.headline}: ${side} ${p.volume} ${p.symbol} from ${px(p.price_open, digits)}, now ${result}` }),
+      signs.length ? el("ul", {}, ...signs) : null,
+      forming,
+      el("div", { class: "fine", text: `${advice} ${stop} Counted over the ${v.bars} ${state.timeframe} bar${v.bars === 1 ? "" : "s"} closed since the position opened.` })));
+}
+function renderReversalBar() {
+  const all = reversals().filter((p) => p.reversal.level);
+  const bar = $("#revbar");
+  if (!all.length) { bar.className = "revbar"; return; }
+  const out = all.filter((p) => p.reversal.level === "exit");
+  const list = (rows) => rows.map((p) => `${p.side > 0 ? "BUY" : "SELL"} ${p.symbol}`).join(", ");
+  bar.textContent = out.length
+    ? `Get out: reversal against your ${list(out)}.${all.length > out.length ? ` Warning on ${list(all.filter((p) => p.reversal.level !== "exit"))}.` : ""} Click for the reasons.`
+    : `Reversal warning on your ${list(all)}. Click for the reasons.`;
+  bar.className = `revbar show${out.length ? "" : " warn"}`;
+  bar.onclick = () => select((out[0] || all[0]).symbol);
 }
 
 function earlyLine(row) {
@@ -833,7 +892,9 @@ function renderPositions() {
     const sym = symbolRow(p.symbol);
     const d = sym ? sym.digits : 5;
     const now = sym ? (p.side > 0 ? sym.bid : sym.ask) : null;
-    return el("tr", {},
+    const turned = p.reversal && (p.reversal.level || p.reversal.forming.length)
+      ? el("tr", { class: "revrow" }, el("td", { colspan: "10" }, reversalBox(p, d))) : null;
+    return [el("tr", {},
       el("td", { text: p.symbol }),
       el("td", {}, el("span", { class: `badge ${p.side > 0 ? "BUY" : "SELL"}`, text: p.side > 0 ? "BUY" : "SELL" })),
       el("td", { class: "n", text: String(p.volume) }),
@@ -843,7 +904,7 @@ function renderPositions() {
       el("td", { class: "n", text: now == null ? "—" : px(now, d) }),
       el("td", { class: "n", text: money(p.profit, true) }),
       el("td", { class: "n", text: p.r == null ? "—" : `${p.r >= 0 ? "+" : "−"}${Math.abs(p.r).toFixed(2)}R` }),
-      el("td", { class: "muted", text: p.bot ? "bot" : "manual" }));
+      el("td", { class: "muted", text: p.bot ? "bot" : "manual" })), turned];
   });
   $("#positions").replaceChildren(el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
 }
@@ -902,7 +963,21 @@ $("#alerts").addEventListener("click", async () => {
 });
 function announce() {
   const live = state.symbols.filter((sym) => sym.advice && sym.advice.actionable);
-  document.title = live.length ? `${live.map((sym) => `${sym.advice.action} ${sym.symbol}`).join(", ")} · tradebot advisor` : "tradebot advisor";
+  const out = reversals().filter((p) => p.reversal.level === "exit");
+  const titles = [...out.map((p) => `GET OUT ${p.symbol}`), ...live.map((sym) => `${sym.advice.action} ${sym.symbol}`)];
+  document.title = titles.length ? `${titles.join(", ")} · tradebot advisor` : "tradebot advisor";
+  for (const p of reversals()) {   // the market has turned against a position that is open
+    const v = p.reversal;
+    if (!v.level) continue;
+    const key = `${p.ticket}:${v.level}:${v.signs.map((s) => s.key).join()}`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    try {
+      new Notification(`${v.level === "exit" ? "Get out" : "Reversal warning"} · ${p.side > 0 ? "BUY" : "SELL"} ${p.symbol}`,
+        { body: v.signs.map((s) => s.text).join(" "), tag: key });
+    } catch (err) { /* unavailable */ }
+  }
   for (const sym of live) {
     const key = `${sym.symbol}:${sym.advice.bar_time}`;
     if (announced[key]) continue;

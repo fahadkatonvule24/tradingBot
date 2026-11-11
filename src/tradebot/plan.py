@@ -161,6 +161,14 @@ def trading_plan(
     if m.max_hold_bars:
         exits.append(f"A position still open after {m.max_hold_bars} bars is closed.")
     exits.append("The stop only ever moves in the trade's favour. It is never widened.")
+    exits.append(
+        f"Reversal warning, for any open position on a watched instrument, the bot's or one opened by hand. "
+        f"Counted from the bar after the entry: an opposite signal that passes the filters; a {config.timeframe} "
+        f"close beyond the prior {p.breakout_period}-bar extreme; EMA {p.fast_ema} crossing EMA {p.slow_ema} "
+        f"against the trade; the higher-timeframe trend turning against it; the break it was riding failing. "
+        f"One sign is a warning. The opposite signal, or two signs standing together, is the get-out level. "
+        f"It is a warning to a person: the bot itself closes only on the opposite signal and its stops."
+    )
 
     if r.fixed_lot is not None:
         size = [f"Every trade is {r.fixed_lot:g} lots (fixed)."]

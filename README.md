@@ -109,7 +109,8 @@ symbol, once a second:
 | Early warning | while a bar is still forming: the exact close that would fire the next trigger, and a "forming, not confirmed" notice when the current price would fire it, with whether the filters would pass or block it |
 | Risk limits | how much of each account limit is used: today's and this week's result against the loss limits, drawdown, losses in a row, entries today, open risk. The tile of a limit that is hit turns red and the card says entries are stopped |
 | Plan | the written trading plan for the setup and timeframe on screen, with what those rules measured on your stored history |
-| Alerts | browser notifications, and optionally Telegram messages to your phone, when a signal fires, a filter blocks a trigger, a trigger is forming, or an order is placed |
+| Reversal warning | for every open position on a watched instrument, the bot's or one you opened by hand: the signs that the market has turned against it since it opened. One sign is a warning; an opposite signal or two signs together is "get out". Shown in a strip across the top, on the instrument's card, under the position, in the tab title and in the alerts. A sign the bar still forming would add is shown as "forming, not confirmed" |
+| Alerts | browser notifications, and optionally Telegram messages to your phone, when a signal fires, a filter blocks a trigger, a trigger is forming, an order is placed, or the market turns against an open position |
 | Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
 
 **The advice is the bot's own decision, not a separate indicator.** `advisor.py` calls the same
@@ -290,6 +291,7 @@ src/tradebot/
 ├── risk.py          position sizing, portfolio risk, drawdown
 ├── plan.py          the written trading plan, generated from the config
 ├── review.py        closed trades in R, bot signals against manual trades
+├── reversal.py      the signs that the market has turned against an open position
 ├── broker/          base.py (interface) · mt5.py (MetaTrader 5) · sim.py (simulation)
 ├── backtest.py      multi-symbol event-driven backtester
 ├── optimize.py      grid search + walk-forward (process pool)
@@ -333,6 +335,10 @@ exactly the same rows as computing on the full history.
 - **Management is in R** (multiples of the initial risk): partial profit at `partial_tp_r`,
   breakeven plus a buffer at `breakeven_r`, ATR trail from `trail_start_r`. The original stop and
   volume are read back from MT5 order history, so this survives restarts.
+- **Reversal warning:** `tradebot ui` and `tradebot run` watch every open position on a watched
+  instrument and say when the market turns against it (see
+  [Reversal warning](#reversal-warning-for-an-open-position-v311)). It is a warning to a person.
+  The bot's own exits are unchanged: the stop, the target, the trail and an opposite signal.
 
 ## Trading principles
 
@@ -444,6 +450,52 @@ instruments are unchanged. US500 results use its contract value for dollar amoun
 commission as a share of position value; for the two crosses the simulator converts profit at
 today's exchange rate, which leaves R-multiples exact and the percentage returns approximate.
 Reproduce with `scripts/research_breakout_extras.py`.
+
+### Reversal warning for an open position (v3.11)
+
+The entry rules say when to get in. Someone holding a trade asks the other question: has the
+market turned against it? The check uses the same closed-bar facts as the strategy and counts
+only what happened after the position opened, so nothing that was already true at the entry is
+reported as news. It covers every position on a watched instrument, including one opened by hand
+in MetaTrader.
+
+| Sign | What it is | Taken back when |
+|---|---|---|
+| Opposite signal | the watched setup signals the other way and every filter passes it (the bot closes its own trades on this) | a new trigger fires in the position's favour |
+| Structure | a bar closes beyond the prior 20-bar low (for a buy) or high (for a sell) | a bar closes back beyond that level |
+| Averages | the fast EMA crosses the slow EMA against the position | they cross back |
+| Trend | the higher-timeframe trend turns against the position | it no longer points against it |
+| Failed break | the break the position was riding closes back through its level (breakout and retest setups) | price closes back beyond the level, or a new break fires |
+
+One sign is a **warning**. The opposite signal, or two signs standing together, is the **get out**
+level. A sign that the bar still forming would add is shown separately as "forming, not
+confirmed", because it can disappear before the close. The page does not close positions: it
+says what it sees, what you hold, your result so far and where your stop is.
+
+What it has been worth was measured the same way as everything else: every trade of the
+backtests was closed when the check said so. Average trade, as it is → closing at the get-out
+level → closing at the first sign:
+
+| Setup | H1 | M15 | M30 | M5 |
+|---|---:|---:|---:|---:|
+| ema_cross | −0.178R → −0.175R → −0.169R | −0.273R → −0.264R → −0.271R | −0.239R → −0.240R → −0.237R | −0.169R → −0.171R → −0.167R |
+| breakout | −0.044R → −0.044R → −0.043R | −0.185R → −0.185R → −0.181R | −0.130R → −0.128R → −0.121R | −0.162R → −0.166R → −0.206R |
+| pullback | −0.108R → −0.109R → −0.108R | −0.145R → −0.150R → −0.158R | −0.127R → −0.128R → −0.134R | −0.193R → −0.187R → −0.203R |
+| retest | −0.103R → −0.104R → −0.101R | −0.219R → −0.220R → −0.229R | −0.165R → −0.168R → −0.156R | −0.171R → −0.182R → −0.167R |
+
+Two things follow. First, on the bot's own trades the get-out level almost never has anything to
+say: it fired on 4 to 91 trades out of 270 to 3,700, because a stop 1.5 ATR away is hit before two
+signs can line up, and obeying it moved the average trade by 0.011R at most. Second, closing at
+the first sign shortens trades by one to three bars and cuts the winning rate by up to four and a
+half points; the average trade came out better on ten of the sixteen runs and worse on five,
+never by more than 0.009R in its favour and by up to 0.044R against (breakout on M5). One
+combination out of eight (ema_cross, first sign) came out ahead on all four timeframes, by
+0.002R to 0.009R; with eight tries and four coin-flip comparisons each, chance alone does that
+about four times in ten, so it was not made a rule. The
+check is not an exit strategy and the bot does not trade on it. It is there for the case the
+backtest cannot represent: a position opened by hand, with a wide stop or none, where nothing
+else on the screen says the reason for the trade has gone. Reproduce with
+`scripts/research_reversal_exit.py`.
 
 ## Backtesting model
 
@@ -630,7 +682,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 243 tests
+pytest --cov=tradebot      # 266 tests
 ruff check . && ruff format --check .
 ```
 

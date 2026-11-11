@@ -1,3 +1,3 @@
 """MetaTrader 5 trading bot: one engine for live trading and backtests."""
 
-__version__ = "3.10.0"
+__version__ = "3.11.0"

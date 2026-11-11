@@ -251,6 +251,8 @@ def compute_signals(
         df["trend"] = np.where(agree, stacked.iloc[:, 0].to_numpy(), 0).astype(int)
     else:
         df["trend"] = 0
+    df["range_high"] = df["high"].rolling(p.breakout_period).max().shift(1)  # the reversal check reads
+    df["range_low"] = df["low"].rolling(p.breakout_period).min().shift(1)  # these for every setup
     df["resistance"] = df["high"].rolling(p.sr_lookback).max().shift(1)
     df["support"] = df["low"].rolling(p.sr_lookback).min().shift(1)
 

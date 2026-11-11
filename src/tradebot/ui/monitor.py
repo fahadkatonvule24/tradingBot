@@ -29,6 +29,7 @@ from tradebot.config import STRATEGIES, BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
 from tradebot.live import Link, fetch_frames, preview_features, trading_gate
+from tradebot.reversal import EXIT, Alerts, Reversal, Watch, assess, holding_text, watch_position
 from tradebot.strategy import compute_signals
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,8 @@ class Monitor:
         self._track_pending = False
         self._htf: dict[str, dict[str, pd.DataFrame]] = {}
         self._forming_seen: set[tuple[str, Any, Any]] = set()
+        self._watches: dict[int, tuple[Any, Watch]] = {}
+        self._reversal_alerts = Alerts()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
         self._orders: queue.Queue[_Order] = queue.Queue()
@@ -130,7 +133,14 @@ class Monitor:
         self.engine = Engine(config, self.broker, execute=False, live=True)
         with self._lock:
             self._features.clear()
-        for cache in (self._fetched, self._recent, self._previews, self._last_action, self._htf):
+        for cache in (
+            self._fetched,
+            self._recent,
+            self._previews,
+            self._last_action,
+            self._htf,
+            self._watches,
+        ):
             cache.clear()
         self._forming_seen.clear()
         self.track_record = {}
@@ -273,13 +283,21 @@ class Monitor:
                 log.warning("%s: %s", symbol, exc)
                 rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
         positions = []
-        for p in self.broker.positions(None):
+        held = self.broker.positions(None)
+        for p in held:
+            price = next((row["bid"] if p.side > 0 else row["ask"]
+                          for row in rows if row.get("symbol") == p.symbol and "bid" in row), None)  # fmt: skip
             r = None
-            if p.magic == self.config.magic and p.initial_risk:
-                price = next((row["bid"] if p.side > 0 else row["ask"]
-                              for row in rows if row.get("symbol") == p.symbol and "bid" in row), None)  # fmt: skip
-                r = (price - p.price_open) * p.side / p.initial_risk if price is not None else None
-            positions.append(asdict(p) | {"bot": p.magic == self.config.magic, "r": r})
+            if p.magic == self.config.magic and p.initial_risk and price is not None:
+                r = (price - p.price_open) * p.side / p.initial_risk
+            positions.append(
+                asdict(p)
+                | {"bot": p.magic == self.config.magic, "r": r, "reversal": self._reversal(p, price, now)}
+            )
+        open_tickets = {p.ticket for p in held}
+        self._reversal_alerts.forget(open_tickets)
+        for ticket in [t for t in self._watches if t not in open_tickets]:
+            del self._watches[ticket]
         server = getattr(self.broker, "server_name", lambda: "")()
         state = {
             "ready": True,
@@ -426,6 +444,52 @@ class Monitor:
         )
         self.activity.append({"time": now, "symbol": symbol, "action": "FAILED", "text": text})
         self._send(f"BREAK FAILED · {symbol}\n{text}")
+
+    def _reversal(self, p: Any, price: float | None, now: datetime) -> Reversal | None:
+        """Has the market turned against this open position? None for a symbol that is not watched."""
+        features = self._features.get(p.symbol)
+        if features is None or p.symbol not in self._specs:
+            return None
+        try:
+            key = (features["time"].iloc[-1], p.side, p.time_open)
+            cached = self._watches.get(p.ticket)
+            if cached is None or cached[0] != key:  # rebuilt once per closed bar, not every second
+                cached = (key, watch_position(features, p.side, p.time_open, self.config.bar_minutes))
+                self._watches[p.ticket] = cached
+            spec = self._specs[p.symbol][0]
+            preview = self._previews.get(p.symbol, (0.0, None))[1]
+            strategy = self.config.for_symbol(p.symbol).strategy
+            found = assess(
+                features, p.side, p.time_open, strategy, self.config.timeframe, spec, preview, cached[1]
+            )
+        except Exception:
+            log.debug("%s: reversal check failed", p.symbol, exc_info=True)
+            return None
+        self._note_reversal(p, found, spec, price, now)
+        return found
+
+    def _note_reversal(
+        self, p: Any, found: Reversal, spec: SymbolSpec, price: float | None, now: datetime
+    ) -> None:
+        """Announce each new sign once, and a forming one once per bar."""
+        fresh, forming = self._reversal_alerts.new(p.ticket, found)
+        holding = holding_text(p, spec, price)
+        if fresh:
+            signs = " ".join(s["text"] for s in found.signs)
+            text = f"{found.headline}. {signs} You hold {holding}"
+            action = "EXIT" if found.level == EXIT else "REVERSAL"
+            self.activity.append({"time": now, "symbol": p.symbol, "action": action, "text": text})
+            log.warning("%s %s", p.symbol, text)
+            self._send(f"{'GET OUT' if found.level == EXIT else 'REVERSAL WARNING'} · {p.symbol}\n{text}")
+        elif forming:
+            signs = " ".join(s["text"] for s in forming)
+            text = (
+                f"Forming, not confirmed, against your {WORD[p.side].lower()}: if the {self.config.timeframe} "
+                f"bar closes at the current price at {found.forming_closes_at:%H:%M} UTC, {signs} "
+                f"It can still disappear. You hold {holding}"
+            )
+            self.activity.append({"time": now, "symbol": p.symbol, "action": "REVERSAL", "text": text})
+            self._send(f"REVERSAL FORMING (unconfirmed) · {p.symbol}\n{text}")
 
     def _send(self, text: str) -> None:
         if self.notifier:

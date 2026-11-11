@@ -14,6 +14,7 @@ import pandas as pd
 from tradebot.broker.base import Account, Broker
 from tradebot.config import TIMEFRAME_MINUTES, BotConfig
 from tradebot.engine import Engine
+from tradebot.reversal import EXIT, Alerts, assess, holding_text
 from tradebot.strategy import compute_signals
 
 log = logging.getLogger(__name__)
@@ -97,6 +98,8 @@ class LiveRunner:
         self.notifier = notifier
         self._stop = threading.Event()
         self._link = Link(broker)
+        self._features: dict[str, pd.DataFrame] = {}
+        self._reversals = Alerts()
 
     def stop(self, *_: object) -> None:
         log.info("stop requested; finishing the current cycle")
@@ -112,16 +115,46 @@ class LiveRunner:
                 if not self._link.ok():
                     return
                 log.exception("%s: cycle failed", symbol)
+        try:
+            self._warn_reversals()
+        except Exception:  # a warning must never stop the trading loop
+            log.debug("reversal check failed", exc_info=True)
         if self.notifier:
             for event in self.engine.events:
                 if event.kind in NOTIFY_KINDS:
                     self.notifier.send(f"{event.symbol}: {event.detail}")
         self.engine.events.clear()
 
+    def _warn_reversals(self) -> None:
+        """Log and send, once per sign, when the market turns against any open position on a
+        watched symbol: the bot's own or one opened by hand."""
+        held = [p for p in self.broker.positions(None) if p.symbol in self._features]
+        self._reversals.forget({p.ticket for p in held})
+        for p in held:
+            spec = self.broker.symbol(p.symbol)
+            strategy = self.config.for_symbol(p.symbol).strategy
+            found = assess(
+                self._features[p.symbol], p.side, p.time_open, strategy, self.config.timeframe, spec
+            )
+            fresh, _ = self._reversals.new(p.ticket, found)
+            if not fresh:
+                continue
+            tick = self.broker.tick(p.symbol)
+            text = (
+                f"{found.headline}. {' '.join(s['text'] for s in found.signs)} "
+                f"You hold {holding_text(p, spec, tick.bid if p.side > 0 else tick.ask)}"
+            )
+            log.warning("%s: %s", p.symbol, text)
+            if self.notifier:
+                title = "GET OUT" if found.level == EXIT else "REVERSAL WARNING"
+                self.notifier.send(f"{title} · {p.symbol}\n{text}")
+
     def _process(self, symbol: str) -> None:
         params = self.config.for_symbol(symbol)
         spec = self.broker.symbol(symbol)
-        row = latest_features(self.broker, self.config, symbol).iloc[-1].copy()
+        features = latest_features(self.broker, self.config, symbol)
+        self._features[symbol] = features
+        row = features.iloc[-1].copy()
         now = self.broker.now()
         bar = timedelta(minutes=self.config.bar_minutes)
         age = now - (row["time"] + bar).to_pydatetime()
