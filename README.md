@@ -67,7 +67,7 @@ python -m venv .venv; .venv\Scripts\activate
 pip install -e ".[mt5]"            # the MetaTrader5 package is Windows-only
 
 tradebot check                     # connect to the open MT5 terminal, show account, symbols, signals
-tradebot ui                        # live advisor dashboard at http://127.0.0.1:8765, or the next free port (advice only)
+tradebot ui                        # the whole advisor in one command: all four setups, trends, reversal warnings, alerts
 tradebot telegram                  # optional: set up alerts to your phone
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
 tradebot run                       # keep running (dry run); Ctrl+C stops after the current cycle
@@ -102,7 +102,9 @@ symbol, once a second:
 | Chart | the last 120 bars plus the forming one, both EMAs, profit and loss zones, live price; hover for OHLC |
 | Track record | a backtest of the current config on your downloaded history, per symbol |
 | Timeframe switch | trade on M5, M15, M30, H1 or H4; the two higher timeframes that set the direction are chosen automatically (M5/M15/M30 → H1 + H4, H1 → H4 + D1, H4 → D1) and each gets its own row in the checklist |
-| Setup switch | which entry the advisor watches: EMA cross, Breakout, Pullback or Break & retest. Each says what it is waiting for, with the price level where it has one ("price broke above 1.0995; a buy triggers when a bar comes back to that level and closes above it again") |
+| All four setups at once | EMA cross, Breakout, Pullback and Break & retest are all watched on every instrument, from the same bars, with no extra requests to the terminal. Each has a tile with its verdict on the last closed bar; a signal from any of them is announced with its priced plan and named in the watchlist and the tab title |
+| Trend | for each instrument: uptrend, downtrend or none on the trading timeframe, how old and how strong it is, and whether it is intact, weakening or likely ending, with the higher timeframes beside it. Alerts when a trend starts, weakens and is likely ending |
+| Setup switch | which setup the detail view (plan, checklist, chart levels, track record) shows: EMA cross, Breakout, Pullback or Break & retest. Each says what it is waiting for, with the price level where it has one ("price broke above 1.0995; a buy triggers when a bar comes back to that level and closes above it again") |
 | Buy / Sell switch on the plan | the same priced plan for either side, so a trade you choose yourself gets the bot's sizing, stop and target |
 | Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
 | Recent signals | the last triggers across all symbols, taken or blocked, and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
@@ -110,7 +112,7 @@ symbol, once a second:
 | Risk limits | how much of each account limit is used: today's and this week's result against the loss limits, drawdown, losses in a row, entries today, open risk. The tile of a limit that is hit turns red and the card says entries are stopped |
 | Plan | the written trading plan for the setup and timeframe on screen, with what those rules measured on your stored history |
 | Reversal warning | for every open position on a watched instrument, the bot's or one you opened by hand: the signs that the market has turned against it since it opened. One sign is a warning; an opposite signal or two signs together is "get out". Shown in a strip across the top, on the instrument's card, under the position, in the tab title and in the alerts. A sign the bar still forming would add is shown as "forming, not confirmed" |
-| Alerts | browser notifications, and optionally Telegram messages to your phone, when a signal fires, a filter blocks a trigger, a trigger is forming, an order is placed, or the market turns against an open position |
+| Alerts | browser notifications, and optionally Telegram messages to your phone, when a signal fires, a filter blocks a trigger, a trigger is forming, an order is placed, the market turns against an open position, or a trend starts, weakens or is likely ending. Signals from all four setups are sent, not only the one on screen |
 | Open positions, activity | every position on the account (bot or manual), and advice changes as they happen |
 
 **The advice is the bot's own decision, not a separate indicator.** `advisor.py` calls the same
@@ -292,6 +294,7 @@ src/tradebot/
 ├── plan.py          the written trading plan, generated from the config
 ├── review.py        closed trades in R, bot signals against manual trades
 ├── reversal.py      the signs that the market has turned against an open position
+├── trend.py         the trend on the trading timeframe and the signs that it is ending
 ├── broker/          base.py (interface) · mt5.py (MetaTrader 5) · sim.py (simulation)
 ├── backtest.py      multi-symbol event-driven backtester
 ├── optimize.py      grid search + walk-forward (process pool)
@@ -497,6 +500,48 @@ backtest cannot represent: a position opened by hand, with a wide stop or none, 
 else on the screen says the reason for the trade has gone. Reproduce with
 `scripts/research_reversal_exit.py`.
 
+### Trends, and when one is likely ending (v3.12)
+
+A trend here is the one the EMA setup trades: EMA 10 above EMA 50 is an uptrend, below it a
+downtrend, and it ends when they cross. That end is late by construction, so the dashboard also
+watches for what tends to come first. Nobody can know that a trend is about to stop; these are
+signs, and what each has been worth was measured on about 9,600 to 10,300 finished trends per
+timeframe (six instruments, median length 21 or 22 bars). The question asked of every bar of every
+trend: did the trend end within the next 10 bars?
+
+| Showing on the bar | H1 | M15 | M30 | M5 |
+|---|---:|---:|---:|---:|
+| Any bar of a trend (the base rate) | 22% | 23% | 22% | 24% |
+| Price closed on the wrong side of EMA 50 | **74%** | **73%** | **74%** | **73%** |
+| The averages converging (gap at most half its widest, still narrowing) | 50% | 51% | 50% | 53% |
+| MACD histogram on the other side of zero | 31% | 30% | 30% | 32% |
+| ADX 20% below its high of the trend | 27% | 26% | 26% | 28% |
+| Divergence (new 20-bar closing extreme, weaker momentum than the last) | 14% | 15% | 15% | 15% |
+
+The first version of this feature counted the five signs equally and warned at two. The
+measurement said that was wrong: with two signs standing, a trend ended within 10 bars 17% to 19%
+of the time, less often than on an ordinary bar, and divergence, the textbook warning, came before
+an ending less often than chance. So the count was dropped and the state now follows the two
+signs that carried information. This rule was chosen after seeing those numbers, which is why
+it is reported per instrument as well:
+
+| State | Share of trend bars | Ended within 10 bars | Range across the six instruments |
+|---|---:|---:|---:|
+| Intact: neither sign | 78% | 14% to 15% | |
+| Weakening: averages converging, price still on the right side | 10% to 11% | 30% to 33% | 28% to 37% |
+| Likely ending: price closed beyond EMA 50 | 11% to 12% | 73% to 74% | 71% to 75% |
+
+Nine trends in ten showed "likely ending" before they ended, first a median of 5 bars before
+(quartiles 3 to 18). About 23% of those warnings came more than 20 bars early: the trend
+recovered and ran on. Two limits belong next to these numbers. The two useful signs are close
+relatives of the cross that defines the end, so part of what they predict is their own
+definition. And none of the states says where price goes next: over the following 10 bars price
+moved between −0.04 and +0.06 ATR in the trend's direction in every state on every timeframe,
+which is nothing. The warning says the trend is close to being over. It does not say that price
+will keep going against it, and it is not a signal to trade. The other three signs are still
+listed on the page, labelled as not reliable on their own. Reproduce with
+`scripts/research_trend_signs.py`.
+
 ## Backtesting model
 
 | Aspect | Model |
@@ -682,7 +727,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 268 tests
+pytest --cov=tradebot      # 286 tests
 ruff check . && ruff format --check .
 ```
 

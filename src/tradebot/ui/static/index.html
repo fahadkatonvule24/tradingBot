@@ -145,8 +145,8 @@ button { font: inherit; color: inherit; }
 .badge.BUY, .badge.ORDER { background: var(--up); color: var(--on-color); }
 .badge.SELL, .badge.REJECTED { background: var(--down); color: var(--on-color); }
 .badge.EXIT { background: var(--down); color: var(--on-color); }
-.badge.SKIP, .badge.BLOCKED, .badge.FAILED, .badge.REVERSAL { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
-.badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before, .badge.REVERSAL::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
+.badge.SKIP, .badge.BLOCKED, .badge.FAILED, .badge.REVERSAL, .badge.ENDING { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
+.badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before, .badge.REVERSAL::before, .badge.ENDING::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
 .badge.big { font-size: 15px; padding: 7px 14px; border-radius: 8px; }
 
 /* --- advice --- */
@@ -250,6 +250,21 @@ footer { padding: 0 20px 20px; color: var(--text-3); font-size: 12px; }
 .rev .fine { margin-top: 4px; }
 .advice > .rev { grid-column: 1 / -1; }
 tr.revrow td { border-top: 0; padding-top: 0; }
+.allsetups { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.setuptile { text-align: left; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); padding: 8px 10px; cursor: pointer; min-width: 0; font: inherit; }
+.setuptile:hover { border-color: var(--text-3); }
+.setuptile[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--text); cursor: default; }
+.setuptile .tilehead { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 650; font-size: 13px; }
+.setuptile .txt { font-size: 12px; color: var(--text-2); margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.trendbox { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: start; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); }
+.trendbox.weakening, .trendbox.ending { box-shadow: inset 0 0 0 1.5px var(--warning); }
+.trendbox .head { font-weight: 650; }
+.trendbox ul { margin: 2px 0 0; padding-left: 18px; }
+.trendbox .fine { margin-top: 4px; }
+.arrow { font-size: 15px; line-height: 1.3; color: var(--text-3); }
+.arrow.up { color: var(--up); }
+.arrow.down { color: var(--down); }
+.sym .name .arrow { font-size: 11px; margin-left: 5px; }
 
 dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); padding: 20px; width: min(420px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
@@ -290,6 +305,7 @@ dialog.wide li { margin: 4px 0; }
   .chart-wrap { height: 300px; }
   .figures { grid-template-columns: repeat(2, 1fr); }
   .limits { grid-template-columns: repeat(2, 1fr); }
+  .allsetups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   footer { padding: 0 16px 16px; }
 }
 </style>
@@ -636,12 +652,14 @@ function renderWatchlist() {
     const first = (row.spark || [])[0];
     const change = first ? Math.round(((row.bid - first) / first) * 10000) / 100 : 0;
     return el("button", { class: "sym", type: "button", "aria-current": row.symbol === selected ? "true" : "false", onclick: () => select(row.symbol) },
-      el("span", { class: "name", text: row.symbol }),
+      el("span", { class: "name" }, row.symbol, trendArrow(row.trend, true)),
       el("span", { class: `badge ${action}`, text: badgeText(row.advice) }),
       pxEl,
       el("span", { class: "chg muted", title: `Change over the last ${(row.spark || []).length - 1} ${state.timeframe} bars`, text: `${change > 0 ? "+" : change < 0 ? "−" : ""}${Math.abs(change).toFixed(2)}%` }),
       el("span", { class: "sub" }, el("span", { text: `spread ${distance(row, row.spread)}` }), sparkline(row)),
       turnedNote ? el("span", { class: "sub", style: "color:var(--text);font-weight:650", text: turnedNote })
+        : otherSignals(row).length ? el("span", { class: "sub", style: "color:var(--text);font-weight:650", text: otherSignals(row).map((s) => `${s.label}: ${s.action}`).join(" · ") })
+        : row.trend && row.trend.state === "ending" ? el("span", { class: "sub", style: "color:var(--text)", text: `${row.trend.direction > 0 ? "Uptrend" : "Downtrend"} likely ending` })
         : formingNote ? el("span", { class: "sub", style: "color:var(--text)", text: formingNote })
         : failedNote ? el("span", { class: "sub", style: "color:var(--text)", text: failedNote })
         : recentNote ? el("span", { class: "sub", style: "color:var(--text-2)", text: recentNote }) : null,
@@ -671,7 +689,47 @@ function renderAdvice(row) {
   if (a.blocker && a.action !== "SKIP") {
     parts.push(el("div", { class: "notice", text: `Entries are paused right now: ${a.blocker}.` }));
   }
-  $("#advice").replaceChildren(...reversals(row.symbol).map((p) => reversalBox(p, row.digits)), ...parts);
+  $("#advice").replaceChildren(...[...reversals(row.symbol).map((p) => reversalBox(p, row.digits)), ...parts, setupsRow(row), trendBox(row)].filter(Boolean));
+}
+
+// --- all four setups, and the trend ----------------------------------------------------------
+// Signals from the setups that are not on screen: they are watched all the time.
+function otherSignals(row) {
+  return (row.setups || []).filter((s) => !s.active && (s.action === "BUY" || s.action === "SELL"));
+}
+function setupsRow(row) {
+  const items = row.setups || [];
+  if (items.length < 2) return null;
+  return el("div", { class: "allsetups", role: "group", "aria-label": "Every setup on this instrument" },
+    ...items.map((s) => el("button", { class: "setuptile", type: "button", "aria-pressed": s.active ? "true" : "false",
+      title: s.active ? "Shown in detail on this page" : "Show this setup in detail", onclick: () => switchTo("strategy", s.name) },
+      el("div", { class: "tilehead" }, el("span", { text: s.label }),
+        el("span", { class: `badge ${s.action}`, text: s.action === "BLOCKED" ? `${s.side > 0 ? "BUY" : "SELL"} BLOCKED` : s.action })),
+      el("div", { class: "txt", title: s.text, text: s.text }))));
+}
+function trendArrow(t, small) {
+  if (!t || !t.direction) return small ? null : el("span", { class: "arrow", text: "•" });
+  const word = t.direction > 0 ? "Uptrend" : "Downtrend";
+  return el("span", { class: `arrow ${t.direction > 0 ? "up" : "down"}`, title: `${t.headline}`, "aria-label": word,
+    text: (t.direction > 0 ? "▲" : "▼") + (small && t.state === "ending" ? "!" : "") });
+}
+function trendBox(row) {
+  const t = row.trend;
+  if (!t) return null;
+  const day = (iso) => { const d = parseTime(iso); return `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${localTime(iso)}`; };
+  const lead = t.signs.filter((s) => s.leading), rest = t.signs.filter((s) => !s.leading);
+  const note = t.state === "ending" ? "In the stored history about three trends in four in this state ended within 10 bars. It says the trend is close to over, not which way price goes next."
+    : t.state === "weakening" ? "In the stored history about three trends in ten in this state ended within 10 bars, against one in seven when nothing shows."
+    : null;
+  const higher = (t.higher || []).map((h) => `${h.timeframe} ${h.direction > 0 ? "up" : h.direction < 0 ? "down" : "flat"}`).join(" · ");
+  const facts = [t.since ? `Since ${day(t.since)}` : null, t.adx == null ? null : `ADX ${t.adx.toFixed(0)}`, higher ? `higher timeframes: ${higher}` : null].filter(Boolean).join(" · ");
+  return el("div", { class: `trendbox ${t.state}` }, trendArrow(t, false),
+    el("div", {},
+      el("div", { class: "head", text: t.headline }),
+      lead.length ? el("ul", {}, ...lead.map((s) => el("li", { text: s.text }))) : null,
+      note ? el("div", { class: "fine", text: note }) : null,
+      rest.length ? el("div", { class: "fine", text: `Also showing, not reliable on their own: ${rest.map((s) => s.text).join(" ")}` }) : null,
+      facts ? el("div", { class: "fine", text: facts }) : null));
 }
 
 // --- reversal against an open position -------------------------------------------------------
@@ -964,7 +1022,24 @@ $("#alerts").addEventListener("click", async () => {
 function announce() {
   const live = state.symbols.filter((sym) => sym.advice && sym.advice.actionable);
   const out = reversals().filter((p) => p.reversal.level === "exit");
-  const titles = [...out.map((p) => `GET OUT ${p.symbol}`), ...live.map((sym) => `${sym.advice.action} ${sym.symbol}`)];
+  const others = state.symbols.flatMap((sym) => otherSignals(sym).map((s) => ({ ...s, symbol: sym.symbol, bar: sym.advice && sym.advice.bar_time })));
+  const titles = [...out.map((p) => `GET OUT ${p.symbol}`), ...live.map((sym) => `${sym.advice.action} ${sym.symbol}`), ...others.map((s) => `${s.action} ${s.symbol}`)];
+  for (const s of others) {   // a signal from a setup that is not the one on screen
+    const key = `${s.symbol}:${s.name}:${s.bar}:${s.action}`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    try { new Notification(`${s.action} ${s.symbol} · ${s.label}`, { body: s.text, tag: key }); } catch (err) { /* unavailable */ }
+  }
+  for (const sym of state.symbols) {   // a trend that has just started, or is likely ending
+    const t = sym.trend;
+    if (!t || !t.direction || !(t.state === "ending" || t.age === 1)) continue;
+    const key = `${sym.symbol}:${t.since}:${t.age === 1 ? "start" : "ending"}`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    try { new Notification(`${t.age === 1 ? "New trend" : "Trend ending"} · ${sym.symbol}`, { body: t.headline, tag: key }); } catch (err) { /* unavailable */ }
+  }
   document.title = titles.length ? `${titles.join(", ")} · tradebot advisor` : "tradebot advisor";
   for (const p of reversals()) {   // the market has turned against a position that is open
     const v = p.reversal;

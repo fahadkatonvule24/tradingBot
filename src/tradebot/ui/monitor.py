@@ -23,14 +23,16 @@ import numpy as np
 import pandas as pd
 
 from tradebot import __version__
-from tradebot.advisor import WORD, Advice, advise, pip_size, recent_signals
+from tradebot.advisor import WORD, Advice, advise, next_trigger, pip_size, recent_signals, watch_side
 from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
 from tradebot.config import STRATEGIES, BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
-from tradebot.live import Link, fetch_frames, preview_features, trading_gate
+from tradebot.live import BAR_COLUMNS, Link, fetch_frames, preview_features, trading_gate
+from tradebot.plan import SETUP_LABELS
 from tradebot.reversal import EXIT, Alerts, Reversal, Watch, assess, holding_text, watch_position
-from tradebot.strategy import compute_signals
+from tradebot.strategy import BLOCK_LABELS, compute_signals, explain
+from tradebot.trend import TrendAlerts, describe
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +97,11 @@ class Monitor:
         self._forming_seen: set[tuple[str, Any, Any]] = set()
         self._watches: dict[int, tuple[Any, Watch]] = {}
         self._reversal_alerts = Alerts()
+        self._others: dict[str, tuple[Any, dict[str, Any]]] = {}
+        self._engines: dict[str, Engine] = {}
+        self._signal_seen: set[tuple[Any, ...]] = set()
+        self._trends: dict[str, tuple[Any, dict[str, Any]]] = {}
+        self._trend_alerts = TrendAlerts()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
         self._orders: queue.Queue[_Order] = queue.Queue()
@@ -140,6 +147,9 @@ class Monitor:
             self._last_action,
             self._htf,
             self._watches,
+            self._others,
+            self._engines,
+            self._trends,
         ):
             cache.clear()
         self._forming_seen.clear()
@@ -175,6 +185,7 @@ class Monitor:
             error = self._reconfigure(replace(self.config, timeframe=timeframe))
             if error:
                 return {"ok": False, "message": error}
+            self._trend_alerts.clear()  # another timeframe's trends are other trends
             log.info("trading timeframe switched to %s", timeframe)
         ladder = self.trend_timeframes()
         trend = f"direction from {' + '.join(ladder)}" if ladder else "no trend filter"
@@ -332,6 +343,8 @@ class Monitor:
         self._note(symbol, advice, now, spec)
         self._note_forming(symbol, advice, now, spec)
         self._note_failed(symbol, advice, now, spec)
+        setups = self._setups(symbol, features, advice, tick, spec, now)
+        trend = self._trend_for(symbol, features, spec, now)
         last = features.iloc[-1]
         forming = getattr(self.broker, "forming_bar", None)
         return {
@@ -348,8 +361,163 @@ class Monitor:
             "spark": [*features["close"].tail(SPARK_BARS).round(spec.digits).tolist(), tick.bid],
             "forming": forming(symbol, self.config.timeframe) if forming else None,
             "advice": advice,
+            "setups": setups,
+            "trend": trend,
             "history": self._history(symbol, features),
         }
+
+    # --- every setup at once -------------------------------------------------------------------
+
+    def _setup_config(self, name: str) -> BotConfig:
+        """This config with another setup named, for every symbol."""
+        overrides = {  # a per-symbol strategy name would silently keep the old setup
+            symbol: {
+                section: {k: v for k, v in values.items() if not (section == "strategy" and k == "name")}
+                for section, values in sections.items()
+            }
+            for symbol, sections in self.config.overrides.items()
+        }
+        return replace(self.config.with_strategy(name=name), overrides=overrides)
+
+    def _setups(
+        self, symbol: str, features: pd.DataFrame, advice: Advice, tick: Any, spec: SymbolSpec, now: datetime
+    ) -> list[dict[str, Any]]:
+        """What each setup says about the last closed bar: the one on screen and the other three.
+
+        The others are computed from the same bars once per closed bar, so watching all four costs
+        no extra requests to the terminal. A signal from any of them is announced like the main one.
+        """
+        active = self.config.for_symbol(symbol).strategy.name
+        key = features["time"].iloc[-1]
+        cached = self._others.get(symbol)
+        if cached is None or cached[0] != key:
+            bars = features[[c for c in (*BAR_COLUMNS, "tick_volume") if c in features.columns]]
+            frames: dict[str, Any] = {}
+            for name in STRATEGIES:
+                if name == active:
+                    continue
+                params = self._setup_config(name).for_symbol(symbol)
+                try:
+                    frames[name] = (params, compute_signals(
+                        bars, params.strategy, self.config.timeframe, self._htf.get(symbol) or {}
+                    ))  # fmt: skip
+                except Exception:
+                    log.debug("%s: %s setup not computed", symbol, name, exc_info=True)
+            cached = (key, frames)
+            self._others[symbol] = cached
+        out = []
+        for name in STRATEGIES:
+            if name == active:
+                out.append({"name": name, "label": SETUP_LABELS[name], "active": True, "action": advice.action,
+                            "side": advice.side, "text": advice.headline})  # fmt: skip
+                continue
+            if name not in cached[1]:
+                continue
+            params, frame = cached[1][name]
+            item = self._setup_summary(frame, params.strategy, advice, tick, spec)
+            out.append({"name": name, "label": SETUP_LABELS[name], "active": False, **item})
+            if item["action"] in ("BUY", "SELL", "SKIP"):
+                self._note_setup(symbol, name, params, frame, tick, spec, now, item["action"])
+        return out
+
+    def _setup_summary(
+        self, frame: pd.DataFrame, p: Any, advice: Advice, tick: Any, spec: SymbolSpec
+    ) -> dict[str, Any]:
+        row = frame.iloc[-1]
+        if advice.action == "CLOSED":
+            return {"action": "CLOSED", "side": 0, "text": "Market closed"}
+        if pd.isna(row["atr"]):
+            return {"action": "WAIT", "side": 0, "text": "Indicators are still warming up."}
+        signal, raw = int(row["signal"]), int(row["raw_signal"])
+        if signal:
+            if advice.blocker:  # session, news, loss limits, positions, spread: the same for every setup
+                return {
+                    "action": "SKIP",
+                    "side": signal,
+                    "text": f"{WORD[signal]} signal, skipped: {advice.blocker}",
+                }
+            return {
+                "action": WORD[signal],
+                "side": signal,
+                "text": f"{WORD[signal].title()} signal: {explain(row, p)}",
+            }
+        if raw:
+            label = BLOCK_LABELS.get(row["block"], row["block"])
+            return {"action": "BLOCKED", "side": raw, "text": f"{WORD[raw].title()} trigger blocked: {label}"}
+        side = watch_side(row, p)
+        return {"action": "WAIT", "side": side,
+                "text": next_trigger(frame, p, side, tick, spec, self.config.timeframe)[0]}  # fmt: skip
+
+    def _note_setup(
+        self, symbol: str, name: str, params: Any, frame: pd.DataFrame, tick: Any, spec: SymbolSpec,
+        now: datetime, action: str,
+    ) -> None:  # fmt: skip
+        """Announce, once, a signal from a setup that is not the one on screen, with its priced plan."""
+        mark = (symbol, name, self.config.timeframe, frame["time"].iloc[-1], action)
+        if mark in self._signal_seen:
+            return
+        if len(self._signal_seen) > 2000:
+            self._signal_seen.clear()
+        self._signal_seen.add(mark)
+        engine = self._engines.get(name)
+        if engine is None:
+            engine = self._engines[name] = Engine(
+                self._setup_config(name), self.broker, execute=False, live=True
+            )
+        advice = advise(engine, symbol, spec, params, frame, tick, now)
+        label = SETUP_LABELS[name]
+        self.activity.append({"time": now, "symbol": symbol, "action": advice.action,
+                              "text": f"{label} setup: {advice.headline}. {advice.detail}"})  # fmt: skip
+        lines = self._alert_text(symbol, advice, spec).split("\n")
+        lines[0] += f" · {label} setup"
+        self._send("\n".join(lines))
+
+    # --- trend ------------------------------------------------------------------------------------
+
+    def _trend_for(self, symbol: str, features: pd.DataFrame, spec: SymbolSpec, now: datetime) -> dict | None:
+        """The trend on the trading timeframe as of the last closed bar (recomputed once per bar)."""
+        key = features["time"].iloc[-1]
+        cached = self._trends.get(symbol)
+        if cached is None or cached[0] != key:
+            try:
+                strategy = self.config.for_symbol(symbol).strategy
+                found = describe(features, strategy, self.config.timeframe, spec, self.config.bar_minutes)
+            except Exception:
+                log.debug("%s: trend not computed", symbol, exc_info=True)
+                return None
+            cached = (key, found)
+            self._trends[symbol] = cached
+            self._note_trend(symbol, found, now)
+        return cached[1]
+
+    def _note_trend(self, symbol: str, trend: dict[str, Any], now: datetime) -> None:
+        """Announce a new trend, and each step towards its end, once."""
+        kind = self._trend_alerts.new(symbol, trend)
+        if not kind:
+            return
+        word = "uptrend" if trend["direction"] > 0 else "downtrend"
+        leading = " ".join(s["text"] for s in trend["signs"] if s["leading"])
+        if kind == "start":
+            was = trend["previous"]
+            before = ""
+            if was:
+                bars = f"{was['age']} bar{'' if was['age'] == 1 else 's'}"
+                before = f" The {'uptrend' if was['direction'] > 0 else 'downtrend'} before it lasted {bars}."
+            title, action, text = "NEW TREND", "TREND", f"{trend['headline']}.{before}"
+        elif kind == "weakening":
+            title, action = "TREND WEAKENING", "TREND"
+            text = (
+                f"{trend['headline']}. {leading} In the stored history about three trends in ten in this "
+                f"state ended within 10 bars, against one in seven when nothing shows."
+            )
+        else:
+            title, action = "TREND ENDING", "ENDING"
+            text = (
+                f"{trend['headline']}. {leading} In the stored history about three {word}s in four in this "
+                f"state ended within 10 bars. It says the trend is close to over, not which way price goes next."
+            )
+        self.activity.append({"time": now, "symbol": symbol, "action": action, "text": text})
+        self._send(f"{title} · {symbol}\n{text}")
 
     def _history(self, symbol: str, features: pd.DataFrame) -> dict[str, Any]:
         """Recent signals and their simple outcomes, recomputed when a new bar arrives."""
@@ -504,6 +672,12 @@ class Monitor:
             return
         if previous is not None and previous.split(":")[0] == advice.action and advice.action == "WAIT":
             return
+        if advice.action in ("BUY", "SELL", "SKIP"):  # said already while another setup was on screen?
+            name = self.config.for_symbol(symbol).strategy.name
+            mark = (symbol, name, self.config.timeframe, pd.Timestamp(advice.bar_time), advice.action)
+            if mark in self._signal_seen:
+                return
+            self._signal_seen.add(mark)
         self.activity.append(
             {
                 "time": now,
