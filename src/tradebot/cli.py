@@ -22,6 +22,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from rich.console import Console
@@ -59,7 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     ui = sub.add_parser("ui", help="live advisor dashboard in the browser: when, where, and how much")
-    ui.add_argument("--port", type=int, default=8765, help="local port (default: %(default)s)")
+    ui.add_argument(
+        "--port",
+        type=int,
+        help=f"local port (default: {DEFAULT_PORT}, or the next free one if another program has it)",
+    )
     ui.add_argument("--timeframe", type=str.upper, help="start on this trading timeframe (e.g. M30)")
     ui.add_argument("--strategy", choices=STRATEGIES, help="start on this setup (e.g. retest)")
     ui.add_argument(
@@ -320,12 +325,44 @@ def cmd_telegram(config: BotConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+DEFAULT_PORT = 8765
+PORT_TRIES = 10
+
+
+def open_dashboard(monitor: Any, port: int | None, factory: Any = None) -> Any:
+    """Bind the dashboard server. A port given with --port is used or refused. Without one, the
+    first free port from 8765 up is taken, because other programs do sit on 8765: seen with an
+    antivirus service that had picked it for an outgoing connection."""
+    if factory is None:
+        from tradebot.ui.server import DashboardServer as factory
+
+    candidates = [port] if port is not None else list(range(DEFAULT_PORT, DEFAULT_PORT + PORT_TRIES))
+    first: OSError | None = None
+    for candidate in candidates:
+        try:
+            server = factory(monitor, port=candidate)
+        except OSError as exc:
+            first = first or exc
+            continue
+        if candidate != candidates[0]:
+            console.print(
+                f"[yellow]Port {candidates[0]} is taken by another program; using {candidate} instead.[/] "
+                f"The address below is the one to open."
+            )
+        return server
+    if port is not None:
+        raise ValueError(f"cannot listen on port {port} ({first}); leave --port out to pick a free one")
+    raise ValueError(
+        f"cannot listen on any port from {candidates[0]} to {candidates[-1]} ({first}); "
+        f"choose one with --port"
+    )
+
+
 def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     import threading
     import webbrowser
 
     from tradebot.ui.monitor import Monitor
-    from tradebot.ui.server import DashboardServer
 
     broker, _, symbols = _connect(config)
     notifier = _notifier()
@@ -335,10 +372,10 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     names = {broker_name: wanted for wanted in config.symbols if (broker_name := broker.resolve(wanted))}
     worker = threading.Thread(target=monitor.run, name="mt5", daemon=True)
     try:
-        server = DashboardServer(monitor, port=args.port)
-    except OSError as exc:
+        server = open_dashboard(monitor, args.port)
+    except ValueError:
         broker.shutdown()
-        raise ValueError(f"cannot listen on port {args.port} ({exc}); try --port 8766") from None
+        raise
     worker.start()
     threading.Thread(
         target=monitor.load_track_record, args=(args.data, names), name="track-record", daemon=True

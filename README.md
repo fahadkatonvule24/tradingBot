@@ -67,7 +67,7 @@ python -m venv .venv; .venv\Scripts\activate
 pip install -e ".[mt5]"            # the MetaTrader5 package is Windows-only
 
 tradebot check                     # connect to the open MT5 terminal, show account, symbols, signals
-tradebot ui                        # live advisor dashboard at http://127.0.0.1:8765 (advice only)
+tradebot ui                        # live advisor dashboard at http://127.0.0.1:8765, or the next free port (advice only)
 tradebot telegram                  # optional: set up alerts to your phone
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
 tradebot run                       # keep running (dry run); Ctrl+C stops after the current cycle
@@ -682,7 +682,7 @@ became a loss (0.86). It had come from the mislabelled hours.
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 266 tests
+pytest --cov=tradebot      # 268 tests
 ruff check . && ruff format --check .
 ```
 

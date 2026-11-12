@@ -264,3 +264,43 @@ def test_backtest_output_survives_a_cp1252_pipe(tmp_path):
     assert result.returncode == 0, result.stderr.decode("cp1252", errors="replace")
     assert " -> " in output
     assert "Traceback" not in output
+
+
+# --- dashboard port -------------------------------------------------------------------------------
+
+
+class _Ports:
+    """Stands in for DashboardServer: the ports in ``taken`` refuse to bind."""
+
+    def __init__(self, taken: set[int]) -> None:
+        self.taken, self.tried = taken, []
+
+    def __call__(self, monitor, port: int):
+        self.tried.append(port)
+        if port in self.taken:
+            raise OSError(10013, "access forbidden")
+        return port
+
+
+def test_dashboard_takes_the_next_free_port_when_the_default_is_taken(capsys):
+    from tradebot.cli import DEFAULT_PORT, PORT_TRIES, open_dashboard
+
+    free = _Ports(set())
+    assert open_dashboard(None, None, free) == DEFAULT_PORT and free.tried == [DEFAULT_PORT]
+    busy = _Ports({DEFAULT_PORT, DEFAULT_PORT + 1})
+    assert open_dashboard(None, None, busy) == DEFAULT_PORT + 2
+    assert busy.tried == [DEFAULT_PORT, DEFAULT_PORT + 1, DEFAULT_PORT + 2]
+    full = _Ports(set(range(DEFAULT_PORT, DEFAULT_PORT + PORT_TRIES)))
+    with pytest.raises(ValueError, match="cannot listen on any port from 8765 to 8774"):
+        open_dashboard(None, None, full)
+    assert len(full.tried) == PORT_TRIES
+
+
+def test_a_port_asked_for_by_name_is_used_or_refused():
+    from tradebot.cli import open_dashboard
+
+    assert open_dashboard(None, 9001, _Ports(set())) == 9001
+    chosen = _Ports({9001})
+    with pytest.raises(ValueError, match=r"cannot listen on port 9001 .*leave --port out"):
+        open_dashboard(None, 9001, chosen)
+    assert chosen.tried == [9001]  # never silently moved to another port
