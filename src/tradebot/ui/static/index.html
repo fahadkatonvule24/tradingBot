@@ -125,7 +125,7 @@ button { font: inherit; color: inherit; }
 .statusbar span:last-child { margin-left: auto; }
 
 /* --- cards --- */
-.card { background: linear-gradient(180deg, var(--surface), var(--surface)); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.card { background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0) 120px), var(--surface); box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px rgba(0, 0, 0, 0.18); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
 .card h2 { margin: 0 0 12px; font-size: 13px; font-weight: 650; color: var(--text); display: flex; align-items: center; gap: 8px; }
 .card h2 .faint { font-weight: 500; font-size: 11px; }
 .card-link { margin-left: auto; border: 0; background: none; color: var(--accent-2); cursor: pointer; font-size: 12px; padding: 0; }
@@ -138,9 +138,12 @@ button { font: inherit; color: inherit; }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .kpi { position: relative; overflow: hidden; }
 .kpi .label { font-size: 12px; color: var(--text-2); }
-.kpi .value { font-size: 22px; font-weight: 700; margin-top: 6px; letter-spacing: -0.01em; }
+.kpi .value { font-size: 24px; font-weight: 700; margin-top: 6px; letter-spacing: -0.01em; }
 .kpi .sub { font-size: 12px; margin-top: 4px; color: var(--text-3); }
-.kpi .ico { position: absolute; right: 14px; top: 14px; width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--surface-2); color: var(--accent-2); }
+.kpi .ico { position: absolute; right: 14px; top: 14px; width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: linear-gradient(135deg, #2563eb, #4f8cff); }
+.kpi:nth-child(2) .ico { background: linear-gradient(135deg, #059669, #22c55e); }
+.kpi:nth-child(3) .ico { background: linear-gradient(135deg, #7c3aed, #a855f7); }
+.kpi:nth-child(4) .ico { background: linear-gradient(135deg, #ea580c, #f59e0b); }
 .kpi .ico svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; }
 .kpi::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); opacity: 0.55; }
 .kpi.pos::after { background: var(--up); }
@@ -148,7 +151,7 @@ button { font: inherit; color: inherit; }
 .focus-row { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
 .chart-card { display: flex; flex-direction: column; min-height: 400px; }
 .chart-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
-.chart-top .sym-ico { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 12px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
+.chart-top .sym-ico { min-width: 36px; height: 26px; padding: 0 7px; border-radius: 7px; display: grid; place-items: center; font-weight: 700; font-size: 11px; letter-spacing: 0.04em; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
 .chart-top .title { font-weight: 700; font-size: 15px; }
 .chart-price { display: flex; align-items: baseline; gap: 10px; margin: 2px 0 6px; }
 .chart-price .big { font-size: 28px; font-weight: 700; letter-spacing: -0.01em; }
@@ -181,6 +184,9 @@ button { font: inherit; color: inherit; }
 .insight .lines .k { color: var(--text-2); }
 .insight .headline-txt { font-size: 13px; font-weight: 600; }
 .insight .go { margin-top: auto; }
+.setups-mini { display: grid; gap: 5px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; }
+.setups-mini .srow { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; border-radius: 7px; background: var(--surface-2); }
+.setups-mini .srow.on { box-shadow: inset 0 0 0 1px var(--accent); }
 .wide-btn { width: 100%; border: 0; border-radius: 9px; padding: 9px 12px; font-weight: 650; cursor: pointer; color: #fff; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 
 /* quick actions */
@@ -216,7 +222,7 @@ button { font: inherit; color: inherit; }
 
 /* right rail */
 .bar { display: grid; grid-template-columns: 44px 1fr 44px; gap: 8px; align-items: center; font-size: 12px; margin: 5px 0; }
-.bar .track { height: 7px; background: var(--surface-2); border-radius: 4px; position: relative; }
+.bar .track { height: 8px; background: var(--surface-2); border-radius: 4px; position: relative; }
 .bar .track::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--text-3); }
 .bar .fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
 .bar .n { text-align: right; }
@@ -773,7 +779,7 @@ function renderDashboard() {
   if (row && !row.error) {
     const first = (row.spark || [])[0];
     const change = first ? ((row.bid - first) / first) * 100 : null;
-    $("#sym-ico").textContent = row.symbol.slice(0, 1);
+    $("#sym-ico").textContent = row.symbol.slice(0, 3);
     $("#chart-name").textContent = row.symbol;
     $("#chart-price").textContent = px(row.bid, row.digits);
     const chg = $("#chart-chg");
@@ -867,6 +873,9 @@ function renderInsight(row) {
       line("Higher timeframes", row.trend && row.trend.higher ? row.trend.higher.map((h) => `${h.timeframe} ${h.direction > 0 ? "▲" : h.direction < 0 ? "▼" : "•"}`).join("  ") : "—"),
       line(adv.entries_from ? "Entries resume" : "Next decision", mins == null ? "—" : mins >= 60 ? `in ${Math.floor(mins / 60)} h ${mins % 60} min` : `in ${mins} min`),
       ...levels),
+    el("div", { class: "setups-mini" }, el("div", { class: "faint", text: "All four setups on this bar" }),
+      ...(row.setups || []).map((x) => el("div", { class: `srow ${x.active ? "on" : ""}`, title: x.text },
+        el("span", { text: x.label }), el("span", { class: `badge ${x.action}`, text: x.action === "BLOCKED" ? `${x.side > 0 ? "BUY" : "SELL"} BLOCKED` : x.action })))),
     el("button", { class: "wide-btn go", type: "button", onclick: () => showView("signal") }, "Open signal & plan"));
 }
 let chartFrame = 0;   // at most one redraw per frame when the chart panel changes size
@@ -936,7 +945,7 @@ function renderHeader() {
   const g = state.gate;
   $("#gate").replaceChildren(
     el("span", { class: `dot ${g.execute ? "on" : "off"}` }),
-    el("span", { text: g.execute ? `Orders ON (${g.reason})` : activeAccount() ? "Advice only: you place the orders at your broker and log them here" : `Advice only: ${g.reason}` }),
+    el("span", { title: g.reason, text: g.execute ? "Orders on" : "Advice only · orders off" }),
   );
 }
 
@@ -1888,6 +1897,22 @@ function niceTicks(lo, hi, count) {
   return out;
 }
 
+// Nudge price tags 20 px apart, then back inside [minY, maxY]: a cluster near the price used to slide
+// off the bottom of the chart. Sorts and moves the items in place; returns them.
+function stackTags(items, minY, maxY, gap = 20) {
+  items.sort((p, q) => p.y - q.y);
+  for (let i = 1; i < items.length; i++) if (items[i].y - items[i - 1].y < gap) items[i].y = items[i - 1].y + gap;
+  if (items.length && items[items.length - 1].y > maxY) {
+    items[items.length - 1].y = maxY;
+    for (let i = items.length - 2; i >= 0; i--) if (items[i + 1].y - items[i].y < gap) items[i].y = items[i + 1].y - gap;
+  }
+  if (items.length && items[0].y < minY) {
+    items[0].y = minY;
+    for (let i = 1; i < items.length; i++) if (items[i].y - items[i - 1].y < gap) items[i].y = items[i - 1].y + gap;
+  }
+  return items;
+}
+
 function drawChart() {
   const canvas = $("#chart");
   const ctx = canvas.getContext("2d");
@@ -1920,7 +1945,7 @@ function drawChart() {
   if (row.forming && (!bars.length || row.forming.time > bars[bars.length - 1].time)) {
     bars.push({ ...row.forming, ema_fast: null, ema_slow: null, forming: true });
   }
-  const pad = { l: 8, r: 84, t: 14, b: 26 };
+  const pad = { l: 8, r: 98, t: 14, b: 26 };
   const future = 14;
   const slots = bars.length + future;
   const step = (W - pad.l - pad.r) / slots;
@@ -1942,13 +1967,16 @@ function drawChart() {
 
   // grid + price axis (labels give way to the price tags drawn later)
   const tagValues = [row.bid, trig, ...(plan ? [plan.stop, plan.target, plan.entry] : [])].filter((v) => v != null);
+  // where the price tags will end up (the same stacking as below), so the axis labels stay clear of them
+  const finalTagYs = stackTags(tagValues.map((v) => ({ y: Y(v) })), pad.t + 10, H - pad.b - 10).map((t) => t.y);
   ctx.lineWidth = 1;
   ctx.textBaseline = "middle";
   for (const t of niceTicks(lo, hi, Math.max(4, Math.floor((H - pad.t - pad.b) / 45)))) {
     const y = Math.round(Y(t)) + 0.5;
-    ctx.strokeStyle = C.border;
+    ctx.strokeStyle = C.border; ctx.globalAlpha = 0.6;
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(plotRight, y); ctx.stroke();
-    if (tagValues.some((v) => Math.abs(Y(v) - y) < 14)) continue;
+    ctx.globalAlpha = 1;
+    if (finalTagYs.some((ty) => Math.abs(ty - y) < 15)) continue;
     ctx.fillStyle = C.text3;
     ctx.fillText(t.toFixed(row.digits), plotRight + 8, y);
   }
@@ -2023,7 +2051,7 @@ function drawChart() {
 
   // moving averages
   for (const [key, color] of [["ema_slow", C.slow], ["ema_fast", C.fast]]) {
-    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.lineJoin = "round";
     ctx.beginPath();
     let started = false;
     bars.forEach((b, i) => {
@@ -2041,7 +2069,7 @@ function drawChart() {
   ctx.setLineDash([]);
 
   // right-axis tags, nudged apart so they never overlap
-  const tags = [{ v: row.bid, label: px(row.bid, row.digits), bg: C.text, fg: C.surface }];
+  const tags = [{ v: row.bid, label: px(row.bid, row.digits), bg: css("--accent") || C.text, fg: "#fff" }];
   if (plan) {
     tags.push({ v: plan.target, label: `TP ${px(plan.target, row.digits)}`, bg: C.up, fg: "#fff" });
     tags.push({ v: plan.stop, label: `SL ${px(plan.stop, row.digits)}`, bg: C.down, fg: "#fff" });
@@ -2049,14 +2077,19 @@ function drawChart() {
   }
   if (trig != null) tags.push({ v: trig, label: `Trig ${px(trig, row.digits)}`, bg: C.surface2, fg: C.text2 });
   tags.forEach((t) => (t.y = Y(t.v)));
-  tags.sort((p, q) => p.y - q.y);
-  for (let i = 1; i < tags.length; i++) if (tags[i].y - tags[i - 1].y < 18) tags[i].y = tags[i - 1].y + 18;
+  stackTags(tags, pad.t + 10, H - pad.b - 10);
   ctx.textBaseline = "middle";
+  ctx.font = "600 11px system-ui, -apple-system, 'Segoe UI', sans-serif";
   for (const t of tags) {
-    const w = ctx.measureText(t.label).width + 10;
+    const real = Y(t.v);
+    if (Math.abs(real - t.y) > 2) {   // a moved tag points at where its level really is
+      ctx.strokeStyle = t.bg; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(plotRight - 6, real); ctx.lineTo(plotRight, real); ctx.lineTo(plotRight + 2, t.y); ctx.stroke();
+    }
+    const w = ctx.measureText(t.label).width + 12;
     ctx.fillStyle = t.bg;
     ctx.beginPath();
-    ctx.roundRect ? ctx.roundRect(plotRight + 2, t.y - 9, Math.min(w, pad.r - 4), 18, 4) : ctx.rect(plotRight + 2, t.y - 9, Math.min(w, pad.r - 4), 18);
+    ctx.roundRect ? ctx.roundRect(plotRight + 2, t.y - 9, Math.min(w, pad.r - 4), 18, 5) : ctx.rect(plotRight + 2, t.y - 9, Math.min(w, pad.r - 4), 18);
     ctx.fill();
     ctx.fillStyle = t.fg;
     ctx.fillText(t.label, plotRight + 7, t.y);
