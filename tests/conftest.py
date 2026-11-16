@@ -14,7 +14,15 @@ from tradebot.broker.sim import SimBroker
 from tradebot.config import BacktestParams, BotConfig, ScheduleParams
 from tradebot.data import preset_spec, synthetic_bars
 
-PHONE_CREDENTIALS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "WHATSAPP_PHONE", "WHATSAPP_APIKEY")
+PHONE_CREDENTIALS = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "WHATSAPP_PHONE",
+    "WHATSAPP_APIKEY",
+    "NTFY_TOPIC",
+    "NTFY_SERVER",
+    "NTFY_TOKEN",
+)
 
 
 @pytest.fixture(autouse=True)

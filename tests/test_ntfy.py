@@ -141,5 +141,6 @@ def test_setup_saves_a_topic_then_tests_it(bare_config, monkeypatch, capsys, tmp
     monkeypatch.setattr(
         "tradebot.notify.ntfy_call", lambda server, t, message, **kw: sent.append((server, t))
     )
+    monkeypatch.setenv("NTFY_TOPIC", topic)  # the next run reads it from .env (the test guard blocks that)
     assert main(["-c", bare_config, "ntfy"]) == 0
     assert sent == [("https://ntfy.sh", topic)]
