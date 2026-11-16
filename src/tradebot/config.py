@@ -292,6 +292,9 @@ class AlertParams:
     """Which alerts go to WhatsApp: "important" (confirmed buy and sell signals, failed breaks,
     get-out and reversal warnings on open positions, news, orders) or "all" (also the unconfirmed
     forming triggers, blocked and skipped triggers, trend and analysis changes)."""
+    ntfy: str = "important"
+    """The same choice for the ntfy app. ntfy.sh allows 250 messages a day per sender; with "all"
+    the extra kinds arrive silently, in the notification drawer only."""
 
 
 @dataclass(frozen=True)
@@ -417,8 +420,10 @@ def _validate(c: BotConfig) -> list[str]:
         errors.append("schedule.max_bar_age_bars must be >= 1")
     if c.schedule.news_before_minutes < 0 or c.schedule.news_after_minutes < 0:
         errors.append("schedule.news_before_minutes and news_after_minutes must be >= 0")
-    if c.alerts.whatsapp not in ALERT_LEVELS:
-        errors.append(f"alerts.whatsapp {c.alerts.whatsapp!r} is not one of {', '.join(ALERT_LEVELS)}")
+    for channel in ("whatsapp", "ntfy"):
+        level = getattr(c.alerts, channel)
+        if level not in ALERT_LEVELS:
+            errors.append(f"alerts.{channel} {level!r} is not one of {', '.join(ALERT_LEVELS)}")
     if not isinstance(c.alerts.other_setups, bool):
         errors.append("alerts.other_setups must be true or false")
     unknown = set(c.overrides) - set(c.symbols)

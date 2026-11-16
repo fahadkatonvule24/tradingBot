@@ -80,6 +80,7 @@ pip install -e ".[mt5]"            # the MetaTrader5 package is Windows-only
 
 tradebot check                     # connect to the open MT5 terminal, show account, symbols, signals
 tradebot ui                        # the whole advisor in one command: all four setups, trends, reversal warnings, alerts
+tradebot ntfy                      # optional: push alerts through the free ntfy app (send only)
 tradebot whatsapp                  # optional: alerts to your own WhatsApp (send only)
 tradebot telegram                  # optional: alerts and commands through a Telegram bot
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
@@ -307,8 +308,18 @@ predicts the actual trigger on 100% of them. The forming notice re-runs the real
 the forming bar appended at the current price, so it also says which filter would block it. It is
 labelled unconfirmed everywhere, and nothing is ever traded from it.
 
-**Alerts to your phone.** Two channels, either or both:
+**Alerts to your phone.** Three channels, any mix of them:
 
+- **ntfy**, a free push-notification app (Android and iPhone), no account needed. `tradebot ntfy`
+  makes a private topic name such as `tradebot-3f9a1c7b2e4d`, saves it to `.env` as
+  `NTFY_TOPIC`, and says how to subscribe to it in the app; run it again for a test notification.
+  The first line of an alert is the notification's title, and its kind sets how loud it is:
+  signals, failed breaks and get-out warnings vibrate and pop up; news, orders, assumed closes and
+  the heartbeat make the usual sound; with `"alerts": {"ntfy": "all"}` the rest arrive silently.
+  The default is the important alerts only, because ntfy.sh allows 250 messages a day per sender.
+  Anyone who knows the topic name can read the alerts, so it is random and kept out of the
+  committed config; `NTFY_SERVER` and `NTFY_TOKEN` point it at your own server or a reserved,
+  protected topic.
 - **WhatsApp**, through [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/)'s
   free API for messages to your own number. Save their number in your contacts, send it the
   activation message from WhatsApp, and it replies with an API key. Put `WHATSAPP_PHONE` (with the
@@ -324,9 +335,15 @@ labelled unconfirmed everywhere, and nothing is ever traded from it.
   (`"alerts": {"whatsapp": "important"}`; `"all"` adds forming and blocked triggers, trend and
   analysis changes). Alerts that arrive together go out as one message, spaced out, because the
   free service does not publish its limits. The text passes through CallMeBot's server.
+  **Delivery is not guaranteed:** on 16 Nov 2026 CallMeBot answered "Message queued" to every
+  request for two activated numbers and delivered none, so do not rely on it alone.
 - **Telegram**: `tradebot telegram` walks through creating a bot and sends a test message. The
   token and chat id live in `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`). It gets every
   alert and answers the commands listed under [Your own accounts](#your-own-accounts).
+
+**Heartbeat.** `tradebot ui` sends STARTED when it starts, STOPPED when it is closed, and RUNNING
+once each trading day when the session opens. A trading day without RUNNING means alerts are not
+running (the PC was off or asleep, or the dashboard stopped without saying so).
 
 Only the setup on screen sends signals. The other three still show theirs on their tiles;
 `"alerts": {"other_setups": true}` announces them too. Each setup loses on its own, and four of
@@ -609,7 +626,7 @@ src/tradebot/
 ├── journal.py       SQLite journal
 ├── book.py          your own accounts and logged trades; BookBroker answers the engine from them
 ├── market.py        currency strength, correlation, exposure, levels, volatility, sessions
-├── notify.py        phone alerts: WhatsApp (send only) and Telegram (and commands)
+├── notify.py        phone alerts: ntfy and WhatsApp (send only), Telegram (and commands)
 └── cli.py           `tradebot` command
 ```
 
@@ -1065,7 +1082,7 @@ A sweep of the rest of the system after that trade, with today's activity log as
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 547 tests
+pytest --cov=tradebot      # 563 tests
 ruff check . && ruff format --check .
 ```
 
@@ -1093,7 +1110,7 @@ Linux and Windows without a terminal.
   freezes until the terminal answers. Download history (`tradebot fetch`) when the dashboard is
   not running.
 - **One process, one terminal.** The dashboard is local by design; the news download, and
-  WhatsApp or Telegram alerts (and Telegram commands) if you configure them, are the only traffic that leaves the
+  ntfy, WhatsApp or Telegram alerts (and Telegram commands) if you configure them, are the only traffic that leaves the
   machine. The page itself is not reachable from a phone; the commands are how the phone talks to
   it. Accounts at other brokers are not read automatically: only the account the terminal is
   logged in to is.

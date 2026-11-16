@@ -81,6 +81,7 @@
 
   "alerts": {
     "other_setups": false,
+    "ntfy": "important",
     "whatsapp": "important"
   },
 

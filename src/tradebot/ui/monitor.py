@@ -116,6 +116,8 @@ class Monitor:
         self._previews: dict[str, tuple[float, pd.DataFrame | None]] = {}
         self._track_args: tuple[Any, Any] | None = None
         self.tracks = TrackRecords()
+        self._heartbeat_day: Any = None
+        self.heartbeat = False  # `tradebot ui` turns it on: STARTED, then RUNNING each trading day
         self._track_pending = False
         self._htf: dict[str, dict[str, pd.DataFrame]] = {}
         self._forming_seen: set[tuple[str, Any, Any]] = set()
@@ -536,6 +538,8 @@ class Monitor:
             except Exception as exc:
                 log.warning("%s: %s", symbol, exc)
                 rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+        if self.heartbeat:
+            self._heartbeat(now)
         if self.desk:  # a stop or target your broker filled while nobody told the book
             self.desk.sweep({r["symbol"]: (r["bid"], r["ask"]) for r in rows if "bid" in r})
             account = self.broker.account()
@@ -975,6 +979,29 @@ class Monitor:
             )
             self.activity.append({"time": now, "symbol": p.symbol, "action": "REVERSAL", "text": text})
             self._send(f"REVERSAL FORMING (unconfirmed) · {p.symbol}\n{text}", "forming")
+
+    def _heartbeat(self, now: datetime) -> None:
+        """STARTED on the first refresh, then RUNNING once each trading day when the session
+        opens. A trading day with no such message means alerts are not running: the PC was off or
+        asleep, or the dashboard was closed without a STOPPED message."""
+        if self._heartbeat_day is None:
+            self._heartbeat_day = now.date()
+            self._send(
+                f"STARTED · tradebot\nThe dashboard is watching {', '.join(self.symbols)} on {self.config.timeframe}, "
+                f"{SETUP_LABELS[self.config.strategy.name]} setup. A RUNNING message follows every trading "
+                "day at the session open; if one is missing, alerts are not running.",
+                "status",
+            )
+            return
+        start, _ = self.config.schedule.hours(now)
+        if now.weekday() >= 5 or now.hour < start or self._heartbeat_day == now.date():
+            return
+        self._heartbeat_day = now.date()
+        self._send(
+            f"RUNNING · tradebot\nWatching {', '.join(self.symbols)} on {self.config.timeframe}, "
+            f"{SETUP_LABELS[self.config.strategy.name]} setup. Alerts are on.",
+            "status",
+        )
 
     def _setup_key(self, symbol: str) -> tuple[str, str]:
         """The setup and timeframe on screen for ``symbol``: part of every once-only alert key."""

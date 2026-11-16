@@ -1,4 +1,4 @@
-"""Alerts to your phone: WhatsApp, a Telegram bot, or both.
+"""Alerts to your phone: the ntfy app, WhatsApp, a Telegram bot, or any mix of them.
 
 Telegram: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (environment or .env, never the committed
 config). It gets every alert and also answers commands such as /plan and /calc. `tradebot
@@ -8,6 +8,11 @@ WhatsApp: set WHATSAPP_PHONE and WHATSAPP_APIKEY from CallMeBot's free personal 
 numbers are comma-separated, each key in the same position as its number (CallMeBot gives every
 number its own key). It sends only, so no commands, and by default only the alerts worth acting
 on (``alerts.whatsapp``). `tradebot whatsapp` walks through the setup and sends a test message.
+
+ntfy: install the free ntfy app and subscribe to a private topic name; set NTFY_TOPIC (and
+NTFY_SERVER / NTFY_TOKEN for your own server or a reserved topic). Send only, with the same
+choice of alerts (``alerts.ntfy``). `tradebot ntfy` makes a topic name, saves it to .env and
+sends a test notification.
 
 Messages are sent from background threads so a slow network never delays trading, failures are
 logged and dropped, and neither the token nor the API key is ever written to a log.
@@ -37,7 +42,16 @@ PHONE_ENV, WHATSAPP_KEY_ENV = "WHATSAPP_PHONE", "WHATSAPP_APIKEY"
 WHATSAPP_MAX_CHARS = 1500
 """One WhatsApp message at most; the text travels in the request URL."""
 
-IMPORTANT = frozenset({"signal", "failed", "exit", "position", "news", "order"})
+NTFY_SERVER = "https://ntfy.sh"
+NTFY_TOPIC_ENV, NTFY_SERVER_ENV, NTFY_TOKEN_ENV = "NTFY_TOPIC", "NTFY_SERVER", "NTFY_TOKEN"
+NTFY_MAX_BYTES = 3800
+"""ntfy takes 4,096 bytes per message and turns longer ones into attachments; ntfy.sh also allows
+250 messages a day per sender, which is why the default is the important alerts only."""
+NTFY_PRIORITY = {"signal": 4, "exit": 4, "failed": 4, "news": 3, "order": 3, "position": 3, "status": 3}
+"""Phone behaviour by alert kind: 4 = long vibration and a pop-over, 3 = the usual sound, 2 (all
+other kinds) = silent, in the notification drawer only."""
+
+IMPORTANT = frozenset({"signal", "failed", "exit", "position", "news", "order", "status"})
 """Alert kinds a channel set to "important" sends: a confirmed buy or sell, a failed break,
 get-out and reversal warnings and assumed closes on open positions, news, and orders. The rest
 ("forming", "blocked", "trend", "analysis", "info") are on the dashboard and in Telegram."""
@@ -346,6 +360,91 @@ class WhatsApp(_Channel):
         return True
 
 
+class NtfyError(RuntimeError):
+    pass
+
+
+def valid_topic(topic: str | None) -> bool:
+    """ntfy topic names: 1 to 64 ASCII letters, digits, - and _ (str.isalnum would let "ü" in)."""
+    return bool(topic) and re.fullmatch(r"[-_A-Za-z0-9]{1,64}", topic or "") is not None
+
+
+def ntfy_call(
+    server: str,
+    topic: str,
+    message: str,
+    title: str | None = None,
+    priority: int = 3,
+    token: str | None = None,
+    opener: Callable = urllib.request.urlopen,
+    timeout: float = 15,
+) -> None:
+    """Publish one notification as JSON (UTF-8 safe). Errors never include the access token."""
+    body: dict[str, Any] = {"topic": topic, "message": _clip(message, NTFY_MAX_BYTES), "priority": priority}
+    if title:
+        body["title"] = _clip(title, 200)
+    headers = {"Content-Type": "application/json", "User-Agent": "tradebot alerts"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        server.rstrip("/") + "/", data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
+    )
+    try:
+        with opener(request, timeout=timeout) as response:
+            response.read(2000)
+    except urllib.error.HTTPError as exc:
+        reason = {401: "the access token was rejected", 403: "this topic needs an access token (NTFY_TOKEN)",
+                  429: "too many messages: ntfy.sh allows 250 a day", 413: "the message is too large",
+                  400: "bad request (check NTFY_TOPIC)"}.get(exc.code, exc.reason)  # fmt: skip
+        raise NtfyError(f"ntfy answered {exc.code}: {reason}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        where = urllib.parse.urlsplit(server).netloc or server
+        raise NtfyError(f"could not reach {where} ({type(exc).__name__})") from None
+
+
+def _clip(text: str, limit: int) -> str:
+    """At most ``limit`` UTF-8 bytes, cut at a character boundary."""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[: limit - 3].decode("utf-8", "ignore") + "..."
+
+
+class Ntfy(_Channel):
+    """Push notifications through the free ntfy app (send only). The first line of an alert is
+    the notification title, and its kind sets the priority (``NTFY_PRIORITY``)."""
+
+    name = label = "ntfy"
+
+    def __init__(
+        self,
+        topic: str | None,
+        server: str | None = None,
+        token: str | None = None,
+        level: str = "important",
+        opener: Callable = urllib.request.urlopen,
+        background: bool = True,
+        gap_seconds: float = 1.0,
+    ) -> None:
+        self.topic = topic if valid_topic(topic) else None
+        self.server, self.token, self._opener = (server or NTFY_SERVER).rstrip("/"), token, opener
+        if topic and not self.topic:
+            log.warning(
+                "ntfy alerts off: %s may hold only letters, digits, - and _ (64 at most)", NTFY_TOPIC_ENV
+            )
+        super().__init__(bool(self.topic), level, background, 0.0, gap_seconds)
+
+    def _deliver(self, text: str, kind: str = "info") -> bool:
+        title, _, body = text.partition("\n")
+        try:
+            ntfy_call(self.server, self.topic or "", body.strip() or title, title if body.strip() else None,
+                      NTFY_PRIORITY.get(kind, 2), self.token, self._opener)  # fmt: skip
+        except NtfyError as exc:
+            log.warning("ntfy alert not sent: %s", exc)
+            return False
+        return True
+
+
 def masked(phone: str) -> str:
     """+256700123456 -> +256…456: enough to tell your numbers apart in a log."""
     return f"{phone[:4]}…{phone[-3:]}"
@@ -390,18 +489,24 @@ def chunks(text: str, size: int) -> list[str]:
 
 
 class Alerts:
-    """Every configured channel. Telegram also takes commands; WhatsApp only sends."""
+    """Every configured channel. Telegram also takes commands; ntfy and WhatsApp only send."""
 
     def __init__(self, channels: list[Any]) -> None:
         self.channels = [c for c in channels if c.enabled]
 
     @classmethod
     def from_env(
-        cls, env: dict[str, str] | None = None, whatsapp_level: str = "important", **kwargs: Any
+        cls,
+        env: dict[str, str] | None = None,
+        whatsapp_level: str = "important",
+        ntfy_level: str = "important",
+        **kwargs: Any,
     ) -> Alerts:
         env = dict(os.environ) if env is None else env
         numbers = [WhatsApp(phone, key, whatsapp_level, **kwargs) for phone, key in whatsapp_recipients(env)]
-        return cls([Notifier.from_env(env, **kwargs), *numbers])
+        ntfy = Ntfy(env.get(NTFY_TOPIC_ENV) or None, env.get(NTFY_SERVER_ENV) or None,
+                    env.get(NTFY_TOKEN_ENV) or None, ntfy_level, **kwargs)  # fmt: skip
+        return cls([ntfy, Notifier.from_env(env, **kwargs), *numbers])
 
     @property
     def enabled(self) -> bool:

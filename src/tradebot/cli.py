@@ -110,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
             )
 
     sub.add_parser("telegram", help="set up and test phone alerts through a Telegram bot")
+    sub.add_parser("ntfy", help="set up and test phone alerts through the free ntfy app (send only)")
     whatsapp = sub.add_parser(
         "whatsapp", help="set up and test phone alerts on WhatsApp (send only, through CallMeBot)"
     )
@@ -192,7 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config.validate()
         handler = {
             "check": cmd_check, "run": cmd_run, "ui": cmd_ui, "fetch": cmd_fetch, "backtest": cmd_backtest,
-            "optimize": cmd_optimize, "journal": cmd_journal, "telegram": cmd_telegram, "whatsapp": cmd_whatsapp,
+            "optimize": cmd_optimize, "journal": cmd_journal, "telegram": cmd_telegram, "whatsapp": cmd_whatsapp, "ntfy": cmd_ntfy,
             "plan": cmd_plan, "review": cmd_review, "account": cmd_account, "news": cmd_news,
         }[args.command]  # fmt: skip
         return handler(config, args)
@@ -306,12 +307,12 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
 def _notifier(config: BotConfig):
     from tradebot.notify import Alerts
 
-    alerts = Alerts.from_env(whatsapp_level=config.alerts.whatsapp)
+    alerts = Alerts.from_env(whatsapp_level=config.alerts.whatsapp, ntfy_level=config.alerts.ntfy)
     log.info(
         "Phone alerts: %s",
         " and ".join(alerts.names)
         if alerts.enabled
-        else "off (run `tradebot whatsapp` or `tradebot telegram` to set them up)",
+        else "off (run `tradebot ntfy`, `tradebot whatsapp` or `tradebot telegram` to set them up)",
     )
     return alerts
 
@@ -434,6 +435,71 @@ def cmd_telegram(config: BotConfig, args: argparse.Namespace) -> int:
         return 1
     console.print(
         "[green]Test message sent.[/] `tradebot ui` and `tradebot run` will now send alerts to this chat."
+    )
+    return 0
+
+
+def cmd_ntfy(config: BotConfig, args: argparse.Namespace) -> int:
+    """Make a private topic and save it to .env, then (next run) send a test notification."""
+    import os
+    import secrets
+
+    from tradebot.notify import (
+        NTFY_SERVER,
+        NTFY_SERVER_ENV,
+        NTFY_TOKEN_ENV,
+        NTFY_TOPIC_ENV,
+        NtfyError,
+        ntfy_call,
+        valid_topic,
+    )
+
+    topic = os.environ.get(NTFY_TOPIC_ENV)
+    server = (os.environ.get(NTFY_SERVER_ENV) or NTFY_SERVER).rstrip("/")
+    if not topic:
+        topic = f"tradebot-{secrets.token_hex(6)}"
+        env_file = Path(".env")
+        existing = env_file.read_text(encoding="utf-8") if env_file.is_file() else ""
+        lead = "" if not existing or existing.endswith("\n") else "\n"
+        env_file.write_text(
+            existing
+            + lead
+            + "# ntfy alerts. Anyone who knows the topic name can read them: keep it private.\n"
+            f"{NTFY_TOPIC_ENV}={topic}\n",
+            encoding="utf-8",
+        )
+        console.print(
+            f"[bold]Your alert topic is[/]  [bold green]{topic}[/]  [grey50](saved to {env_file.resolve()})[/]\n"
+            "1. Install the free [bold]ntfy[/] app on your phone (Google Play, F-Droid or the App Store).\n"
+            f"2. In the app tap [bold]+[/], type the topic name above and tap Subscribe"
+            f"{'' if server == NTFY_SERVER else f' (server: {server})'}.\n"
+            "3. Run [bold]tradebot ntfy[/] again: it sends a test notification.\n"
+            "[grey50]The topic name works like a password: anyone who knows it can read your alerts.[/]"
+        )
+        return 1
+    if not valid_topic(topic):
+        console.print(
+            f"[bold red]error:[/] {NTFY_TOPIC_ENV} may hold only letters, digits, - and _ (64 at most)."
+        )
+        return 1
+    try:
+        ntfy_call(
+            server,
+            topic,
+            "Test notification. Buy and sell signals, failed breaks, get-out warnings, news and orders "
+            "will arrive here.",
+            title=f"tradebot {__version__}",
+            priority=4,
+            token=os.environ.get(NTFY_TOKEN_ENV) or None,
+        )
+    except NtfyError as exc:
+        console.print(f"[bold red]error:[/] {escape(str(exc))}")
+        return 1
+    level = config.alerts.ntfy
+    console.print(
+        f"[green]Sent[/] to the topic {topic}. If it reached your phone, `tradebot ui` and `tradebot run` will "
+        f"send alerts there ({'all of them' if level == 'all' else 'the important ones'}: alerts.ntfy in the "
+        "config). Restart a dashboard that is already running."
     )
     return 0
 
@@ -599,6 +665,7 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
         broker.shutdown()
         raise
     worker.start()
+    monitor.heartbeat = True
     notifier.listen(monitor.command)  # /calc, /news, /status ... from your own Telegram chat
     monitor.news_feed = _news_feed(config)
     threading.Thread(
@@ -617,6 +684,9 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     finally:
         server.server_close()
         monitor.stop()
+        notifier.send(
+            "STOPPED · tradebot\nThe dashboard was closed: no alerts until it is started again.", "status"
+        )
         monitor.tracks.close()  # a backtest still measuring for the record is not left behind
         worker.join(timeout=10)
         notifier.close()
