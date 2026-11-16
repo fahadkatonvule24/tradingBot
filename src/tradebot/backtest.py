@@ -38,8 +38,8 @@ _ROW_COLUMNS = [
 ]
 
 
-_OPTIONAL_COLUMNS = ("target_price",)
-"""Present only for setups that name their own target."""
+_OPTIONAL_COLUMNS = ("target_price", "exit_signal")
+"""Setup targets and the pre-quality exit signal; older supplied frames may omit them."""
 
 
 @dataclass

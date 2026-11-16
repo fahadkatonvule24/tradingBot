@@ -31,6 +31,13 @@
     "sr_min_atr": 1.0,
     "use_fib_filter": false,
     "use_volume_filter": false,
+    "use_signal_quality_filter": false,
+    "quality_period": 20,
+    "quality_min_efficiency": 0.2,
+    "quality_min_body_ratio": 0.2,
+    "quality_min_close_position": 0.65,
+    "quality_max_range_atr": 2.5,
+    "quality_max_extension_atr": 2.0,
     "volume_min_ratio": 1.5,
     "breakout_target": "atr"
   },
@@ -67,8 +74,14 @@
   "schedule": {
     "session": "london_new_york",
     "news_file": "config/news_blackouts.json",
+    "news_feed": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     "news_before_minutes": 30,
     "news_after_minutes": 30
+  },
+
+  "alerts": {
+    "other_setups": false,
+    "whatsapp": "important"
   },
 
   "backtest": {

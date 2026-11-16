@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -8,9 +9,33 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import tradebot.config as config_module
 from tradebot.broker.sim import SimBroker
 from tradebot.config import BacktestParams, BotConfig, ScheduleParams
 from tradebot.data import preset_spec, synthetic_bars
+
+PHONE_CREDENTIALS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "WHATSAPP_PHONE", "WHATSAPP_APIKEY")
+
+
+@pytest.fixture(autouse=True)
+def no_real_phone_credentials(monkeypatch):
+    """A test never messages a real phone. The CLI reads .env from the working folder, and a
+    developer's .env holds live keys; values a test sets itself with setenv are kept."""
+    for name in PHONE_CREDENTIALS:
+        monkeypatch.setenv(name, "")  # remembers the real value (or its absence) for teardown
+        monkeypatch.delenv(name)
+    real = config_module._load_dotenv
+
+    def without_phone_credentials(path, env):
+        before = {name: os.environ.get(name) for name in PHONE_CREDENTIALS}
+        real(path, env)
+        for name, value in before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    monkeypatch.setattr(config_module, "_load_dotenv", without_phone_credentials)
 
 
 @pytest.fixture(scope="session")

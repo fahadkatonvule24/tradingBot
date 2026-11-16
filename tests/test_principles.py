@@ -180,13 +180,15 @@ def lines_of(sections: list[Section], title: str) -> str:
 
 
 def test_plan_covers_what_a_trading_plan_must_state():
-    sections = trading_plan(BotConfig(symbols=("EURUSD", "XAUUSD"), timeframe="H1"))
+    sections = trading_plan(BotConfig(symbols=("EURUSD", "XAUUSD"), timeframe="H1"), now=datetime(2026, 7, 7))
     assert [s.title for s in sections] == [
         "What is traded, and when", "Entry", "Exit", "Position size", "Limits that stop new entries",
         "When not to trade", "Review", "What these rules have measured",
     ]  # fmt: skip
     assert "EURUSD, XAUUSD" in lines_of(sections, "What is traded, and when")
-    assert "07:00 to 21:00 UTC, Monday to Friday" in lines_of(sections, "What is traded, and when")
+    assert "London 08:00 to New York 17:00, local time (07:00 to 21:00 UTC today" in lines_of(
+        sections, "What is traded, and when"
+    )
     exits = lines_of(sections, "Exit")
     assert "Stop: 1.5 ATR" in exits and "reward is 2.0 times the risk" in exits and "never widened" in exits
     assert "risks 0.25% of equity" in lines_of(sections, "Position size")

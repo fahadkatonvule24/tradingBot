@@ -130,7 +130,7 @@ class SimBroker:
     def positions(self, magic: int) -> list[Position]:
         return list(self._positions.values())
 
-    def deals(self, since: datetime, magic: int) -> list[Deal]:
+    def deals(self, since: datetime, magic: int | None) -> list[Deal]:
         return self._deals[bisect_left(self._deal_times, since) :]
 
     def open(self, request: OrderRequest, magic: int) -> OrderResult:

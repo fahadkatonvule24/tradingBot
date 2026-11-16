@@ -32,9 +32,11 @@ class Inbox:
 
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.kinds: list[str] = []
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, kind: str = "info") -> None:
         self.sent.append(text)
+        self.kinds.append(kind)
 
     def close(self) -> None:
         pass
@@ -139,6 +141,33 @@ def test_a_forming_trigger_is_announced_once_per_bar(cfg, broker):
     json.dumps(state, allow_nan=False)
 
 
+def test_switching_setups_back_and_forth_does_not_repeat_a_forming_alert(cfg, broker):
+    """Regression: on 16 November each switch back to pullback sent the same forming trigger
+    again, five times in 40 minutes. Once per setup is the rule."""
+    inbox = Inbox()
+    monitor = Monitor(cfg, broker, [SYMBOL], notifier=inbox)
+    forming_sell(monitor, broker, cfg)
+    monitor.refresh()
+    for name in ("breakout", "ema_cross", "breakout", "ema_cross", "breakout"):
+        assert monitor._apply_strategy(name)["ok"]
+        forming_sell(monitor, broker, cfg)
+        monitor.refresh()
+    assert [m.split("\n")[0] for m in inbox.sent] == [f"FORMING (unconfirmed) · {SYMBOL}"] * 2
+
+
+def test_switching_setups_back_and_forth_does_not_repeat_a_blocked_alert(cfg, broker):
+    inbox = Inbox()
+    blocked = features({"raw_signal": 1, "block": "adx"})
+    monitor = primed(Monitor(cfg, broker, [SYMBOL], notifier=inbox), blocked)
+    monitor.refresh()
+    for name in ("pullback", "ema_cross", "pullback", "ema_cross"):
+        assert monitor._apply_strategy(name)["ok"]
+        primed(monitor, blocked)
+        monitor.refresh()
+    assert [m.split("\n")[0] for m in inbox.sent] == [f"BLOCKED · {SYMBOL}"] * 2  # ema_cross, pullback
+    assert inbox.kinds == ["blocked", "blocked"]
+
+
 # --- alerts from the dashboard and the trading loop -----------------------------------------------
 
 
@@ -151,6 +180,28 @@ def primed(monitor: Monitor, frame: pd.DataFrame) -> Monitor:
     return monitor
 
 
+def test_a_signal_alert_says_how_often_the_setup_has_lost_on_that_symbol(cfg, broker):
+    inbox = Inbox()
+    monitor = Monitor(cfg, broker, [SYMBOL], notifier=inbox)
+    monitor.track_record = {
+        "start": datetime(2016, 8, 29),
+        "symbols": {SYMBOL: {"trades": 431, "win_rate": 41.8, "profit_factor": 0.9, "avg_r": -0.044}},
+    }
+    primed(monitor, features({"signal": 1, "raw_signal": 1})).refresh()
+    (message,) = inbox.sent
+    assert message.endswith(
+        f"Record: EMA cross on {SYMBOL} M15 won 42% of 431 trades since 2016, average -0.04R. About 58 in "
+        "100 signals like this one lose, and nothing measured on the signal bar picks them out."
+    )
+    monitor.track_record = {
+        "start": datetime(2016, 8, 29),
+        "symbols": {SYMBOL: {"trades": 5, "win_rate": 80.0}},
+    }
+    assert monitor.record_line(SYMBOL) == ""  # too few trades to quote
+    monitor.track_record = {}
+    assert monitor.record_line(SYMBOL) == ""
+
+
 def test_signal_alert_carries_the_plan(cfg, broker):
     inbox = Inbox()
     monitor = primed(Monitor(cfg, broker, [SYMBOL], notifier=inbox), features({"signal": 1, "raw_signal": 1}))
@@ -160,7 +211,7 @@ def test_signal_alert_carries_the_plan(cfg, broker):
     assert message.startswith(f"BUY · {SYMBOL}\nBuy {SYMBOL} now.")
     assert (
         "BUY plan: entry ~1.10012 · SL 1.09862 · TP 1.10312 · 0.16 lots · risk 24.00 · target 48.00"
-        in message
+        " · sized for MT5 Fake-Demo, equity 10,000 USD" in message
     )
 
 

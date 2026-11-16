@@ -15,6 +15,7 @@ through ``SimBroker``.
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -90,7 +91,7 @@ class RiskStatus:
     streak_limit: int
     entries_today: int
     entries_limit: int
-    open_risk_percent: float = 0.0
+    open_risk_percent: float | None = 0.0
     open_risk_limit: float = 0.0
     positions: int = 0
     positions_limit: int = 0
@@ -114,7 +115,29 @@ class Engine:
     _news: NewsCalendar | None = None
 
     def __post_init__(self) -> None:
-        self._news = NewsCalendar(self.config.schedule.news_file)
+        schedule = self.config.schedule
+        self._news = NewsCalendar(schedule.news_file, schedule.news_feed_file if schedule.news_feed else None)
+
+    @property
+    def scope(self) -> int | None:
+        """Whose trades the account limits count: every trade on the account (None), trades placed by
+        hand included, or only the bot's own (its magic number). Management is always the bot's own."""
+        return None if self.live and self.config.risk.account_trades else self.config.magic
+
+    @property
+    def news(self) -> NewsCalendar | None:
+        return self._news
+
+    def _specs(self, positions: list[Position]) -> dict[str, SymbolSpec]:
+        """Specs of the instruments held. With every trade on the account counted, that can be one
+        the bot does not watch; an unavailable spec makes portfolio risk unmeasurable."""
+        specs = {}
+        for symbol in {p.symbol for p in positions}:
+            try:
+                specs[symbol] = self.broker.symbol(symbol)
+            except Exception:
+                log.debug("%s: no symbol spec; portfolio risk is unknown", symbol, exc_info=True)
+        return specs
 
     # --- entry point per closed bar -----------------------------------------------------------
 
@@ -127,6 +150,20 @@ class Engine:
         spread: float,
         now: datetime,
     ) -> None:
+        if self.live:
+            quote_problem = self.broker.tick(symbol).problem(now)
+            if quote_problem:
+                self._emit(now, "skip", symbol, f"data: {quote_problem}")
+                return  # retry this bar when a usable quote arrives
+            closed_at = _bar_close(row, self.config)
+            if pd.isna(closed_at) or closed_at > now:
+                self._emit(now, "skip", symbol, "data: latest bar has not closed yet")
+                return
+            if now - closed_at > timedelta(
+                minutes=self.config.bar_minutes * self.config.schedule.max_bar_age_bars
+            ):
+                row = row.copy()
+                row["signal"] = row["exit_signal"] = 0
         self._manage(symbol, spec, params, row, spread, now)
         bar_time = row["time"]
         if self._acted_bar.get(symbol) == bar_time:
@@ -155,11 +192,18 @@ class Engine:
         now: datetime,
     ) -> None:
         m = params.management
-        bid = float(row["close"])
+        bid = self.broker.tick(symbol).bid if self.live else float(row["close"])
         bar_minutes = self.config.bar_minutes
+        exit_signal = row.get("exit_signal")
+        if exit_signal is None or pd.isna(exit_signal):
+            exit_signal = row["signal"]  # legacy or mixed supplied backtest frames
         for position in [p for p in self.broker.positions(self.config.magic) if p.symbol == symbol]:
             price = bid if position.side == BUY else bid + spread
-            if m.close_on_reverse and row["signal"] == -position.side:
+            if (
+                m.close_on_reverse
+                and exit_signal == -position.side
+                and _bar_close(row, self.config) > position.time_open
+            ):
                 self._close(position, None, now, "opposite signal")
                 continue
             if m.max_hold_bars:
@@ -214,6 +258,15 @@ class Engine:
 
         if self.live and Path(self.config.kill_switch_file).exists():
             return f"kill switch: {self.config.kill_switch_file} exists"
+        if self.live:
+            quote_problem = self.broker.tick(symbol).problem(now)
+            if quote_problem:
+                return f"data: {quote_problem}"
+            closed_at = _bar_close(row, self.config)
+            if pd.isna(closed_at) or closed_at > now:
+                return "data: latest bar has not closed yet"
+            if now - closed_at > timedelta(minutes=self.config.bar_minutes * sched.max_bar_age_bars):
+                return "data: latest closed bar is stale"
         closed = sched.closed(now)
         if closed:
             return f"session: {closed}"
@@ -229,17 +282,19 @@ class Engine:
         status, today = self._limits(r, now, self.broker.account())
         if status.blocked:
             return status.blocked
-        if self.live and any(
-            d.entry == "in" and d.symbol == symbol for d in today if d.time >= _bar_close(row, self.config)
-        ):
-            return "duplicate: already entered on this bar (restart?)"
 
-        positions = self.broker.positions(self.config.magic)
+        positions = self.broker.positions(self.scope)
         same = [p for p in positions if p.symbol == symbol]
         if len(same) >= r.max_positions_per_symbol:
             return f"positions: {len(same)} open on {symbol}"
         if len(positions) >= r.max_total_positions:
             return f"positions: {len(positions)} open in total"
+        # One entry per symbol per bar, read from the deal history so it holds after a restart and
+        # for a trade logged by hand. Checked after the position limits, which name the usual reason.
+        if self.live and any(
+            d.entry == "in" and d.symbol == symbol for d in today if d.time >= _bar_close(row, self.config)
+        ):
+            return f"duplicate: {symbol} was already entered on this bar; one entry per bar"
 
         atr_ = float(row["atr"])
         if spread > r.max_spread_atr * atr_:
@@ -314,28 +369,30 @@ class Engine:
         if not self.live:
             return self.broker.deals(since, self.config.magic)
         if self._older_deals is None or self._older_deals[:2] != (day_start, lookback):
-            older = [d for d in self.broker.deals(since, self.config.magic) if d.time < day_start]
+            older = [d for d in self.broker.deals(since, self.scope) if d.time < day_start]
             self._older_deals = (day_start, lookback, older)
-        return self._older_deals[2] + self.broker.deals(day_start, self.config.magic)
+        return self._older_deals[2] + self.broker.deals(day_start, self.scope)
 
     def risk_status(self, now: datetime) -> RiskStatus:
         """The limits plus what is open right now, for a person to read (the dashboard shows it)."""
         r = self.config.risk
         account = self.broker.account()
         status, _ = self._limits(r, now, account)
-        positions = self.broker.positions(self.config.magic)
-        committed = open_risk(positions, {p.symbol: self.broker.symbol(p.symbol) for p in positions})
+        positions = self.broker.positions(self.scope)
+        committed = open_risk(positions, self._specs(positions))
+        measurable = math.isfinite(committed) and math.isfinite(account.equity) and account.equity > 0
         return replace(
             status,
-            open_risk_percent=committed / account.equity * 100 if account.equity > 0 else 0.0,
+            open_risk_percent=committed / account.equity * 100 if measurable else None,
             open_risk_limit=r.max_total_risk_percent,
             positions=len(positions),
             positions_limit=r.max_total_positions,
+            blocked=status.blocked or ("portfolio risk cannot be measured" if not measurable else ""),
         )
 
     def _losing_streak_today(self, deals: list[Deal], day_start: datetime) -> int:
         """Losing positions in a row (by close time). Only a streak that ends today pauses trading."""
-        open_tickets = {p.ticket for p in self.broker.positions(self.config.magic)}
+        open_tickets = {p.ticket for p in self.broker.positions(self.scope)}
         net: dict[int, float] = defaultdict(float)
         closed_at: dict[int, datetime] = {}
         for d in deals:
@@ -369,7 +426,16 @@ class Engine:
         Shared by the engine and the advisor dashboard, so the advice is the trade the bot takes.
         """
         r = params.risk
-        sl_distance, tp_distance = stop_distances(spec, r, float(row["atr"]), spread)
+        atr_ = float(row["atr"])
+        if (
+            side not in (-1, 1)
+            or not math.isfinite(atr_)
+            or atr_ <= 0
+            or not math.isfinite(spread)
+            or spread < 0
+        ):
+            return Rejection("data", "entry requires a valid side, positive ATR and nonnegative spread")
+        sl_distance, tp_distance = stop_distances(spec, r, atr_, spread)
         target = row.get("target_price")
         if target is not None and pd.notna(target) and int(row.get("raw_signal", 0)) == side:
             # the setup names its own target price (a measured move): the distance is from the fill
@@ -388,12 +454,18 @@ class Engine:
         size = position_size(spec, account.equity, sl_distance, r, tick_value)
         if not size.ok:
             return Rejection("size", size.reason)
-        positions = self.broker.positions(self.config.magic)
-        committed = open_risk(positions, {p.symbol: self.broker.symbol(p.symbol) for p in positions})
+        positions = self.broker.positions(self.scope)
+        committed = open_risk(positions, self._specs(positions))
         if (committed + size.risk_amount) / account.equity * 100 > r.max_total_risk_percent + 1e-9:
             return Rejection("portfolio risk", f"open risk would exceed {r.max_total_risk_percent}%")
         margin = self.broker.margin_required(symbol, side, size.volume)
-        if r.max_margin_percent and margin is not None and account.equity > 0:
+        # Named accounts can omit leverage for sizing estimates; their broker refuses execution.
+        advisory_margin = margin is None and getattr(self.broker, "advisory_only", False) is True
+        if r.max_margin_percent and not advisory_margin:
+            if margin is None or not math.isfinite(margin) or margin < 0:
+                return Rejection("margin", "margin estimate is unavailable or invalid")
+            if not math.isfinite(account.margin) or account.margin < 0:
+                return Rejection("margin", "account margin is unavailable or invalid")
             projected = (account.margin + margin) / account.equity * 100
             if projected > r.max_margin_percent:
                 return Rejection("margin", f"margin would reach {projected:.0f}%")
@@ -425,7 +497,14 @@ class Engine:
         stop = spec.round_price(entry - side * sl_distance)
         target = spec.round_price(entry + side * tp_distance)
         loss, win = calc(symbol, side, 1.0, entry, stop), calc(symbol, side, 1.0, entry, target)
-        if not loss or not win or loss >= 0 or win <= 0:
+        if (
+            loss is None
+            or win is None
+            or not math.isfinite(loss)
+            or not math.isfinite(win)
+            or loss >= 0
+            or win <= 0
+        ):
             return None
         return -loss, win
 

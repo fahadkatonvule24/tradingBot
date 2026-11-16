@@ -20,7 +20,7 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
 
 ## Contents
 
-- [What it does](#what-it-does) · [Quick start](#quick-start) · [Advisor dashboard](#advisor-dashboard) · [Safety model](#safety-model)
+- [What it does](#what-it-does) · [Quick start](#quick-start) · [Advisor dashboard](#advisor-dashboard) · [Trades you place on the phone](#trades-you-place-on-the-phone) · [Your own accounts](#your-own-accounts) · [Market panel](#market-panel) · [Calculator](#calculator) · [News](#news) · [Safety model](#safety-model)
 - [Architecture](#architecture) · [Strategies](#strategies) · [Risk and trade management](#risk-and-trade-management) · [Trading principles](#trading-principles)
 - [Backtesting model](#backtesting-model) · [Results on real data](#results-on-real-data)
 - [Bugs fixed from v23](#bugs-fixed-from-v23) · [Testing](#testing) · [Limitations](#limitations-and-next-steps)
@@ -30,6 +30,18 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
 - **Advises you live** in a browser dashboard: streaming bid/ask, BUY / SELL / BLOCKED / SKIP / WAIT per
   symbol with the reason, entry, stop-loss, take-profit, lot size, and the money at risk and to
   gain, all priced at the live quote by the same engine that trades.
+- **Counts the trades you place by hand.** Trade the same MT5 account on your phone and the loss
+  limits, open risk, reversal warnings, exposure and the review in R count those trades with no
+  logging; the bot still only manages its own. For an account at another broker, type in its
+  equity (and leverage) and every size and limit is worked out for it instead.
+- **Calculator:** lot size from risk, pip value, money at stop and target, margin at any
+  leverage, margin level, how far price can go against you before a margin call, the most lots
+  your margin cap allows.
+- **Pulls the news:** this week's economic calendar from a public feed; entries pause around
+  high-impact events, the panel lists what is coming, and you are warned 30 minutes before.
+- **Reads the whole market:** currency strength, how the instruments move together, your net
+  exposure per currency across every open trade, yesterday's and this week's levels and pivots,
+  how much of a normal day's range is used, the volatility regime, the sessions and the swap.
 - **Trades MT5** (demo or live) on closed bars, across many symbols, resolving broker suffixes
   (`EURUSD` → `EURUSDm`). All timestamps are converted from server time to UTC, including the
   broker's daylight-saving changes, which are detected from its own history.
@@ -68,7 +80,8 @@ pip install -e ".[mt5]"            # the MetaTrader5 package is Windows-only
 
 tradebot check                     # connect to the open MT5 terminal, show account, symbols, signals
 tradebot ui                        # the whole advisor in one command: all four setups, trends, reversal warnings, alerts
-tradebot telegram                  # optional: set up alerts to your phone
+tradebot whatsapp                  # optional: alerts to your own WhatsApp (send only)
+tradebot telegram                  # optional: alerts and commands through a Telegram bot
 tradebot run --once                # one dry-run cycle: decisions are logged, nothing is sent
 tradebot run                       # keep running (dry run); Ctrl+C stops after the current cycle
 
@@ -78,6 +91,9 @@ tradebot optimize --folds 4        # walk-forward optimisation -> out-of-sample 
 tradebot journal --days 7          # what the bot did this week
 tradebot plan --out PLAN.md        # the written trading plan, generated from the config
 tradebot review --days 30          # closed trades in R: the bot's signals against your own calls
+tradebot account Exness 500        # your own account: sizes are worked out from this equity
+tradebot review --account Exness   # the trades you logged for it, in R
+tradebot news                      # this week's economic calendar for your instruments
 ```
 
 No MetaTrader terminal? `python scripts/make_demo_data.py --out demo-data`, then run
@@ -85,6 +101,90 @@ No MetaTrader terminal? `python scripts/make_demo_data.py --out demo-data`, then
 synthetic data.
 
 ## Advisor dashboard
+
+**Experimental entry-quality checks (off).** `strategy.use_signal_quality_filter` is `false` in
+the supplied config: it was switched on for a day and then measured, below. When on, before an
+entry, all four setups reject weak or opposing candle bodies, closes that retreat too
+far from the directional extreme, exceptional price spikes (including gaps), and entries stretched
+too far beyond the fast EMA. EMA cross and pullback also check for choppy price movement; breakout
+and retest can emerge from consolidation, so that check does not apply to them. The dashboard's
+filter checklist and blocked-trigger reason explain the decision, and `tradebot plan` lists the
+configured thresholds.
+
+The spike and extension limits use the **previous bar's ATR**; directional efficiency uses only
+the preceding window. A large signal candle cannot inflate its own volatility baseline to pass.
+Incomplete or invalid quality inputs block entry. These are configurable warning signs, not a
+prediction that a trade will lose, a win probability, or evidence of a profitable edge; they also
+reject some winning signals. Existing opposite-signal exits retain the original strategy filters;
+the quality checks only gate new entries. The performance tables elsewhere in this README were
+measured without it. Set `strategy.use_signal_quality_filter` to `true` to try it;
+programmatic `StrategyParams` defaults keep it disabled too.
+
+A fixed-threshold replay of the six configured instruments on H1, from 10 November 2024 to
+10 November 2026, produced the following results with the same costs, risk limits and exit rules:
+
+| Setup | Trades, off / on | Average trade in R, off / on |
+|---|---:|---:|
+| EMA cross | 132 / 26 | -0.265 / -0.245 |
+| Breakout | 463 / 249 | -0.083 / -0.136 |
+| Pullback | 680 / 364 | -0.166 / -0.147 |
+| Retest | 428 / 220 | -0.151 / -0.158 |
+
+**The replay does not establish better signal accuracy.** All four remained negative per trade;
+breakout and retest worsened on that measure. Fewer entries can reduce total losses without
+improving predictions. This is previously available history, not a fresh holdout; thresholds
+were not tuned to these results. Reproduce with `python scripts/research_signal_quality.py`;
+it saves metrics and rejection counts to `reports/signal-quality-H1.json` without connecting to MT5.
+
+**Can the bot tell a false signal from a good one?** Measured three ways on the H1 history
+(`scripts/research_false_signals.py`; a false signal is a trade that ends below zero R after the
+engine's own exits and costs). Questions 2 and 3 use only the research years before November
+2024, because the holdout after it has been used four times already.
+
+1. *The checks above, signal by signal.* Each setup ran with them off and on; the trades they
+   remove are compared with the trades they keep. A filter that spots false signals removes worse
+   trades than it keeps.
+
+   | Setup | Removed (2016 – Oct 2024) | Kept | Removed (Nov 2024 – Nov 2026) | Kept | Years the removed were worse |
+   |---|---:|---:|---:|---:|---:|
+   | EMA cross | 436 · −0.14R | 94 · −0.23R | 106 · −0.28R | 24 · −0.18R | 4 of 9 |
+   | Breakout | 1,098 · +0.00R | 910 · −0.09R | 236 · +0.00R | 221 · −0.19R | 2 of 9 |
+   | Pullback | 1,788 · −0.09R | 1,238 · −0.08R | 356 · −0.19R | 298 · −0.16R | 4 of 9 |
+   | Break and retest | 1,108 · −0.05R | 898 · −0.11R | 226 · −0.24R | 182 · −0.14R | 3 of 9 |
+
+   On breakout the checks throw away the better half in both periods. Elsewhere the difference
+   changes sign between periods and from year to year. Their smaller total loss comes from taking
+   50–80% fewer trades, which skipping signals at random would also do.
+2. *Twelve single measurements at the signal bar*: how far past the level it closed, candle body
+   and close position, candle size against ATR, stretch from EMA 10 and EMA 50, efficiency of the
+   prior move, ADX, RSI, MACD, volatility regime and the London–New York overlap. Rank
+   correlations with the result are between −0.06 and +0.09 for all but one. The exception,
+   volatility regime (+0.13, same sign in all 9 years), does not change the average trade: from
+   the quietest fifth of signals to the busiest, winners rise from 40% to 44% but the average
+   winner shrinks from 1.41R to 1.23R, and the average trade stays between −0.03R and −0.15R with
+   no trend.
+3. *All twelve together*: a logistic regression refitted every year on the years before it, so
+   each prediction is out of sample. AUC **0.496** over 6,723 trades (0.5 is a coin flip). The 30%
+   it rated least likely to win averaged −0.09R; the rest averaged −0.08R.
+
+None of the three picks out the losers in advance, which matches the earlier machine-learning
+result (50.4% right on direction) and the breakout variants under
+[Trading principles](#trading-principles). So the bot does not claim to: each buy or sell alert
+instead ends with how often that setup has lost on that symbol, and the failed-break and reversal
+warnings watch a trade after it is open, which is when a false break becomes visible.
+
+**Automatic market assessment.** A separate analysis card combines the closed-bar trend, higher-timeframe
+agreement, momentum, setup observations, volatility and available price levels into one explanation.
+It lists supporting evidence and conflicts, then gives bullish and bearish conditions to watch with
+confirmation and invalidation levels. You do not need to choose indicators to receive this assessment.
+It describes measured conditions; its scenarios are hypotheses, without an estimated win probability.
+
+The assessment is independent of account equity, execution permissions and account risk blockers.
+Stale quotes, stale bars or incomplete inputs pause current scenarios. The data source and bar time
+are shown, and a meaningful change in interpretation creates an activity entry and an alert through
+the existing notification channels. Initial loading and ordinary price/timestamp updates are quiet.
+`/analysis SYMBOL` retrieves the same assessment through the existing Telegram command handler.
+This adds no orders and does not change the strategies or their documented backtest results.
 
 `tradebot ui` connects to the open MT5 terminal and serves a dashboard on `127.0.0.1`. For every
 symbol, once a second:
@@ -207,10 +307,35 @@ predicts the actual trigger on 100% of them. The forming notice re-runs the real
 the forming bar appended at the current price, so it also says which filter would block it. It is
 labelled unconfirmed everywhere, and nothing is ever traded from it.
 
-**Alerts to your phone.** `tradebot telegram` walks through creating a Telegram bot and sends a
-test message. The token and chat id live in `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`),
-never in the committed config. Messages go out from a background thread so a slow network cannot
-delay trading; failures are logged and dropped, and the token is never written to a log.
+**Alerts to your phone.** Two channels, either or both:
+
+- **WhatsApp**, through [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/)'s
+  free API for messages to your own number. Save their number in your contacts, send it the
+  activation message from WhatsApp, and it replies with an API key. Put `WHATSAPP_PHONE` (with the
+  country code, e.g. `+256700123456`) and `WHATSAPP_APIKEY` in `.env`, then `tradebot whatsapp`
+  sends a test message (`--sample` sends a past alert in the real format, marked as a sample).
+  For several numbers, activate each one and list them comma-separated,
+  each key in the same position as its number (`WHATSAPP_PHONE=+256700123456,+256770654321`,
+  `WHATSAPP_APIKEY=1234567,7654321`); every number gets every alert, and a count that does not
+  match turns WhatsApp off with a warning instead of pairing a number with the wrong key. It only
+  sends, so the commands below need Telegram. By default it carries
+  only what is worth acting on: a confirmed buy or sell, a failed break, get-out and reversal
+  warnings and assumed closes on open positions, the news warning, and orders
+  (`"alerts": {"whatsapp": "important"}`; `"all"` adds forming and blocked triggers, trend and
+  analysis changes). Alerts that arrive together go out as one message, spaced out, because the
+  free service does not publish its limits. The text passes through CallMeBot's server.
+- **Telegram**: `tradebot telegram` walks through creating a bot and sends a test message. The
+  token and chat id live in `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`). It gets every
+  alert and answers the commands listed under [Your own accounts](#your-own-accounts).
+
+Only the setup on screen sends signals. The other three still show theirs on their tiles;
+`"alerts": {"other_setups": true}` announces them too. Each setup loses on its own, and four of
+them send about four times the signals. Every size in an alert names the account it was worked
+out for: on the terminal's demo account that is 100,000 USD, not your own equity (see
+[Your own accounts](#your-own-accounts)). Every buy or sell alert ends with how often that setup
+has lost on that symbol in the stored history. Credentials never go in the committed config,
+messages go out from background threads so a slow network cannot delay anything, failures are
+logged and dropped, and neither the token nor the API key is ever written to a log.
 
 **The bot is the risk manager; direction can be yours.** The research below found no rule that
 predicts direction, and the filters block winners as readily as losers (removing the trend filter
@@ -235,6 +360,183 @@ custom header (other sites can neither read it nor send it cross-origin), refuse
 never as HTML, and the server uses only the standard library.
 
 ![Dashboard in dark mode](docs/screenshots/dashboard-dark.png)
+
+## Trades you place on the phone
+
+Log in to the same MT5 account on the phone as in the terminal the dashboard reads, and nothing
+has to be entered by hand: a position opened in the MetaTrader 5 app is on the account, so the
+terminal sees it within a second. With `"account_trades": true` (the default, under `risk`), every
+trade on the account counts, not only the bot's:
+
+| What | Counts the trades you place by hand |
+|---|---|
+| Daily and weekly loss limits, drawdown, losing streak, trades per day | yes, from the account's deal history (deposits and withdrawals are not trades and are left out) |
+| Positions per symbol and in total, open risk | yes |
+| Reversal warning, exposure per currency, correlation warnings | yes |
+| Closed trades and the review in R, on the dashboard and in `tradebot review` | yes, labelled your own calls against the bot's (the bot's carry its magic number) |
+| Breakeven, partial profit, trailing stop, closing on an opposite signal | **no**: the bot only ever manages its own positions |
+
+R needs the stop a trade opened with. The phone usually sends it with the order; when a stop is
+added after the trade opened, the first stop the dashboard sees is kept as the trade's 1R (in the
+journal file), so moving it to breakeven later does not change what the trade risked.
+
+`"account_trades": false` goes back to counting only the bot's own trades.
+
+### Using it with Exness
+
+Exness accounts are MT5 accounts (unless one was opened as MT4), and the Exness Trade app trades
+the same account, so log the terminal in to it and every trade placed from the phone is counted:
+
+1. In MetaTrader 5, **File → Login to Trade Account** with the account number, its trading
+   password and its server, as shown for that account in the Exness Personal Area. (Or install
+   Exness's own MT5 terminal next to this one and put its `terminal64.exe` in `MT5_PATH` in
+   `.env`, so the MetaQuotes demo terminal stays as it is.)
+2. `tradebot check` shows the account, server time and symbols; `tradebot ui` as before.
+
+Exness symbol names carry the account type (`EURUSDm` on Standard, `EURUSDc` on Standard Cent,
+`EURUSD` on Pro, Raw Spread and Zero); the configured `EURUSD` is matched to the one the account
+has. Unlimited leverage, which MT5 reports as about two billion, is shown as unlimited, and the
+calculator then uses the terminal's own margin figure. A real-money account is refused for orders
+unless `allow_real_account` is set and every other gate is open, so the dashboard stays advice
+only. An MT4 account cannot be read by the MetaTrader5 package: use the book for it.
+
+## Your own accounts
+
+For an account the terminal cannot see, at a broker the terminal is not logged in to, the book
+(`book.py`, kept in the journal's SQLite file) holds the money instead. The terminal is then a
+price feed.
+
+**Type in the equity; the rest follows from it.** Under **Account** on the dashboard, with
+`tradebot account NAME EQUITY [--leverage 500]`, or with `/equity NAME AMOUNT [lev=500]` in
+Telegram, add each account with the equity its broker's app shows. Saving an account never
+switches to it: the MT5 account stays in use until you choose **Use** (`/use NAME`,
+`tradebot account NAME --use`). While one of them is in use, the engine asks the book for the
+account, the open positions and the deal history, and the terminal only for prices and the
+profit calculator. Nothing else changes: the lot size, the stop and target, the money at risk,
+the daily and weekly loss limits, the losing-streak pause, the open-risk cap, the reversal
+warning and the review are the same code, now answering for your account. With 2,000 in equity
+and the default 0.25% risk, a 15-pip EURUSD stop gives 0.03 lots; on the 10,000 demo account it
+gave 0.16. When an account is too small for the terminal's smallest lot at that stop, the plan
+says so instead of rounding up. If your broker takes smaller lots, set its minimum lot and lot
+step on the account.
+
+**Several accounts at once.** The plan card and every signal alert give the size at each of
+your accounts, not only the one in use:
+
+```
+BUY · EURUSDm
+Buy EURUSDm now. …
+BUY plan: entry ~1.10012 · SL 1.09862 · TP 1.10312 · 0.03 lots · risk 4.50 · target 9.00 · Exness
+XM (8,000.00 USD): 0.13 lots · risk 19.50 USD
+Tiny (300.00 USD): no size (minimum lot would risk 0.50% (> 0.25%))
+```
+
+**Log what you placed.** "I placed this BUY: log it" on the plan card, or `/took EURUSD buy` in
+Telegram, records the trade with the plan's size, entry, stop and target; change any of them to
+what you actually got (`/took EURUSD buy lots=0.02 entry=1.0851 sl=1.0821`). A trade logged while
+the bot was signalling that side is marked as a bot signal, any other as your own call, so the
+review can tell the two apart. Move the stop with `/sl ID PRICE`, close with `/close ID [PRICE]
+[pnl=AMOUNT]`, or use the buttons on the open-positions table. When the terminal's price crosses
+a logged stop or target, including on bars that closed while the dashboard was off, the trade is
+closed in the book at that level, marked **assumed**, and you get an alert: another broker's
+prices differ by a fraction of a pip, so set the result your broker shows, or reopen the trade if
+it is still running.
+
+**Nothing here places an order.** While one of your accounts is in use the order button is gone
+and the server refuses orders, whatever the config says; the broker interface answers every
+order with "place the order at your broker, then log it here". The Telegram commands can change
+the book and read the analysis; none can trade, and only the chat set in `TELEGRAM_CHAT_ID` is
+answered. Commands sent while the dashboard was off are skipped, not replayed.
+
+| Telegram command | What it does |
+|---|---|
+| `/calc SYMBOL buy\|sell [risk=] [lots=] [sl=] [pips=] [tp=] [lev=] [equity=]` | the [calculator](#calculator): size, margin, leverage |
+| `/news` | high- and medium-impact news for your instruments in the next 36 hours |
+| `/plan SYMBOL buy\|sell` · `/analysis SYMBOL` | entry, stop, target and the size at each account; the market assessment |
+| `/status` · `/market` · `/levels SYMBOL` | loss limits and open risk; strength, exposure and sessions; the day's levels |
+| `/equity NAME AMOUNT [lev=]` · `/use NAME` · `/accounts` | add one of your accounts or set its equity and leverage; choose the one everything is worked out for (`/use mt5` for the terminal's) |
+| `/took SYMBOL buy\|sell [lots=] [entry=] [sl=] [tp=] [account=]` | log a trade placed at another broker (with one account of your own, it goes there) |
+| `/close ID [PRICE] [pnl=]` · `/sl ID PRICE` · `/tp ID PRICE` · `/open` | keep the book in step with that broker |
+
+Three limits belong next to this. Amounts are in the terminal account's currency, because that
+is what its profit calculator answers in, so keep the terminal on an account in the same currency
+as yours. Margin is checked for one of your accounts only once its leverage is set: notional
+value ÷ leverage, against `max_margin_percent`. And the book only knows what you log: for these
+accounts, a trade placed and never logged is invisible to the limits.
+
+## Market panel
+
+One instrument's chart does not show what the rest of the market is doing. The panel below the
+plan shows it, from the bars the advisor already holds, so it costs no extra requests to the
+terminal:
+
+| It shows | How |
+|---|---|
+| Currency strength | each currency's move over the last day (and week), averaged over its instruments and scaled by ATR × √bars, so gold and EURUSD count the same |
+| Your exposure | net long or short amount per currency across every open position (the bot's, yours on MT5, or your book), in money and as a share of equity, and which positions make it up |
+| Overlap | on the plan card: "a buy here adds to a bet you already hold: short USD (your buy EURUSD, sell USDJPY)" |
+| Correlation | of returns over the last 500 bars; open positions on instruments above ±0.7 are named as one larger position, or as cancelling out |
+| Levels | previous day and week high and low, previous close, today's open, this week's range, classic floor pivots (also drawn on the chart), each with its distance in ATR |
+| Range used | today's range against the 20-day average daily range |
+| Volatility | where the current ATR sits among its last 500 values: quiet, normal or busy |
+| Sessions, swap | which sessions are open; overnight financing per lot at the terminal's broker, with the triple-swap day |
+| Every instrument | one row each: advice, trend and its state, higher timeframes, RSI, ADX, volatility, range used, nearest level |
+
+**What two of these are worth as forecasts.** Both are commonly read as one, so both were
+measured with the panel's own code on the six default instruments, H1, March 2017 to November
+2026, with the questions written down first (`scripts/research_market_context.py`):
+
+| Question | Answer |
+|---|---|
+| Does the next day go the way the last day's currency strength favoured? | 49.7% of 14,142 samples; +0.03 ATR on average (t = 0.9). With a strong lean (difference ≥ 1): 50.3% and +0.09 ATR (t = 1.8), about one pip on EURUSD, which is less than the cost of the trade, and the six instruments are sampled at the same moments and share the dollar, so the samples are not independent |
+| Is a day that has used its average range by 13:00 UTC done? | No. It extended its range by a further 32% of the average on average (median 19%), against 35% (median 26%) for days under half used; 42% of them went on by a quarter of a range or more |
+
+So the panel describes what has happened and what you are exposed to. Strength pointed the same
+way as the instrument's own last day 91% of the time: it is mostly that day's move, restated
+across currencies.
+
+## Calculator
+
+**Calculator** on the dashboard (or `/calc` on the phone) works out a trade before you place it,
+for any watched instrument, from the terminal's own contract sizes and profit calculator:
+
+| You give (all optional but the instrument and side) | It answers |
+|---|---|
+| entry (default: the live price) | lot size, from the risk or as given, floored to the lot step |
+| stop as a price or in pips (default: the bot's plan) | value of a pip; money lost at the stop and made at the target, R:R |
+| target (default: the plan's) | what the position controls (notional value) |
+| risk as % of equity, as money, or the lots (default: the config's 0.25%) | margin at the leverage chosen, and the terminal's own figure at the account's leverage |
+| equity (default: the account's) | margin as a share of equity, with what is already open; free margin and margin level after |
+| leverage 1:10 to 1:2000 (default: the account's) | the most lots on all free margin and within your margin cap |
+| margin cap (default: `max_margin_percent`, 30%) | how many pips against you before the margin level reaches 100% (margin call) and 50% (a common stop-out) |
+| | the leverage the account would be running at, and the same size at every leverage |
+
+It warns when the smallest lot would risk more than asked (instead of rounding up), when the
+margin would pass your cap, when there is not enough free margin, and when lots you typed risk
+more than the config's per-trade risk. Margin at a chosen leverage is notional ÷ leverage, which
+is how brokers margin forex and leveraged CFDs; some set gold, indices or crypto at less leverage
+than forex, or a fixed margin per lot, so pick that instrument's leverage, or compare with the
+terminal's figure, which is always shown beside it.
+
+## News
+
+The week's economic calendar is pulled from the public ForexFactory feed
+(`schedule.news_feed` in `config/config.json`; empty turns it off). The dashboard and the trading
+loop download it in the background, at start-up unless the last download is under four hours
+old and every four hours after, into `news_feed.json`
+(not committed); a failed download keeps the last one and is retried after half an hour, and a
+backtest never touches the network. The request carries no account data. Your own
+`config/news_blackouts.json` is still read beside it, for anything the feed does not carry.
+
+- **Entries pause** from `news_before_minutes` (30) before to `news_after_minutes` (30) after
+  each high-impact event for an instrument's currencies, as they did with the hand-kept file.
+- **The market panel lists** the next 36 hours of high- and medium-impact events for your
+  instruments: time, currency, forecast and previous figure, the instruments it touches, and
+  whether entries are paused now.
+- **One alert** (Telegram and the activity feed) when a high-impact event is 30 minutes away, with the
+  pause window: "USD Non-Farm Employment Change in 25 min (13:30 UTC, high impact; forecast 120K,
+  previous 98K). New entries are paused on EURUSDm from 13:00 to 14:00 UTC."
+- `tradebot news [--days 2] [--all]` downloads and lists it in the terminal; `/news` on the phone.
 
 ## Safety model
 
@@ -289,7 +591,8 @@ src/tradebot/
 ├── strategy.py      signals for ema_cross / breakout / pullback / retest + filters
 ├── engine.py        the decision procedure (live and backtest)
 ├── advisor.py       BUY/SELL/WAIT/SKIP advice and a priced trade plan, from the engine's own checks
-├── ui/              `tradebot ui`: MT5 worker thread, hardened local server, dashboard page
+├── ui/              `tradebot ui`: MT5 worker thread, hardened local server, dashboard page;
+│                    track.py measures each setup's record in a separate low-priority process
 ├── risk.py          position sizing, portfolio risk, drawdown
 ├── plan.py          the written trading plan, generated from the config
 ├── review.py        closed trades in R, bot signals against manual trades
@@ -301,9 +604,12 @@ src/tradebot/
 ├── metrics.py       Sharpe/Sortino/Calmar, drawdown, profit factor, R-multiples
 ├── report/          HTML report with inline SVG charts
 ├── live.py          trading loop and the live-trading gate
-├── news.py          news-blackout calendar
+├── news.py          economic calendar: the weekly feed, your own file, blackouts
+├── calculator.py    position size, margin and leverage
 ├── journal.py       SQLite journal
-├── notify.py        Telegram alerts (background thread, token never logged)
+├── book.py          your own accounts and logged trades; BookBroker answers the engine from them
+├── market.py        currency strength, correlation, exposure, levels, volatility, sessions
+├── notify.py        phone alerts: WhatsApp (send only) and Telegram (and commands)
 └── cli.py           `tradebot` command
 ```
 
@@ -328,8 +634,10 @@ exactly the same rows as computing on the full history.
   broker's minimum lot, the trade is **skipped**; v23 silently traded the minimum and over-risked.
 - **Portfolio caps:** total open risk (counting the current stops of open positions), margin
   usage, positions per symbol and in total.
-- **Loss limits** use realized P/L net of commission, swap and fees, per UTC day and ISO week. A
-  losing streak pauses entries until the next UTC day.
+- **Loss limits** use realized P/L net of commission, swap and fees, per UTC day and ISO week, of
+  every trade on the account, those placed by hand included (`account_trades`, see
+  [Trades you place on the phone](#trades-you-place-on-the-phone)). A losing streak pauses
+  entries until the next UTC day.
 - **Drawdown limit:** live trading stops opening positions while the bot's realised result is
   `max_drawdown_percent` (10%) below its highest point of the last `drawdown_days` (365). Like
   the loss limits it is rebuilt from the broker's deal history, so it needs no saved state and
@@ -723,11 +1031,41 @@ The corrected data also changed the verdict on individual symbols: over the same
 default backtest went from −1.1% to **−4.7%**, and EURUSD's apparent edge (profit factor 1.15)
 became a loss (0.86). It had come from the mislabelled hours.
 
+### Found from a losing trade (v3.13)
+
+On Monday 16 November 2026 the dashboard said "Sell GBPUSD now" (breakout setup) at 07:00 UTC.
+The sell was taken by hand and lost: the spike at the London open reached the stop at 08:40 UTC,
+and price fell 35 pips after that. A replay of the day with the bot's own code reproduced every
+alert, so the trigger did what its rule says. It fired an hour before the session the config
+asks for, though:
+
+| Found | Impact | Now |
+|---|---|---|
+| Session hours were fixed UTC values, right only while London and New York are on summer time | from late October to late March `london_new_york` opened at 07:00 UTC, an hour before London, and closed at 21:00 UTC, an hour before New York; the market panel showed London open at 07:00 UTC | sessions open and close on London and New York local time (`config.session_hours`), so their UTC hours move with each city's daylight saving, including the weeks when only one city has changed its clock; the written plan states both |
+
+The fix makes the bot keep the hours it states; it does not make the setups profitable. Over the
+H1 history, the trades that only the old hours took (mostly at 07:00 UTC in winter) were no worse
+than the others: on average +0.17R for breakout, −0.04R for retest and −0.27R for pullback. The H1
+setup table moves by under two points of return (breakout −26.5% → −26.9%, pullback −62.5% →
+−60.8%, retest −47.4% → −45.3%, EMA cross −26.1% → −26.0%) and every setup still loses. On M30,
+M15 and M5 each row moves by between −1.7 and +2.6 points, and every one still loses. The tables
+above were measured before this fix.
+
+A sweep of the rest of the system after that trade, with today's activity log as evidence (v3.14):
+
+| Found | Impact | Now |
+|---|---|---|
+| A setup or timeframe switch cleared the record of what had been announced | each switch re-sent the same forming and blocked triggers for every symbol: the GBPUSD "buy trigger forming" for the 08:00 bar went out five times in 40 minutes | the once-only keys name the setup and the timeframe and survive a switch |
+| Signals from the three setups not on screen were announced like the main one | four times the signals, each from a setup that loses on its own; the losing GBPUSD sell came from the breakout setup while the screen showed break and retest | off by default (`alerts.other_setups`); their tiles still show them |
+| Alert sizes did not say which account they were for | on the terminal's demo account a plan read "1.2 lots · risk 249.60" with nothing to say that is 0.25% of 100,000 USD, not of a small live account | every size ends with "sized for …, equity …" |
+| The analysis card only counted triggers that disagreed with each other | a pullback buy firing in a strong downtrend showed "No directional conflict" | a trigger against the card's direction is listed as a conflict |
+| Every setup or timeframe click ran the record's 10-year backtest inside the dashboard | the page lagged: one backtest is 11.6 s of work, and competing with the page for the interpreter it took 96 s; with it running, page work was up to 0.75 s late (0.15 s now) | it runs in a separate low-priority process, a result is kept per setup and timeframe (switching back is instant), and a newer click stops a run nobody is waiting for, including the interpreter a virtual environment's launcher starts |
+
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 286 tests
+pytest --cov=tradebot      # 547 tests
 ruff check . && ruff format --check .
 ```
 
@@ -748,14 +1086,19 @@ Linux and Windows without a terminal.
   open does not count until it closes; the stop on each position bounds that.
 - **No regime model yet:** the strategies are classic technical rules. The results above show
   they are not enough on their own; the tooling is built to evaluate better ideas honestly.
-- **News calendar is a JSON file you maintain.** An economic-calendar feed would be a natural
-  addition.
+- **The news comes from one public feed.** If ForexFactory changes or withdraws it, the download
+  fails loudly, the last calendar stays in use, and `config/news_blackouts.json` still works.
 - **The terminal can stall the bot.** The MetaTrader5 package blocks the whole Python process
   while the terminal is busy, for example during a large history download, so the dashboard
   freezes until the terminal answers. Download history (`tradebot fetch`) when the dashboard is
   not running.
-- **One process, one terminal.** The dashboard is local by design; Telegram alerts are the only
-  thing that leaves the machine, and only if you configure them.
+- **One process, one terminal.** The dashboard is local by design; the news download, and
+  WhatsApp or Telegram alerts (and Telegram commands) if you configure them, are the only traffic that leaves the
+  machine. The page itself is not reachable from a phone; the commands are how the phone talks to
+  it. Accounts at other brokers are not read automatically: only the account the terminal is
+  logged in to is.
+- **It is only on while the PC is.** Alerts stop when the computer, the terminal or `tradebot ui`
+  stops. Stops and targets crossed meanwhile are caught on the next start, from the closed bars.
 
 ## Disclaimer
 

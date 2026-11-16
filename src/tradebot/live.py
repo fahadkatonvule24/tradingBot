@@ -29,13 +29,13 @@ class Gate:
 def trading_gate(config: BotConfig, account: Account, live_flag: bool, terminal_allows: bool) -> Gate:
     """Live orders need *all* of: dry_run=false, live_trading_confirm=true, --live on the command
     line, algo trading enabled in the terminal, and allow_real_account=true for a real-money account."""
-    if config.dry_run:
+    if config.dry_run is not False:
         return Gate(False, "dry_run is true in the config")
-    if not config.live_trading_confirm:
+    if config.live_trading_confirm is not True:
         return Gate(False, "live_trading_confirm is false in the config")
     if not live_flag:
         return Gate(False, "--live was not passed on the command line")
-    if account.is_real and not config.allow_real_account:
+    if account.is_real and config.allow_real_account is not True:
         return Gate(False, "this is a REAL-money account and allow_real_account is false")
     if not terminal_allows:
         return Gate(False, "algo trading is disabled in the MT5 terminal (Tools > Options > Expert Advisors)")
@@ -122,7 +122,7 @@ class LiveRunner:
         if self.notifier:
             for event in self.engine.events:
                 if event.kind in NOTIFY_KINDS:
-                    self.notifier.send(f"{event.symbol}: {event.detail}")
+                    self.notifier.send(f"{event.symbol}: {event.detail}", "order")
         self.engine.events.clear()
 
     def _warn_reversals(self) -> None:
@@ -147,7 +147,7 @@ class LiveRunner:
             log.warning("%s: %s", p.symbol, text)
             if self.notifier:
                 title = "GET OUT" if found.level == EXIT else "REVERSAL WARNING"
-                self.notifier.send(f"{title} · {p.symbol}\n{text}")
+                self.notifier.send(f"{title} · {p.symbol}\n{text}", "exit")
 
     def _process(self, symbol: str) -> None:
         params = self.config.for_symbol(symbol)
@@ -161,6 +161,7 @@ class LiveRunner:
         if age > bar * self.config.schedule.max_bar_age_bars:
             log.info("%s: last closed bar is %s old (market closed?); managing positions only", symbol, age)
             row["signal"] = 0
+            row["exit_signal"] = 0
         tick = self.broker.tick(symbol)
         self.engine.on_bar(symbol, spec, params, row, tick.ask - tick.bid, now)
         if row["signal"] == 0:

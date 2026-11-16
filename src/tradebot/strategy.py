@@ -14,6 +14,7 @@ import pandas as pd
 from tradebot.broker.clock import NEW_YORK
 from tradebot.config import TIMEFRAME_MINUTES, StrategyParams
 from tradebot.indicators import adx, atr, ema, macd, rsi
+from tradebot.signal_quality import QUALITY_LABELS, add_quality_features, quality_checks
 
 # Which shared filters make sense for each entry trigger. MACD momentum would veto almost every
 # pullback entry by construction, and an S/R "room to resistance" check contradicts a breakout.
@@ -25,6 +26,7 @@ FILTERS = {
 }
 
 BLOCK_LABELS = {
+    **QUALITY_LABELS,
     "trend": "against higher-timeframe trend",
     "adx": "ADX below minimum (ranging market)",
     "macd": "MACD momentum disagrees",
@@ -310,6 +312,14 @@ def compute_signals(
         passed &= ok
 
     df["raw_signal"] = raw.astype("int8")
+    # Entry quality must not suppress the established opposite-signal exit rule.
+    df["exit_signal"] = raw.where(passed, 0).astype("int8")
+    if p.use_signal_quality_filter:
+        add_quality_features(df, p)
+        for name, ok in quality_checks(df, p, raw):
+            newly_blocked = (raw != 0) & passed & ~ok
+            block = block.mask(newly_blocked, name)
+            passed &= ok
     df["signal"] = raw.where(passed, 0).astype("int8")
     df["block"] = block
     return df

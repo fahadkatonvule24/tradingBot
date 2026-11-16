@@ -242,6 +242,31 @@ class MT5Broker:
                 return profit / ticks
         return info.trade_tick_value
 
+    def swap(self, name: str) -> dict[str, Any] | None:
+        """Overnight financing per 1.0 lot and night, in account currency, for a buy and a sell.
+
+        None when this broker charges it as an interest rate or in a currency this does not
+        convert. It is this terminal's broker: another broker's swap is a different number.
+        """
+        info = self.mt5.symbol_info(name)
+        long, short = getattr(info, "swap_long", None), getattr(info, "swap_short", None)
+        if info is None or long is None or short is None:
+            return None
+        mode = getattr(info, "swap_mode", None)
+        if mode == getattr(self.mt5, "SYMBOL_SWAP_MODE_POINTS", 1):
+            per_point = self._tick_value(name, info) * info.point / (info.trade_tick_size or info.point)
+        elif mode == getattr(self.mt5, "SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT", 4):
+            per_point = 1.0
+        else:
+            return None
+        days = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+        triple = getattr(info, "swap_rollover3days", None)
+        return {
+            "long": long * per_point,
+            "short": short * per_point,
+            "triple": days[triple] if isinstance(triple, int) and 0 <= triple < 7 else None,
+        }
+
     def tick(self, name: str) -> Tick:
         t = self.mt5.symbol_info_tick(name)
         if t is None:
@@ -281,7 +306,10 @@ class MT5Broker:
     def positions(self, magic: int | None) -> list[Position]:
         """Open positions with this magic number (``None``: every position on the account)."""
         out = []
-        for p in self.mt5.positions_get() or []:
+        positions = self.mt5.positions_get()
+        if positions is None:
+            raise MT5Error(f"could not read open positions: {self.mt5.last_error()}")
+        for p in positions:
             if magic is not None and p.magic != magic:
                 continue
             initial_volume, initial_sl = self.opening(p.ticket)
@@ -307,19 +335,34 @@ class MT5Broker:
     def opening(self, ticket: int) -> tuple[float | None, float | None]:
         """(volume, stop) of the order that opened a position, open or closed: the trade's 1R."""
         if ticket not in self._origin:
-            orders = sorted(self.mt5.history_orders_get(position=ticket) or [], key=lambda o: o.time_setup)
+            history = self.mt5.history_orders_get(position=ticket)
+            if history is None:
+                raise MT5Error(f"could not read opening order for {ticket}: {self.mt5.last_error()}")
+            orders = sorted(history, key=lambda o: o.time_setup)
             first = orders[0] if orders else None
-            self._origin[ticket] = (first.volume_initial, first.sl or None) if first else (None, None)
+            if first is None:
+                return None, None  # history may arrive after the position becomes visible
+            self._origin[ticket] = (first.volume_initial, first.sl or None)
         return self._origin[ticket]
 
-    def deals(self, since: datetime, magic: int) -> list[Deal]:
+    def deals(self, since: datetime, magic: int | None) -> list[Deal]:
+        """Trade deals since ``since``: this magic number's, or with ``None`` every trade on the
+        account, including those placed by hand on the phone. Deposits, withdrawals and other
+        balance operations are never trades and are always left out."""
         # Query a padded server-time range and filter in UTC: avoids missing deals when the
         # server clock runs ahead of the local one (a v23 loss-limit blind spot).
         start = self._to_server_epoch(since) - 86_400
         end = self._to_server_epoch(self.now()) + 86_400
+        trades = (self.mt5.DEAL_TYPE_BUY, self.mt5.DEAL_TYPE_SELL)
+        closing = (self.mt5.DEAL_ENTRY_OUT, getattr(self.mt5, "DEAL_ENTRY_OUT_BY", 3))  # close-by counts too
         out = []
-        for d in self.mt5.history_deals_get(start, end) or []:
-            if d.magic != magic or d.entry not in (self.mt5.DEAL_ENTRY_IN, self.mt5.DEAL_ENTRY_OUT):
+        history = self.mt5.history_deals_get(start, end)
+        if history is None:
+            raise MT5Error(f"could not read deal history: {self.mt5.last_error()}")
+        for d in history:
+            if magic is not None and d.magic != magic:
+                continue
+            if d.type not in trades or (d.entry != self.mt5.DEAL_ENTRY_IN and d.entry not in closing):
                 continue
             when = self._to_utc(d.time)
             if when < since:
@@ -337,13 +380,17 @@ class MT5Broker:
                     profit=net,
                     entry="in" if d.entry == self.mt5.DEAL_ENTRY_IN else "out",
                     comment=d.comment,
+                    magic=d.magic,
                 )
             )
         return sorted(out, key=lambda d: d.time)
 
     def open(self, request: OrderRequest, magic: int) -> OrderResult:
         spec = self.symbol(request.symbol)
-        tick = self.mt5.symbol_info_tick(request.symbol)
+        tick = self.tick(request.symbol)
+        problem = tick.problem(self.now())
+        if problem:
+            return OrderResult(False, message=problem)
         price = tick.ask if request.side == BUY else tick.bid
         order = {
             "action": self.mt5.TRADE_ACTION_DEAL,
@@ -363,7 +410,10 @@ class MT5Broker:
         return self._send(order, request.symbol)
 
     def close(self, position: Position, volume: float | None, magic: int, comment: str) -> OrderResult:
-        tick = self.mt5.symbol_info_tick(position.symbol)
+        tick = self.tick(position.symbol)
+        problem = tick.problem(self.now())
+        if problem:
+            return OrderResult(False, message=problem)
         order = {
             "action": self.mt5.TRADE_ACTION_DEAL,
             "symbol": position.symbol,

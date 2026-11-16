@@ -167,16 +167,18 @@ def test_no_trend_bars_without_a_trend_filter(tmp_path):
 
 def test_schedule_reasons_match_the_engine_wording():
     s = ScheduleParams(session="london_new_york")
-    assert s.closed(datetime(2026, 11, 10, 5, 38)) == "05:00 UTC outside 07-21"
-    assert s.closed(datetime(2026, 11, 10, 7, 0)) is None
+    assert s.closed(datetime(2026, 11, 10, 5, 38)) == "05:00 UTC outside 08-22"
+    assert s.closed(datetime(2026, 11, 10, 8, 0)) is None
+    assert s.closed(datetime(2026, 7, 7, 7, 0)) is None  # summer: London opens at 07:00 UTC
     assert s.closed(datetime(2026, 11, 14, 12)) == "weekend"
 
 
 def test_entries_resume_at_the_first_tradeable_bar_close():
     s = ScheduleParams(session="london_new_york")
     hour = timedelta(hours=1)
-    assert next_entry_time(s, datetime(2026, 11, 10, 6), hour) == datetime(2026, 11, 10, 7)
-    assert next_entry_time(s, datetime(2026, 11, 13, 21), hour) == datetime(2026, 11, 16, 7)  # Fri -> Mon
+    assert next_entry_time(s, datetime(2026, 11, 10, 6), hour) == datetime(2026, 11, 10, 8)
+    assert next_entry_time(s, datetime(2026, 11, 13, 22), hour) == datetime(2026, 11, 16, 8)  # Fri -> Mon
+    assert next_entry_time(s, datetime(2026, 7, 7, 6), hour) == datetime(2026, 7, 7, 7)
 
 
 # --- exact P/L ------------------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 
 import numpy as np
@@ -234,8 +235,27 @@ def test_dashboard_reports_every_setup_and_the_trend(cfg, broker, breakout_buys)
     json.dumps(state, allow_nan=False)
 
 
-def test_a_signal_from_another_setup_is_announced_once_with_its_plan(cfg, broker, breakout_buys):
+def test_signals_from_setups_not_on_screen_stay_on_their_tiles_by_default(cfg, broker, breakout_buys):
     inbox = Inbox()
+    monitor = primed(Monitor(cfg, broker, [SYMBOL], notifier=inbox), features())
+    for _ in range(3):
+        monitor.refresh()
+    assert inbox.sent == [] and monitor.snapshot()["activity"] == []
+    breakout = next(s for s in monitor.snapshot()["symbols"][0]["setups"] if s["name"] == "breakout")
+    assert breakout["action"] == "BUY"  # still visible on the dashboard
+    # the setup put on screen announces its own signal
+    assert monitor._apply_strategy("breakout")["ok"]
+    primed(monitor, features({"signal": 1, "raw_signal": 1}))
+    monitor.refresh()
+    (message,) = inbox.sent
+    assert message.startswith(f"BUY · {SYMBOL}\n") and inbox.kinds == ["signal"]
+
+
+def test_a_signal_from_another_setup_is_announced_once_with_its_plan_when_switched_on(
+    cfg, broker, breakout_buys
+):
+    inbox = Inbox()
+    cfg = replace(cfg, alerts=replace(cfg.alerts, other_setups=True))
     monitor = primed(Monitor(cfg, broker, [SYMBOL], notifier=inbox), features())
     for _ in range(3):
         monitor.refresh()

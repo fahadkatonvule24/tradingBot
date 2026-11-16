@@ -5,7 +5,8 @@ market turned against it? This module answers with the same closed-bar facts the
 counted only from the bar after the position opened, so nothing that was already true at the
 entry is reported as news:
 
-  signal     the watched setup gave an entry signal the other way and every filter passed it
+  signal     the watched setup gave an opposite signal passing its original strategy filters
+             (entry-quality checks do not suppress exits)
              (the bot closes its own trades on this: ``close_on_reverse``)
   structure  a bar closed beyond the prior ``breakout_period``-bar extreme, against the position
   average    the fast EMA crossed the slow EMA against the position
@@ -37,7 +38,7 @@ from tradebot.strategy import trend_columns
 
 WARN, EXIT = "warn", "exit"
 ORDER = ("signal", "failed", "structure", "average", "trend")
-COLUMNS = ("time", "close", "ema_fast", "ema_slow", "trend", "signal", "raw_signal",
+COLUMNS = ("time", "close", "ema_fast", "ema_slow", "trend", "signal", "exit_signal", "raw_signal",
            "range_high", "range_low", "failed_side", "failed_level")  # fmt: skip
 
 
@@ -87,7 +88,8 @@ class Watch:
             self._average, self._trend, self._seeded = average, trend, True
         self.bars += 1
 
-        if _whole(row, "signal") == -side:
+        signal_key = "exit_signal" if pd.notna(row.get("exit_signal")) else "signal"
+        if _whole(row, signal_key) == -side:
             signs["signal"] = Sign("signal", time)
         elif _whole(row, "raw_signal") == side:  # a fresh trigger in the position's favour
             signs.pop("signal", None)
@@ -171,6 +173,11 @@ def _text(
         else ("closed", "crossed", "turned", "failed", "passed")
     )
     if sign.key == "signal":
+        if p.use_signal_quality_filter:
+            return (
+                f"A {word} signal {passed} the strategy filters for an opposite-signal exit. "
+                "Entry-quality checks do not block this exit."
+            )
         return f"A {word} signal {passed} every filter. The bot closes its own trades on this."
     if sign.key == "failed":
         was = "above" if side > 0 else "below"

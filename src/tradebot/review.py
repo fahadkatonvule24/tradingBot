@@ -35,6 +35,9 @@ class ReviewedTrade:
     manual: bool
     exit: str
     """stop (the original or a trailed stop), target, or other."""
+    volume: float | None = None
+    entry: float | None = None
+    exit_price: float | None = None
 
     @property
     def r(self) -> float | None:
@@ -60,8 +63,15 @@ class Summary:
         return self.wins / self.trades * 100 if self.trades else 0.0
 
 
-def closed_trades(broker: Broker, magic: int, since: datetime) -> list[ReviewedTrade]:
-    """Positions opened and fully closed since ``since``, oldest first."""
+def closed_trades(
+    broker: Broker, magic: int | None, since: datetime, bot_magic: int | None = None
+) -> list[ReviewedTrade]:
+    """Positions opened and fully closed since ``since``, oldest first.
+
+    ``magic`` None reads every trade on the account. A trade is your own call when it was placed
+    from the dashboard as one ("manual" in its comment) or, given ``bot_magic``, by anything other
+    than the bot: the phone, the desktop terminal, another expert.
+    """
     by_position = defaultdict(list)
     for deal in broker.deals(since, magic):
         by_position[deal.position].append(deal)
@@ -89,12 +99,16 @@ def closed_trades(broker: Broker, magic: int, since: datetime) -> list[ReviewedT
                 closed=last.time,
                 pnl=sum(d.profit for d in deals),
                 risk_amount=risk,
-                manual="manual" in first.comment.lower(),
+                manual="manual" in first.comment.lower()
+                or (bot_magic is not None and first.magic != bot_magic),
                 exit="stop"
                 if how.startswith(("[sl", "stop", "trailing stop"))
                 else "target"
                 if how.startswith(("[tp", "target"))
                 else "other",
+                volume=sum(d.volume for d in entries),
+                entry=first.price,
+                exit_price=last.price,
             )
         )
     return sorted(out, key=lambda t: t.closed)

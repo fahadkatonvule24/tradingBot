@@ -21,6 +21,7 @@ from tradebot.broker.base import SymbolSpec, Tick
 from tradebot.config import ScheduleParams, StrategyParams, SymbolParams
 from tradebot.engine import Engine, Rejection, stop_distances
 from tradebot.indicators import rsi
+from tradebot.signal_quality import quality_checks
 from tradebot.strategy import BLOCK_LABELS, FILTERS, _near_fib, explain, trend_columns
 
 WORD = {1: "BUY", -1: "SELL"}
@@ -63,7 +64,7 @@ class Advice:
     side: int
     """Direction the plan and checks refer to; 0 when there is nothing to plan."""
     actionable: bool
-    bar_time: datetime
+    bar_time: datetime | None
     """Open time (UTC) of the last closed bar the advice is based on."""
     decision_at: datetime | None
     """When the forming bar closes: the next moment the advice can change."""
@@ -154,10 +155,29 @@ def advise(
     """``preview`` (optional) is the same features with the forming bar appended at the current price."""
     config = engine.config
     p = params.strategy
+    if features.empty:
+        return Advice(
+            symbol, "WAIT", "Not enough history", "No closed bars are available.", 0, False, None, None
+        )
     row = features.iloc[-1]
     bar = timedelta(minutes=config.bar_minutes)
     bar_time = pd.Timestamp(row["time"]).to_pydatetime()
     bar_close = bar_time + bar
+
+    if pd.isna(bar_time) or bar_close > now:
+        return Advice(
+            symbol,
+            "CLOSED",
+            "Waiting for a closed bar",
+            "The latest bar has not closed yet.",
+            0,
+            False,
+            bar_time,
+            None,
+        )
+    quote_problem = tick.problem(now)
+    if quote_problem:
+        return Advice(symbol, "CLOSED", "Waiting for a fresh quote", quote_problem, 0, False, bar_time, None)
 
     if now - bar_close > bar * config.schedule.max_bar_age_bars:
         return Advice(
@@ -165,7 +185,7 @@ def advise(
             f"The last {config.timeframe} bar closed at {bar_close:%a %H:%M} UTC; advice resumes with the next bar.",
             0, False, bar_time, None,
         )  # fmt: skip
-    if pd.isna(row["atr"]):
+    if not np.isfinite(row["atr"]) or row["atr"] <= 0:
         return Advice(symbol, "WAIT", "Not enough history", "Indicators are still warming up.", 0, False,
                       bar_time, bar_close + bar)  # fmt: skip
 
@@ -464,7 +484,50 @@ def filter_checks(features: pd.DataFrame, p: StrategyParams, side: int) -> list[
         checks.append(
             Check("Fibonacci level", near, ("near" if near else "not near") + " a 38/50/62% retracement")
         )
+    checks.extend(_quality_filter_checks(features, p, side))
     return checks
+
+
+def _quality_filter_checks(features: pd.DataFrame, p: StrategyParams, side: int) -> list[Check]:
+    """Describe the shared quality evaluator without reimplementing its entry decisions."""
+    results = quality_checks(features, p, side)
+    if not results:
+        return []
+    row = features.iloc[-1]
+
+    def measured(column: str, scale: float = 1.0, offset: float = 0.0) -> str:
+        value = float(row.get(column, float("nan"))) * scale + offset
+        return f"{value:.2f}" if np.isfinite(value) else "unavailable"
+
+    details = {
+        "quality_data": (
+            "Signal quality data",
+            "Valid closed-bar prices and finite historical baselines are required.",
+        ),
+        "quality_chop": (
+            "Directional efficiency",
+            f"{measured('quality_efficiency')} over the prior {p.quality_period} bars, "
+            f"needs at least {p.quality_min_efficiency:g}; lower values indicate chop.",
+        ),
+        "quality_candle": (
+            "Candle confirmation",
+            f"Body in the trade direction {measured('quality_body', side)} of the candle range "
+            f"(minimum {p.quality_min_body_ratio:g}); close position "
+            f"{measured('quality_close', side, 0 if side > 0 else 1)} "
+            f"toward the {'high' if side > 0 else 'low'} (minimum {p.quality_min_close_position:g}).",
+        ),
+        "quality_spike": (
+            "Price spike",
+            f"True range {measured('quality_range_atr')} prior-bar ATR, "
+            f"maximum {p.quality_max_range_atr:g}; includes gaps.",
+        ),
+        "quality_extension": (
+            "Entry extension",
+            f"Close {measured('quality_extension_atr', side)} prior-bar ATR beyond EMA {p.fast_ema} "
+            f"in the trade direction, maximum {p.quality_max_extension_atr:g}.",
+        ),
+    }
+    return [Check(details[key][0], bool(passes.iloc[-1]), details[key][1]) for key, passes in results]
 
 
 def next_trigger(

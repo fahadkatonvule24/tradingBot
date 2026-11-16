@@ -8,6 +8,8 @@ tradebot optimize --data data --folds 4 # walk-forward optimisation (out-of-samp
 tradebot journal --days 7               # summarise the trade journal
 tradebot plan [--out PLAN.md]           # the written trading plan, generated from the config
 tradebot review --days 30               # closed trades in R: the bot's signals and your own calls
+tradebot account [NAME EQUITY]          # your own accounts: the equity every size is worked out from
+tradebot news [--days 2]                # the economic calendar for your instruments, pulled from the feed
 """
 
 from __future__ import annotations
@@ -108,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
             )
 
     sub.add_parser("telegram", help="set up and test phone alerts through a Telegram bot")
+    whatsapp = sub.add_parser(
+        "whatsapp", help="set up and test phone alerts on WhatsApp (send only, through CallMeBot)"
+    )
+    whatsapp.add_argument(
+        "--sample", action="store_true", help="send a sample alert in the real format, marked as a sample"
+    )
 
     journal = sub.add_parser("journal", help="summarise the trade journal")
     journal.add_argument("--days", type=int, default=7)
@@ -121,6 +129,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     review = sub.add_parser("review", help="closed trades in R: the bot's signals against your own calls")
     review.add_argument("--days", type=int, default=30)
+    review.add_argument("--account", help="review the trades you logged for this account of yours")
+
+    news = sub.add_parser("news", help="download the week's economic calendar and list what is coming")
+    news.add_argument("--days", type=int, default=2, help="how far ahead to list (default: %(default)s)")
+    news.add_argument("--all", action="store_true", help="include low-impact events")
+
+    account = sub.add_parser(
+        "account", help="your own accounts: type in the equity and every size is worked out from it"
+    )
+    account.add_argument("name", nargs="?", help="account name, for example the broker's")
+    account.add_argument("equity", nargs="?", type=float, help="its equity, in the terminal's currency")
+    account.add_argument("--min-lot", type=float, help="smallest lot this broker accepts")
+    account.add_argument("--lot-step", type=float, help="lot increment at this broker")
+    account.add_argument("--leverage", type=float, help="the N of 1:N at this broker: margin is then checked")
+    account.add_argument("--use", action="store_true", help="work everything out for this account")
+    account.add_argument("--mt5", action="store_true", help="go back to the MetaTrader 5 account")
+    account.add_argument("--remove", action="store_true", help="remove this account")
     return parser
 
 
@@ -167,8 +192,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         config.validate()
         handler = {
             "check": cmd_check, "run": cmd_run, "ui": cmd_ui, "fetch": cmd_fetch, "backtest": cmd_backtest,
-            "optimize": cmd_optimize, "journal": cmd_journal, "telegram": cmd_telegram,
-            "plan": cmd_plan, "review": cmd_review,
+            "optimize": cmd_optimize, "journal": cmd_journal, "telegram": cmd_telegram, "whatsapp": cmd_whatsapp,
+            "plan": cmd_plan, "review": cmd_review, "account": cmd_account, "news": cmd_news,
         }[args.command]  # fmt: skip
         return handler(config, args)
     except (ConfigError, FileNotFoundError, ValueError) as exc:
@@ -219,7 +244,7 @@ def cmd_check(config: BotConfig, args: argparse.Namespace) -> int:
         )
         kind = "[bold red]REAL MONEY[/]" if account.is_real else "[green]demo[/]"
         console.print(Panel.fit(
-            f"Server [bold]{escape(broker.server_name())}[/] · {kind} account · {account.currency} · leverage 1:{account.leverage}\n"
+            f"Server [bold]{escape(broker.server_name())}[/] · {kind} account · {account.currency} · leverage 1:{'unlimited' if account.leverage >= 1_000_000 else account.leverage}\n"
             f"Balance {account.balance:,.2f} · equity {account.equity:,.2f}\n"
             f"Server time {escape(broker.server_clock.describe(broker.now()))}\n"
             f"Orders with --live: {'[bold green]would be sent[/]' if gate.execute else '[yellow]blocked[/] (' + escape(gate.reason) + ')'}",
@@ -262,9 +287,14 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
         else:
             log.info("DRY RUN: %s. Signals are logged and journalled; no orders are sent.", gate.reason)
         engine = Engine(config, broker, execute=gate.execute, journal=journal, live=True)
-        notifier = _notifier()
+        notifier = _notifier(config)
         try:
+            feed = _news_feed(config)
+            if feed and args.once:
+                _refresh_news(feed)  # one cycle: download now rather than in the background
             LiveRunner(config, broker, engine, symbols, notifier=notifier).run(once=args.once)
+            if feed:
+                feed.stop()
         finally:
             notifier.close()
     finally:
@@ -273,14 +303,97 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def _notifier():
-    from tradebot.notify import Notifier
+def _notifier(config: BotConfig):
+    from tradebot.notify import Alerts
 
-    notifier = Notifier.from_env()
+    alerts = Alerts.from_env(whatsapp_level=config.alerts.whatsapp)
     log.info(
-        "Telegram alerts: %s", "on" if notifier.enabled else "off (run `tradebot telegram` to set them up)"
+        "Phone alerts: %s",
+        " and ".join(alerts.names)
+        if alerts.enabled
+        else "off (run `tradebot whatsapp` or `tradebot telegram` to set them up)",
     )
-    return notifier
+    return alerts
+
+
+def _news_feed(config: BotConfig, start: bool = True):
+    """The week's calendar, kept up to date in the background, or None when the feed is off."""
+    from tradebot.news import NewsFeed
+
+    if not config.schedule.news_feed:
+        return None
+    feed = NewsFeed(config.schedule.news_feed, config.schedule.news_feed_file)
+    if start:
+        feed.start()
+    return feed
+
+
+def _refresh_news(feed) -> int | None:
+    from tradebot.news import NewsError
+
+    try:
+        return feed.refresh()
+    except NewsError as exc:
+        log.warning("news calendar not updated: %s", exc)
+        return None
+
+
+def _currencies_of(symbols) -> set[str]:
+    """EURUSD -> EUR and USD, XAUUSD -> XAU and USD, without asking a terminal."""
+    out = set()
+    for symbol in symbols:
+        name = symbol.upper()
+        if len(name) >= 6 and name[:6].isalpha():
+            out |= {name[:3], name[3:6]}
+    return out
+
+
+def cmd_news(config: BotConfig, args: argparse.Namespace) -> int:
+    from datetime import timedelta
+
+    from tradebot.news import NewsCalendar
+
+    schedule = config.schedule
+    feed = _news_feed(config, start=False)
+    if feed is not None:
+        count = _refresh_news(feed)
+        if count is not None:
+            console.print(
+                f"[grey50]Downloaded {count} events for this week into {schedule.news_feed_file}.[/]"
+            )
+    else:
+        console.print(
+            "[yellow]The news feed is off[/] (schedule.news_feed is empty): only your own file is used."
+        )
+    calendar = NewsCalendar(schedule.news_file, schedule.news_feed_file if schedule.news_feed else None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    currencies = _currencies_of(config.symbols)
+    impacts = ("high", "medium", "low") if args.all else ("high", "medium")
+    events = calendar.upcoming(now, currencies, hours=args.days * 24, impacts=impacts)
+    if not events:
+        console.print(f"No {'' if args.all else 'high- or medium-impact '}news for {', '.join(sorted(currencies))} "
+                      f"in the next {args.days} day{'' if args.days == 1 else 's'}.")  # fmt: skip
+        return 0
+    table = Table(box=None, header_style="bold grey50", pad_edge=False)
+    for col in ("When (UTC)", "In", "Currency", "Impact", "Event", "Forecast", "Previous"):
+        table.add_column(col, justify="right" if col in ("In", "Forecast", "Previous") else "left")
+    for e in events:
+        left = e.time - now
+        hours, minutes = divmod(int(left.total_seconds() // 60), 60)
+        when = (
+            "now"
+            if abs(left) < timedelta(minutes=1)
+            else ("passed" if left < timedelta(0) else f"{hours}h {minutes:02d}m")
+        )
+        style = "bold red" if e.impact in ("high", "red") else "yellow" if e.impact == "medium" else "grey50"
+        table.add_row(f"{e.time:%a %d %b %H:%M}", when, e.currency, f"[{style}]{e.impact}[/]", escape(e.title),
+                      escape(e.forecast), escape(e.previous))  # fmt: skip
+    console.print(table)
+    console.print(
+        f"[grey50]New entries pause from {schedule.news_before_minutes} min before to {schedule.news_after_minutes} "
+        f"min after each high-impact event for an instrument's currencies.[/]"
+    )
+    return 0
 
 
 def cmd_telegram(config: BotConfig, args: argparse.Namespace) -> int:
@@ -325,6 +438,107 @@ def cmd_telegram(config: BotConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+SAMPLE_ALERT = """SAMPLE ALERT · not a signal, do not trade it
+This is the GBPUSD sell of 16 Nov 2026, 07:00 UTC, in the format real alerts use:
+
+SELL · GBPUSD
+Sell GBPUSD now. 20-bar low breakout · RSI 31.5 · ADX 29.8 · H4+D1 trend down. Valid until the H1 bar closes at 08:00 UTC.
+SELL plan: entry ~1.31971 · SL 1.32140 · TP 1.31633 · 1.47 lots · risk 248.43 · target 496.86 · sized for MT5 MetaQuotes-Demo, equity 100,000 USD
+Record: Breakout on GBPUSD H1 won 44% of 416 trades since 2016, average +0.05R. About 56 in 100 signals like this one lose, and nothing measured on the signal bar picks them out.
+
+(That sell hit its stop at 08:40 UTC.)"""
+"""What `tradebot whatsapp --sample` sends: a real alert from the activity log, with the size the
+demo account showed and the setup's record on GBPUSD H1, labelled so it cannot pass for advice."""
+
+
+CALLMEBOT_PAGE = "https://www.callmebot.com/blog/free-api-whatsapp-messages/"
+
+
+def cmd_whatsapp(config: BotConfig, args: argparse.Namespace) -> int:
+    """Guide the WhatsApp setup and send a test message to each number; keys are never printed."""
+    import os
+
+    from tradebot.notify import (
+        PHONE_ENV,
+        WHATSAPP_KEY_ENV,
+        WHATSAPP_MAX_CHARS,
+        WhatsAppError,
+        chunks,
+        masked,
+        normalize_phone,
+        whatsapp_call,
+        whatsapp_recipients,
+    )
+
+    phone, key = os.environ.get(PHONE_ENV), os.environ.get(WHATSAPP_KEY_ENV)
+    if not phone or not key:
+        console.print(
+            "[bold]WhatsApp alerts are not set up yet.[/] They go through CallMeBot, a free service for\n"
+            "messages to your own number. It only sends: commands such as /plan need Telegram.\n"
+            f"1. Follow the steps on {CALLMEBOT_PAGE}\n"
+            "   (save their number as a contact and send it the activation message from WhatsApp).\n"
+            "   It replies with your API key.\n"
+            "2. Add these two lines to a file named .env in this folder:\n"
+            f"     {PHONE_ENV}=+256700123456     [grey50]# your number, with the country code[/]\n"
+            f"     {WHATSAPP_KEY_ENV}=<the key>\n"
+            "3. Run [bold]tradebot whatsapp[/] again for a test message.\n"
+            "[grey50]The alert text passes through CallMeBot's server on its way to you.[/]"
+        )
+        return 1
+    pairs = whatsapp_recipients(dict(os.environ))
+    if not pairs:
+        console.print(
+            f"[bold red]error:[/] {PHONE_ENV} and {WHATSAPP_KEY_ENV} need the same number of entries: "
+            "one key per number, comma-separated, in the same order."
+        )
+        return 1
+    failed = 0
+    for raw, key in pairs:
+        number = normalize_phone(raw)
+        if not number:
+            console.print(
+                f"[bold red]error:[/] {escape(raw)} in {PHONE_ENV} needs the full international number, "
+                "starting with + (for example +256700123456)."
+            )
+            failed += 1
+            continue
+        text = (
+            SAMPLE_ALERT
+            if getattr(args, "sample", False)
+            else (f"tradebot {__version__}: test message. WhatsApp alerts are set up.")
+        )
+        try:
+            replies = [whatsapp_call(number, key, part) for part in chunks(text, WHATSAPP_MAX_CHARS)]
+        except WhatsAppError as exc:
+            console.print(f"[bold red]error:[/] {masked(number)}: {escape(str(exc))}")
+            failed += 1
+            continue
+        said = escape(" | ".join(r for r in replies if r)[:300].replace(number[1:], masked(number)[1:]))
+        what = "a sample alert" if getattr(args, "sample", False) else "a test message"
+        if all("queued" in (r or "").lower() for r in replies):
+            console.print(
+                f"[green]CallMeBot queued[/] {what} for {masked(number)}. [grey50]Its reply: {said}[/]"
+            )
+        else:
+            console.print(
+                f"[bold red]error:[/] CallMeBot did not say it queued {what} for {masked(number)}. "
+                f"Its reply: {said or '(empty)'}"
+            )
+            failed += 1
+    if failed:
+        return 1
+    level = config.alerts.whatsapp
+    console.print(
+        "Queued is not delivered: the message comes from CallMeBot's own number, in the chat where it sent "
+        "your API key, usually within a minute.\n"
+        f"If the test {'message reaches' if len(pairs) == 1 else 'messages reach'} WhatsApp, `tradebot ui` and "
+        f"`tradebot run` will send alerts there ({'all of them' if level == 'all' else 'the important ones'}: "
+        "alerts.whatsapp in the config); restart a dashboard that is already running. If nothing arrives "
+        "within a few minutes, check the key."
+    )
+    return 0
+
+
 DEFAULT_PORT = 8765
 PORT_TRIES = 10
 
@@ -362,13 +576,21 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     import threading
     import webbrowser
 
+    from tradebot.book import Book
     from tradebot.ui.monitor import Monitor
 
     broker, _, symbols = _connect(config)
-    notifier = _notifier()
+    notifier = _notifier(config)
+    book = Book(config.journal)
     monitor = Monitor(
-        config, broker, symbols, live_flag=args.live, journal_path=config.journal, notifier=notifier
-    )
+        config, broker, symbols, live_flag=args.live, journal_path=config.journal, notifier=notifier,
+        book=book,
+    )  # fmt: skip
+    if book.active():
+        console.print(
+            f"Sizes and loss limits are worked out for your account [bold]{escape(book.active())}[/]; "
+            f"orders are placed by you at your broker."
+        )
     names = {broker_name: wanted for wanted in config.symbols if (broker_name := broker.resolve(wanted))}
     worker = threading.Thread(target=monitor.run, name="mt5", daemon=True)
     try:
@@ -377,6 +599,8 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
         broker.shutdown()
         raise
     worker.start()
+    notifier.listen(monitor.command)  # /calc, /news, /status ... from your own Telegram chat
+    monitor.news_feed = _news_feed(config)
     threading.Thread(
         target=monitor.load_track_record, args=(args.data, names), name="track-record", daemon=True
     ).start()
@@ -393,9 +617,62 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     finally:
         server.server_close()
         monitor.stop()
+        monitor.tracks.close()  # a backtest still measuring for the record is not left behind
         worker.join(timeout=10)
         notifier.close()
+        book.close()
+        if monitor.news_feed:
+            monitor.news_feed.stop()
         broker.shutdown()
+    return 0
+
+
+def cmd_account(config: BotConfig, args: argparse.Namespace) -> int:
+    """Your own accounts, kept in the journal file. No terminal is needed for this."""
+    from tradebot.book import Book
+
+    book = Book(config.journal)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    try:
+        if args.mt5:
+            book.use(None)
+        elif args.name and args.remove:
+            book.remove_account(args.name)
+        elif args.name and args.equity is not None:
+            # The balance is what moves when a logged trade closes. With trades open, set the
+            # equity from the dashboard or Telegram instead: they take the floating result out.
+            saved = book.save_account(args.name, args.equity, now, args.min_lot, args.lot_step, args.leverage)
+            if args.use:  # saving never switches the account in use by itself
+                book.use(saved.name)
+        elif args.name and args.use:
+            book.use(args.name)
+        elif args.name:
+            raise ValueError("give the equity too, for example: tradebot account Exness 500")
+        accounts, active = book.accounts(), book.active()
+        if not accounts:
+            console.print(
+                "No accounts yet. Add one with its equity: [bold]tradebot account Exness 500[/]\n"
+                "The dashboard then sizes every trade from that figure instead of the terminal's account."
+            )
+            return 0
+        table = Table(box=None, header_style="bold grey50", pad_edge=False)
+        for col in ("", "Account", "Balance", "Open trades", "Min lot", "Lot step", "Leverage", "Set"):
+            table.add_column(col, justify="right" if col in ("Balance", "Open trades") else "left")
+        for a in accounts:
+            table.add_row(
+                "[green]in use[/]" if a.name == active else "", escape(a.name), f"{a.balance:,.2f}",
+                str(len(book.trades(a.name, open_only=True))),
+                "terminal's" if a.min_lot is None else f"{a.min_lot:g}",
+                "terminal's" if a.lot_step is None else f"{a.lot_step:g}",
+                "not set" if a.leverage is None else f"1:{a.leverage:g}", f"{a.updated:%Y-%m-%d %H:%M} UTC",
+            )  # fmt: skip
+        console.print(table)
+        if active is None:
+            console.print(
+                "[grey50]The MetaTrader 5 account is in use. `tradebot account NAME --use` switches.[/]"
+            )
+    finally:
+        book.close()
     return 0
 
 
@@ -591,11 +868,25 @@ def cmd_review(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.review import closed_trades, summarize, verdict
 
     broker, _, _ = _connect(config)
+    book = None
     try:
         now = broker.now()
         since = now - timedelta(days=args.days)
-        trades = closed_trades(broker, config.magic, since)
+        if args.account:  # the trades you logged for one of your own accounts
+            from tradebot.book import Book, BookBroker
+
+            book = Book(config.journal)
+            if book.account(args.account) is None:
+                raise ValueError(f"no account named {args.account!r}: see `tradebot account`")
+            own = BookBroker(broker, book, config.magic)
+            with own.using(book.account(args.account).name):
+                trades = closed_trades(own, config.magic, since)
+        else:
+            scope = None if config.risk.account_trades else config.magic  # phone trades count too
+            trades = closed_trades(broker, scope, since, bot_magic=config.magic)
     finally:
+        if book:
+            book.close()
         broker.shutdown()
     overall = summarize(trades)
     figures = f"{overall.trades} closed trades · {overall.win_rate:.1f}% winners · net {overall.net:+,.2f}\n"

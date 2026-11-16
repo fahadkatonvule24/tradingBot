@@ -402,7 +402,8 @@ def server():
 
 
 def call(srv, method, path, body=None, headers=None):
-    conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=5)
+    # Allow scheduling delays when the full Windows suite serves the larger dashboard page.
+    conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=15)
     payload = json.dumps(body).encode() if body is not None else None
     base = {"Host": f"127.0.0.1:{srv.port}", "Content-Type": "application/json"}
     conn.request(method, path, body=payload, headers={**base, **(headers or {})})

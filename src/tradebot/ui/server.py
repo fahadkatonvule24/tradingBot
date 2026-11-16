@@ -103,7 +103,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return
         path = urlsplit(self.path).path
-        if path not in ("/api/order", "/api/timeframe", "/api/strategy"):
+        if path not in ("/api/order", "/api/timeframe", "/api/strategy", "/api/book", "/api/calc"):
             return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         origin = self.headers.get("Origin")
         if origin and origin.removeprefix("http://") not in self.server.allowed_hosts():
@@ -112,6 +112,24 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(
                 HTTPStatus.FORBIDDEN, {"ok": False, "message": "missing or wrong session token"}
             )
+        if path == "/api/calc":  # a calculation: reads prices and the account, changes nothing
+            try:
+                body = json.loads(raw or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("expected an object")
+            except ValueError as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": f"bad request: {exc}"})
+            result = self.server.monitor.calc(body)
+            return self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST, result)
+        if path == "/api/book":  # your accounts and logged trades: nothing here reaches a broker
+            try:
+                body = json.loads(raw or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("expected an object")
+            except ValueError as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": f"bad request: {exc}"})
+            result = self.server.monitor.book_op(body)
+            return self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST, result)
         if path in ("/api/timeframe", "/api/strategy"):
             key = path.rsplit("/", 1)[1]
             try:

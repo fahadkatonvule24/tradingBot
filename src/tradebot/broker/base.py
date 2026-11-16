@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import Protocol
 
 import pandas as pd
@@ -34,14 +35,21 @@ class SymbolSpec:
     currency_profit: str = ""
 
     def round_price(self, price: float) -> float:
-        return round(price, self.digits)
+        if not math.isfinite(price) or not math.isfinite(self.tick_size) or self.tick_size <= 0:
+            raise ValueError("price and tick size must be finite, with a positive tick size")
+        tick = Decimal(str(self.tick_size))
+        rounded = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_HALF_EVEN) * tick
+        return round(float(rounded), self.digits)
 
     def normalize_volume(self, volume: float) -> float:
         """Round *down* to the volume step. Never rounds up: that would exceed the risk budget."""
-        steps = math.floor(volume / self.volume_step + 1e-9)
-        stepped = steps * self.volume_step
-        decimals = max(0, -math.floor(math.log10(self.volume_step))) if self.volume_step < 1 else 0
-        return round(min(stepped, self.volume_max), decimals)
+        if any(not math.isfinite(v) or v <= 0 for v in (volume, self.volume_step, self.volume_max)):
+            return 0.0
+        step = Decimal(str(self.volume_step))
+        limit = Decimal(str(min(volume, self.volume_max)))
+        # Absorb float division noise, but retain the exact step (including 0.25 or 0.05 lots).
+        steps = (limit / step + Decimal("1e-9")).to_integral_value(rounding=ROUND_FLOOR)
+        return float(steps * step)
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,27 @@ class Tick:
     @property
     def spread(self) -> float:
         return self.ask - self.bid
+
+    def problem(self, now: datetime) -> str | None:
+        """Reject invalid prices or a stale quote before it can drive an order."""
+        if not all(math.isfinite(v) and v > 0 for v in (self.bid, self.ask)) or self.ask < self.bid:
+            return "quote has invalid bid/ask prices"
+        try:
+            quoted, current = pd.Timestamp(self.time), pd.Timestamp(now)
+            if pd.isna(quoted) or pd.isna(current):
+                return "quote timestamp is unavailable"
+            if quoted.tzinfo is not None:
+                quoted = quoted.tz_convert("UTC").tz_localize(None)
+            if current.tzinfo is not None:
+                current = current.tz_convert("UTC").tz_localize(None)
+            age = (current - quoted).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return "quote timestamp is invalid"
+        if age < -60:
+            return "quote timestamp is more than 60 seconds in the future"
+        if age > 120:
+            return "quote is stale (more than 120 seconds old)"
+        return None
 
 
 @dataclass
@@ -106,6 +135,8 @@ class Deal:
     """Net of commission, swap and fees."""
     entry: str  # "in" or "out"
     comment: str = ""
+    magic: int = 0
+    """The expert's id: the bot's own magic number, 0 for a trade placed by hand (phone or desktop)."""
 
 
 @dataclass(frozen=True)
@@ -137,7 +168,7 @@ class Broker(Protocol):
     def tick(self, name: str) -> Tick: ...
     def bars(self, name: str, timeframe: str, count: int) -> pd.DataFrame: ...
     def positions(self, magic: int | None) -> list[Position]: ...
-    def deals(self, since: datetime, magic: int) -> list[Deal]: ...
+    def deals(self, since: datetime, magic: int | None) -> list[Deal]: ...
     def open(self, request: OrderRequest, magic: int) -> OrderResult: ...
     def close(self, position: Position, volume: float | None, magic: int, comment: str) -> OrderResult: ...
     def modify(self, position: Position, sl: float, tp: float, magic: int) -> OrderResult: ...

@@ -22,17 +22,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from tradebot import __version__
+from tradebot import __version__, analysis, market
 from tradebot.advisor import WORD, Advice, advise, next_trigger, pip_size, recent_signals, watch_side
+from tradebot.book import REFUSAL, Book, BookBroker, BookError
 from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
 from tradebot.config import STRATEGIES, BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
-from tradebot.live import BAR_COLUMNS, Link, fetch_frames, preview_features, trading_gate
+from tradebot.live import BAR_COLUMNS, Gate, Link, fetch_frames, preview_features, trading_gate
 from tradebot.plan import SETUP_LABELS
 from tradebot.reversal import EXIT, Alerts, Reversal, Watch, assess, holding_text, watch_position
 from tradebot.strategy import BLOCK_LABELS, compute_signals, explain
 from tradebot.trend import TrendAlerts, describe
+from tradebot.ui.desk import Desk, calc_request, market_view
+from tradebot.ui.track import NoRecord, TrackRecords
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +66,15 @@ class _Order:
     result: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class _Task:
+    """Something a web or Telegram thread wants done on the MT5 thread."""
+
+    fn: Any
+    done: threading.Event = field(default_factory=threading.Event)
+    result: Any = None
+
+
 class Monitor:
     def __init__(
         self,
@@ -74,8 +86,19 @@ class Monitor:
         journal_path: str | Path | None = None,
         interval: float = 1.0,
         notifier: Any = None,
+        book: Book | None = None,
     ) -> None:
+        if book is not None and not isinstance(broker, BookBroker):
+            broker = BookBroker(broker, book, config.magic)  # your own accounts, when one is selected
         self.config, self.broker, self.symbols = config, broker, symbols
+        self.currency = "USD"
+        self.market_cache: tuple[Any, dict[str, Any]] | None = None
+        self.levels_cache: dict[str, tuple[float, Any]] = {}
+        self.daily_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+        self._swaps: dict[str, tuple[float, Any]] = {}
+        self.news_seen: set[tuple[Any, ...]] = set()
+        self.news_feed: Any = None
+        """The background download of the week's calendar (``tradebot ui`` sets it), for its status."""
         self.live_flag = live_flag
         self.interval = interval
         self.engine = Engine(config, broker, execute=False, live=True)  # guards and sizing only
@@ -92,6 +115,7 @@ class Monitor:
         self.notifier = notifier
         self._previews: dict[str, tuple[float, pd.DataFrame | None]] = {}
         self._track_args: tuple[Any, Any] | None = None
+        self.tracks = TrackRecords()
         self._track_pending = False
         self._htf: dict[str, dict[str, pd.DataFrame]] = {}
         self._forming_seen: set[tuple[str, Any, Any]] = set()
@@ -104,15 +128,200 @@ class Monitor:
         self._trend_alerts = TrendAlerts()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
+        self._analysis_seen: dict[str, tuple[Any, ...]] = {}
+        self._analysis_changes: dict[str, dict[str, Any]] = {}
         self._orders: queue.Queue[_Order] = queue.Queue()
         self._stop = threading.Event()
         self.activity: deque[dict[str, Any]] = deque(maxlen=50)
+        self.desk = Desk(self, book) if book is not None else None
 
     # --- read side (web server threads) -------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return self._state
+
+    def call(self, fn: Any, timeout: float = 20.0) -> Any:
+        """Run ``fn`` on the MT5 thread, between refreshes, and hand back what it returns."""
+        task = _Task(fn)
+        self._orders.put(task)
+        if not task.done.wait(timeout):
+            return {"ok": False, "message": "timed out waiting for the MT5 thread"}
+        return task.result
+
+    def calc(self, body: dict[str, Any]) -> dict[str, Any]:
+        """The position-size, margin and leverage calculator, on the MT5 thread."""
+
+        def run() -> dict[str, Any]:
+            try:
+                return {"ok": True, "result": clean(calc_request(self, body))}
+            except (BookError, ValueError, KeyError) as exc:
+                return {"ok": False, "message": str(exc)}
+
+        return self.call(run)
+
+    def book_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        """A change to your accounts or logged trades, requested by the page."""
+        if self.desk is None:
+            return {"ok": False, "message": "the account book is not available in this session"}
+        return self.call(lambda: self.desk.op(body))
+
+    def command(self, text: str) -> str:
+        """A command typed on the phone (Telegram). Returns the reply, or "" for anything else."""
+        words = text.strip().split()
+        if words and words[0].split("@")[0].lower() in ("/analysis", "/analyse"):
+            if len(words) != 2:
+                return "Use: /analysis SYMBOL"
+            reply = self.call(lambda: self.analysis_text(self.match_symbol(words[1])), timeout=30.0)
+            return reply if isinstance(reply, str) else str(reply.get("message", ""))
+        if self.desk is None:
+            return ""
+        reply = self.call(lambda: self.desk.command(text), timeout=30.0)
+        return reply if isinstance(reply, str) else str(reply.get("message", ""))
+
+    # --- helpers for the desk (MT5 thread) ----------------------------------------------------
+
+    def features(self, symbol: str) -> pd.DataFrame | None:
+        return self._features.get(symbol)
+
+    def spec(self, symbol: str) -> SymbolSpec | None:
+        cached = self._specs.get(symbol)
+        return cached[0] if cached else None
+
+    def htf(self, symbol: str) -> dict[str, pd.DataFrame]:
+        return self._htf.get(symbol) or {}
+
+    def swap(self, symbol: str) -> Any:
+        """Overnight financing per lot at the terminal's broker, read every few minutes."""
+        cached = self._swaps.get(symbol)
+        if cached is None or time.monotonic() - cached[0] > SPEC_REFRESH.total_seconds():
+            read = getattr(self.broker, "swap", None)
+            try:
+                value = read(symbol) if read else None
+            except Exception:
+                log.debug("%s: swap not read", symbol, exc_info=True)
+                value = None
+            cached = (time.monotonic(), value)
+            self._swaps[symbol] = cached
+        return cached[1]
+
+    def match_symbol(self, text: str) -> str:
+        """A watched symbol from what a person typed: EURUSD finds EURUSDm."""
+        wanted = str(text).strip().upper()
+        for exact in (True, False):
+            for symbol in self.symbols:
+                if wanted and (symbol.upper() == wanted if exact else symbol.upper().startswith(wanted)):
+                    return symbol
+        raise ValueError(f"{text!r} is not on the watchlist ({', '.join(self.symbols)})")
+
+    def advice_now(self, symbol: str) -> Advice:
+        """Fresh advice at the live quote, for whichever account the broker is answering for."""
+        now = self.broker.now()
+        engine = Engine(self.config, self.broker, execute=False, live=True)
+        return advise(
+            engine, symbol, self.broker.symbol(symbol), self.config.for_symbol(symbol),
+            self._features_for(symbol, now), self.broker.tick(symbol), now,
+        )  # fmt: skip
+
+    def book_changed(self) -> None:
+        """The selected account or its trades changed: drop what was worked out from the old ones."""
+        self.engine = Engine(self.config, self.broker, execute=False, live=True)
+        for cache in (self._engines, self._watches, self._specs):
+            cache.clear()
+
+    def note_book(self, symbol: str, action: str, text: str, send: bool = False) -> None:
+        self.activity.append({"time": self.broker.now(), "symbol": symbol, "action": action, "text": text})
+        log.info("%s %s", symbol, text)
+        if send:
+            self._send(f"{action} · {symbol}\n{text}", "position")
+
+    def status_text(self) -> str:
+        r, a = self.engine.risk_status(self.broker.now()), self.broker.account()
+        name = (self.desk.broker.account_name() if self.desk else None) or "MetaTrader 5 account"
+        return "\n".join([
+            f"{name}: equity {a.equity:,.2f} {a.currency}",
+            f"Today {r.day_percent:+.2f}% (stop at -{r.daily_limit:g}%) · this week {r.week_percent:+.2f}% "
+            f"(stop at -{r.weekly_limit:g}%)",
+            f"Open risk {f'{r.open_risk_percent:.2f}%' if r.open_risk_percent is not None else 'unknown'} "
+            f"of {r.open_risk_limit:g}% · {r.positions}/{r.positions_limit} "
+            f"positions · {r.losing_streak} losses in a row · {r.entries_today}/{r.entries_limit} entries today",
+            f"New entries are stopped: {r.blocked}" if r.blocked else "No limit is hit.",
+        ])  # fmt: skip
+
+    def analysis_text(self, symbol: str) -> str:
+        """Read-only assessment, rechecking freshness when a phone requests it."""
+        state = self.snapshot()
+        if state.get("error"):
+            return f"{symbol}: analysis unavailable. {state['error']}"
+        row = next((r for r in state.get("symbols", []) if r["symbol"] == symbol), None)
+        if row is None or row.get("error"):
+            return f"{symbol}: analysis is not available yet."
+        context = (state.get("market") or {}).get("symbols", {}).get(symbol, {})
+        found = self._analysis_for(row, context, self.broker.now())
+        source = (state.get("account") or {}).get("server") or "connected price feed"
+        return f"{analysis.format_text(symbol, found)}\nSource: {source}."
+
+    def plan_text(self, symbol: str, side: int) -> str:
+        """The priced plan for one side, with the size at each of your accounts."""
+        advice = self.advice_now(symbol)
+        plan = advice.plans.get("buy" if side > 0 else "sell")
+        if plan is None:
+            return f"{symbol}: {advice.headline}. {advice.detail}"
+        spec, held = self.broker.symbol(symbol), self.broker.positions(None)
+        if self.desk:
+            row = self._features_for(symbol, self.broker.now()).iloc[-1]
+            self.desk.sizes(symbol, self.config.for_symbol(symbol), row, self.broker.tick(symbol))
+        signal = advice.actionable and advice.side == side
+        shown = replace(advice, action=WORD[side], headline="The bot is signalling this" if signal
+                        else "Your call, not a bot signal", detail="Priced at the live quote")  # fmt: skip
+        lines = self._alert_text(symbol, shown, spec, plan).split("\n")
+        if not plan.volume and len(lines) == 2:
+            lines.append(f"No size: {plan.rejected}")
+        if advice.blocker:
+            lines.append(f"Entries are paused: {advice.blocker}")
+        specs = {s: self.broker.symbol(s) for s in {symbol, *(p.symbol for p in held)}}
+        lines.append(market.overlap(symbol, side, specs, held))
+        return "\n".join(line for line in lines if line)
+
+    def market_text(self) -> str:
+        view = self.snapshot().get("market")
+        if not view:
+            return "The market view is not ready yet."
+        lines = [
+            "Sessions: "
+            + ", ".join(f"{s['name']} {'open' if s['open'] else 'closed'}" for s in view["sessions"])
+        ]
+        if view["strength"]:
+            lines.append("Strength, last day (last week), in ATR-scaled units:")
+            lines += [
+                f"  {r['asset']} {r['day']:+.1f}" + ("" if r["week"] is None else f" ({r['week']:+.1f})")
+                for r in view["strength"]
+            ]
+        if view["exposure"]:
+            lines.append("Your exposure:")
+            lines += [
+                f"  {'long' if r['amount'] > 0 else 'short'} {r['asset']} {abs(r['amount']):,.0f} {self.currency}"
+                + ("" if r["percent"] is None else f" ({abs(r['percent']):.0f}% of equity)")
+                for r in view["exposure"]
+            ]
+        else:
+            lines.append("No open positions, so no exposure.")
+        return "\n".join([*lines, *view["warnings"]])
+
+    def levels_text(self, symbol: str) -> str:
+        view = (self.snapshot().get("market") or {}).get("symbols", {}).get(symbol) or {}
+        found, spec = view.get("levels"), self.broker.symbol(symbol)
+        if not found:
+            return f"{symbol}: no daily levels yet."
+        d, pip = spec.digits, pip_size(spec)
+        lines = [f"{symbol} levels, from the top:"]
+        lines += [f"  {r['name']} {r['price']:.{d}f} ({r['away_atr']:+.1f} ATR)" for r in found["levels"]]
+        if found["range_used"] is not None:
+            lines.append(
+                f"Today's range is {found['day_range'] / pip:.0f} {'pips' if d in (3, 5) else 'points'}: "
+                f"{found['range_used']:.0f}% of the {found['adr_days']}-day average."
+            )
+        return "\n".join(lines)
 
     def set_timeframe(self, timeframe: str, timeout: float = 30.0) -> dict[str, Any]:
         """Switch the trading timeframe (handled on the MT5 thread, between refreshes)."""
@@ -150,11 +359,18 @@ class Monitor:
             self._others,
             self._engines,
             self._trends,
+            self._analysis_seen,
+            self._analysis_changes,
         ):
             cache.clear()
-        self._forming_seen.clear()
-        self.track_record = {}
-        if self._track_args:
+        # _forming_seen and _signal_seen survive a switch: their keys name the setup and the
+        # timeframe, so switching away and back does not announce the same trigger again.
+        self.market_cache = None
+        self.levels_cache.clear()
+        self.daily_cache.clear()
+        cached = self.tracks.cached(config)  # a setup seen before shows its record at once
+        self.track_record = cached or {}
+        if self._track_args and cached is None:
             self._track_pending = True
             threading.Thread(
                 target=self.load_track_record, args=self._track_args, name="track-record", daemon=True
@@ -248,7 +464,13 @@ class Monitor:
                         )
                     except queue.Empty:
                         break
-                    if isinstance(order, _Switch):
+                    if isinstance(order, _Task):
+                        try:
+                            order.result = order.fn()
+                        except Exception as exc:
+                            log.exception("request failed")
+                            order.result = {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+                    elif isinstance(order, _Switch):
                         order.result = (
                             self._apply_strategy(order.strategy)
                             if order.strategy
@@ -279,13 +501,34 @@ class Monitor:
 
     def _report(self, error: str) -> None:
         with self._lock:
-            self._state = {**self._state, "error": error}
+            rows = []
+            for row in self._state.get("symbols", []):
+                found = row.get("analysis")
+                if found:
+                    found = {
+                        **found,
+                        "status": "stale",
+                        "bias": 0,
+                        "headline": "Analysis paused: the price feed is unavailable",
+                        "scenarios": [],
+                        "conflicts": [error],
+                        "change": None,
+                    }
+                    row = {**row, "analysis": found}
+                rows.append(row)
+            self._state = {**self._state, "symbols": rows, "error": error}
 
     def refresh(self) -> None:
         now = self.broker.now()
         account = self.broker.account()
+        self.currency = account.currency
+        manual = bool(self.desk and self.desk.manual)
         terminal_allows = getattr(self.broker, "terminal_trading_allowed", lambda: False)()
-        gate = trading_gate(self.config, account, self.live_flag, terminal_allows)
+        gate = (
+            Gate(False, REFUSAL)
+            if manual
+            else trading_gate(self.config, account, self.live_flag, terminal_allows)
+        )
         rows = []
         for symbol in self.symbols:
             try:
@@ -293,23 +536,35 @@ class Monitor:
             except Exception as exc:
                 log.warning("%s: %s", symbol, exc)
                 rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+        if self.desk:  # a stop or target your broker filled while nobody told the book
+            self.desk.sweep({r["symbol"]: (r["bid"], r["ask"]) for r in rows if "bid" in r})
+            account = self.broker.account()
         positions = []
         held = self.broker.positions(None)
         for p in held:
             price = next((row["bid"] if p.side > 0 else row["ask"]
                           for row in rows if row.get("symbol") == p.symbol and "bid" in row), None)  # fmt: skip
             r = None
-            if p.magic == self.config.magic and p.initial_risk and price is not None:
+            if p.initial_risk and price is not None:  # yours from the phone too, once it has a stop
                 r = (price - p.price_open) * p.side / p.initial_risk
             positions.append(
                 asdict(p)
-                | {"bot": p.magic == self.config.magic, "r": r, "reversal": self._reversal(p, price, now)}
-            )
+                | {"bot": p.magic == self.config.magic, "r": r, "reversal": self._reversal(p, price, now),
+                   "book": manual}
+            )  # fmt: skip
         open_tickets = {p.ticket for p in held}
         self._reversal_alerts.forget(open_tickets)
         for ticket in [t for t in self._watches if t not in open_tickets]:
             del self._watches[ticket]
         server = getattr(self.broker, "server_name", lambda: "")()
+        market_state = self._market(rows, held, account.equity, now)
+        now = self.broker.now()  # quotes may have arrived while the symbols/context were being collected
+        for row in rows:
+            if row.get("error"):
+                continue
+            context = (market_state or {}).get("symbols", {}).get(row["symbol"], {})
+            row["analysis"] = self._analysis_for(row, context, now)
+            self._note_analysis(row["symbol"], row["analysis"], now)
         state = {
             "ready": True,
             "version": __version__,
@@ -319,11 +574,13 @@ class Monitor:
             "timeframe": self.config.timeframe,
             "timeframes": list(SWITCHABLE),
             "trend_timeframes": self.trend_timeframes(),
-            "session": "{:02d}-{:02d} UTC".format(*self.config.schedule.hours()),
+            "session": "{:02d}-{:02d} UTC".format(*self.config.schedule.hours(now)),
             "account": asdict(account) | {"server": server, "floating": account.equity - account.balance},
             "gate": {"execute": gate.execute, "reason": gate.reason, "live_flag": self.live_flag},
             "symbols": rows,
             "positions": positions,
+            "book": self.desk.state(now) if self.desk else None,
+            "market": market_state,
             "risk": self.engine.risk_status(now),
             "activity": list(self.activity)[::-1],
             "track_record": self.track_record,
@@ -331,6 +588,59 @@ class Monitor:
         }
         with self._lock:
             self._state = clean(state)
+
+    def _analysis_for(self, row: dict[str, Any], context: dict[str, Any], now: datetime) -> dict[str, Any]:
+        return analysis.assess(
+            self._features.get(row["symbol"], pd.DataFrame()),
+            row.get("trend"),
+            row.get("setups", []),
+            context,
+            timeframe=self.config.timeframe,
+            bar_minutes=self.config.bar_minutes,
+            now=now,
+            quote_time=row.get("tick_time"),
+            price=row.get("bid"),
+            digits=row.get("digits", 5),
+            max_bar_age_bars=self.config.schedule.max_bar_age_bars,
+        )
+
+    def _note_analysis(self, symbol: str, found: dict[str, Any], now: datetime) -> None:
+        """Only a changed interpretation generates an alert; first observation is quiet.
+
+        A pause (stale or incomplete data: the weekend, a lost feed) is not an interpretation, so
+        it is compared against the last ready assessment and says nothing on its own. Otherwise
+        every market close and reopen sent one alert per symbol.
+        """
+        key = analysis.semantic_key(found)
+        if key[0] != "ready":
+            found["change"] = self._analysis_changes.get(symbol)
+            return
+        previous = self._analysis_seen.get(symbol)
+        self._analysis_seen[symbol] = key
+        if previous is not None and previous != key:
+            text = found["headline"]
+            change = {"id": f"{symbol}:{now.isoformat()}:{key}", "time": now, "text": text}
+            self._analysis_changes[symbol] = change
+            self.activity.append({"time": now, "symbol": symbol, "action": "ANALYSIS", "text": text})
+            self._send(f"Analysis changed · {symbol}\n{analysis.format_text(symbol, found)}", "analysis")
+        found["change"] = self._analysis_changes.get(symbol)
+
+    def _market(self, rows: list[dict[str, Any]], held: list[Any], equity: float, now: datetime) -> Any:
+        try:
+            return market_view(self, rows, held, equity, now)
+        except Exception:  # context only: it must never take the advice down with it
+            log.debug("market view failed", exc_info=True)
+            return None
+
+    def _sizes(self, symbol: str, advice: Advice, features: pd.DataFrame, tick: Any) -> Any:
+        """The plan's size at each of your other accounts (None without a book or a plan)."""
+        if self.desk is None or advice.plan is None:
+            return None
+        try:
+            return self.desk.sizes(symbol, self.config.for_symbol(symbol), features.iloc[-1], tick)
+        except Exception:
+            log.debug("%s: account sizes not computed", symbol, exc_info=True)
+            return None
 
     def _symbol_state(self, symbol: str, now: datetime) -> dict[str, Any]:
         spec = self._spec(symbol, now)
@@ -340,6 +650,7 @@ class Monitor:
         advice = advise(
             self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now, preview
         )
+        sizes = self._sizes(symbol, advice, features, tick)  # before the alerts, which quote them
         self._note(symbol, advice, now, spec)
         self._note_forming(symbol, advice, now, spec)
         self._note_failed(symbol, advice, now, spec)
@@ -361,6 +672,7 @@ class Monitor:
             "spark": [*features["close"].tail(SPARK_BARS).round(spec.digits).tolist(), tick.bid],
             "forming": forming(symbol, self.config.timeframe) if forming else None,
             "advice": advice,
+            "sizes": sizes,
             "setups": setups,
             "trend": trend,
             "history": self._history(symbol, features),
@@ -385,7 +697,8 @@ class Monitor:
         """What each setup says about the last closed bar: the one on screen and the other three.
 
         The others are computed from the same bars once per closed bar, so watching all four costs
-        no extra requests to the terminal. A signal from any of them is announced like the main one.
+        no extra requests to the terminal. Their signals show on their tiles; they are announced
+        like the main one only with ``alerts.other_setups`` on.
         """
         active = self.config.for_symbol(symbol).strategy.name
         key = features["time"].iloc[-1]
@@ -416,7 +729,7 @@ class Monitor:
             params, frame = cached[1][name]
             item = self._setup_summary(frame, params.strategy, advice, tick, spec)
             out.append({"name": name, "label": SETUP_LABELS[name], "active": False, **item})
-            if item["action"] in ("BUY", "SELL", "SKIP"):
+            if item["action"] in ("BUY", "SELL", "SKIP") and self.config.alerts.other_setups:
                 self._note_setup(symbol, name, params, frame, tick, spec, now, item["action"])
         return out
 
@@ -425,7 +738,7 @@ class Monitor:
     ) -> dict[str, Any]:
         row = frame.iloc[-1]
         if advice.action == "CLOSED":
-            return {"action": "CLOSED", "side": 0, "text": "Market closed"}
+            return {"action": "CLOSED", "side": 0, "text": advice.headline}
         if pd.isna(row["atr"]):
             return {"action": "WAIT", "side": 0, "text": "Indicators are still warming up."}
         signal, raw = int(row["signal"]), int(row["raw_signal"])
@@ -470,7 +783,7 @@ class Monitor:
                               "text": f"{label} setup: {advice.headline}. {advice.detail}"})  # fmt: skip
         lines = self._alert_text(symbol, advice, spec).split("\n")
         lines[0] += f" · {label} setup"
-        self._send("\n".join(lines))
+        self._send("\n".join(lines), "signal" if advice.actionable else "blocked")
 
     # --- trend ------------------------------------------------------------------------------------
 
@@ -517,7 +830,7 @@ class Monitor:
                 f"state ended within 10 bars. It says the trend is close to over, not which way price goes next."
             )
         self.activity.append({"time": now, "symbol": symbol, "action": action, "text": text})
-        self._send(f"{title} · {symbol}\n{text}")
+        self._send(f"{title} · {symbol}\n{text}", "trend")
 
     def _history(self, symbol: str, features: pd.DataFrame) -> dict[str, Any]:
         """Recent signals and their simple outcomes, recomputed when a new bar arrives."""
@@ -572,7 +885,7 @@ class Monitor:
         early = advice.early
         if not early or not early["firing"] or advice.actionable:
             return
-        key = (symbol, early["closes_at"], early["side"])
+        key = (symbol, *self._setup_key(symbol), early["closes_at"], early["side"])
         if key in self._forming_seen:
             return
         if len(self._forming_seen) > 500:
@@ -592,16 +905,18 @@ class Monitor:
             f"price now {early['price']:.{spec.digits}f}; {verdict}. Not confirmed, it can still disappear."
         )
         self.activity.append({"time": now, "symbol": symbol, "action": "FORMING", "text": text})
-        self._send(f"FORMING (unconfirmed) · {symbol}\n{text}")
+        self._send(f"FORMING (unconfirmed) · {symbol}\n{text}", "forming")
 
     def _note_failed(self, symbol: str, advice: Advice, now: datetime, spec: SymbolSpec) -> None:
         """Announce, once, a break that has just closed back through its level."""
         failed = advice.failed_break
         if not failed or failed["bars_ago"] != 0:
             return
-        key = (symbol, failed["time"], f"failed{failed['side']}")
+        key = (symbol, *self._setup_key(symbol), failed["time"], f"failed{failed['side']}")
         if key in self._forming_seen:
             return
+        if len(self._forming_seen) > 500:
+            self._forming_seen.clear()
         self._forming_seen.add(key)
         up = failed["side"] > 0
         text = (
@@ -611,7 +926,7 @@ class Monitor:
             f"{failed['price']:.{spec.digits}f}. The breakout is not holding."
         )
         self.activity.append({"time": now, "symbol": symbol, "action": "FAILED", "text": text})
-        self._send(f"BREAK FAILED · {symbol}\n{text}")
+        self._send(f"BREAK FAILED · {symbol}\n{text}", "failed")
 
     def _reversal(self, p: Any, price: float | None, now: datetime) -> Reversal | None:
         """Has the market turned against this open position? None for a symbol that is not watched."""
@@ -648,7 +963,9 @@ class Monitor:
             action = "EXIT" if found.level == EXIT else "REVERSAL"
             self.activity.append({"time": now, "symbol": p.symbol, "action": action, "text": text})
             log.warning("%s %s", p.symbol, text)
-            self._send(f"{'GET OUT' if found.level == EXIT else 'REVERSAL WARNING'} · {p.symbol}\n{text}")
+            self._send(
+                f"{'GET OUT' if found.level == EXIT else 'REVERSAL WARNING'} · {p.symbol}\n{text}", "exit"
+            )
         elif forming:
             signs = " ".join(s["text"] for s in forming)
             text = (
@@ -657,11 +974,16 @@ class Monitor:
                 f"It can still disappear. You hold {holding}"
             )
             self.activity.append({"time": now, "symbol": p.symbol, "action": "REVERSAL", "text": text})
-            self._send(f"REVERSAL FORMING (unconfirmed) · {p.symbol}\n{text}")
+            self._send(f"REVERSAL FORMING (unconfirmed) · {p.symbol}\n{text}", "forming")
 
-    def _send(self, text: str) -> None:
+    def _setup_key(self, symbol: str) -> tuple[str, str]:
+        """The setup and timeframe on screen for ``symbol``: part of every once-only alert key."""
+        return self.config.for_symbol(symbol).strategy.name, self.config.timeframe
+
+    def _send(self, text: str, kind: str = "info") -> None:
+        """To the phone. ``kind`` lets a channel pick what it sends: see ``notify.IMPORTANT``."""
         if self.notifier:
-            self.notifier.send(text)
+            self.notifier.send(text, kind)
 
     def _note(self, symbol: str, advice: Advice, now: datetime, spec: SymbolSpec | None = None) -> None:
         """Log advice changes worth seeing: new signals, skips and the return to waiting."""
@@ -672,11 +994,12 @@ class Monitor:
             return
         if previous is not None and previous.split(":")[0] == advice.action and advice.action == "WAIT":
             return
-        if advice.action in ("BUY", "SELL", "SKIP"):  # said already while another setup was on screen?
-            name = self.config.for_symbol(symbol).strategy.name
-            mark = (symbol, name, self.config.timeframe, pd.Timestamp(advice.bar_time), advice.action)
+        if advice.action in ("BUY", "SELL", "SKIP", "BLOCKED"):  # said already, before a switch?
+            mark = (symbol, *self._setup_key(symbol), pd.Timestamp(advice.bar_time), advice.action)
             if mark in self._signal_seen:
                 return
+            if len(self._signal_seen) > 2000:
+                self._signal_seen.clear()
             self._signal_seen.add(mark)
         self.activity.append(
             {
@@ -687,20 +1010,60 @@ class Monitor:
             }
         )
         if advice.action in ("BUY", "SELL", "BLOCKED", "SKIP"):
-            self._send(self._alert_text(symbol, advice, spec))
+            kind = "signal" if advice.action in ("BUY", "SELL") else "blocked"
+            text = self._alert_text(symbol, advice, spec)
+            record = self.record_line(symbol) if kind == "signal" else ""
+            self._send(f"{text}\n{record}" if record else text, kind)
 
-    @staticmethod
-    def _alert_text(symbol: str, advice: Advice, spec: SymbolSpec | None) -> str:
+    def _alert_text(self, symbol: str, advice: Advice, spec: SymbolSpec | None, plan: Any = None) -> str:
         digits = spec.digits if spec else 5
         lines = [f"{advice.action} · {symbol}", f"{advice.headline}. {advice.detail}"]
-        plan = advice.plan
-        if plan and plan.volume and advice.action != "SKIP":
-            lines.append(
+        plan = plan or advice.plan
+        if plan and advice.action != "SKIP":
+            others = self.desk.size_lines(symbol, plan.side) if self.desk else []
+            levels = (
                 f"{WORD[plan.side]} plan: entry ~{plan.entry:.{digits}f} · SL {plan.stop:.{digits}f} · "
-                f"TP {plan.target:.{digits}f} · {plan.volume} lots · risk {plan.risk_amount:,.2f} · "
-                f"target {plan.reward_amount:,.2f}"
+                f"TP {plan.target:.{digits}f}"
             )
+            own = self.desk.broker.account_name() if self.desk else None
+            if plan.volume:
+                lines.append(
+                    f"{levels} · {plan.volume} lots · risk {plan.risk_amount:,.2f} · "
+                    f"target {plan.reward_amount:,.2f} · {self._sized_for(own)}"
+                )
+            elif others:
+                lines.append(f"{levels} · no size on {own or 'the MetaTrader 5 account'} ({plan.rejected})")
+            lines += others
         return "\n".join(lines)
+
+    def record_line(self, symbol: str) -> str:
+        """How often this setup's signals on this symbol have lost in the stored history.
+
+        That share is the honest answer to "is this a false signal?": nothing measured at the
+        signal bar has told the losers from the winners (scripts/research_false_signals.py).
+        """
+        record = self.track_record or {}
+        mine = (record.get("symbols") or {}).get(symbol) or {}
+        trades = int(mine.get("trades") or 0)
+        if trades < 20 or mine.get("win_rate") is None or not record.get("start"):
+            return ""
+        won, setup = float(mine["win_rate"]), SETUP_LABELS[self.config.for_symbol(symbol).strategy.name]
+        lost = round(100 - won)
+        return (
+            f"Record: {setup} on {symbol} {self.config.timeframe} won {won:.0f}% of {trades} trades since "
+            f"{pd.Timestamp(record['start']).year}, average {float(mine.get('avg_r') or 0):+.2f}R. About "
+            f"{lost} in 100 signals like this one lose, and nothing measured on the signal bar picks them out."
+        )
+
+    def _sized_for(self, own: str | None) -> str:
+        """Which account a size belongs to. Without it, a size worked out on the terminal's demo
+        account (100,000 USD) reads like advice for a small live account."""
+        try:
+            account = self.broker.account()
+        except Exception:
+            return own or "the MetaTrader 5 account"
+        name = own or f"MT5 {getattr(self.broker, 'server_name', lambda: '')() or 'account'}"
+        return f"sized for {name}, equity {account.equity:,.0f} {account.currency}"
 
     # --- orders --------------------------------------------------------------------------------
 
@@ -720,6 +1083,8 @@ class Monitor:
         """
         if symbol not in self.symbols or side not in WORD:
             return {"ok": False, "message": "unknown symbol or side"}
+        if self.desk and self.desk.manual:
+            return {"ok": False, "message": f"orders are disabled: {REFUSAL}"}
         now = self.broker.now()
         account = self.broker.account()
         gate = trading_gate(self.config, account, self.live_flag, self.broker.terminal_trading_allowed())
@@ -759,55 +1124,35 @@ class Monitor:
             {"time": now, "symbol": symbol, "action": "ORDER" if result.ok else "REJECTED", "text": text}
         )
         log.warning("%s %s", symbol, text)
-        self._send(f"ORDER · {symbol}\n{text}")
+        self._send(f"ORDER · {symbol}\n{text}", "order")
         return {"ok": result.ok, "message": text, "ticket": result.ticket, "price": result.price}
 
     # --- history -------------------------------------------------------------------------------
 
     def load_track_record(self, data_dir: str | Path, names: dict[str, str]) -> None:
-        """Backtest the config on stored history so each symbol's advice shows its record.
+        """Each symbol's record for the setup on screen, from stored history: measured in a
+        separate low-priority process and kept per setup and timeframe (``ui.track``).
 
         ``names`` maps the broker's symbol names to the configured ones used for the CSV files.
         """
-        from tradebot.backtest import run_backtest
-        from tradebot.data import load_dataset, load_trend_bars
-
         self._track_args = (data_dir, names)
+        config = self.config  # the setup or timeframe may be switched while this runs
         self._track_pending = True
-        config = self.config  # the timeframe may be switched while this runs
         try:
-            data, specs = load_dataset(data_dir, list(config.symbols), config.timeframe)
-            htf = load_trend_bars(data_dir, config)
-            result = run_backtest(config, data, specs, htf=htf)
-        except (FileNotFoundError, ValueError) as exc:
-            log.info("no track record: %s", exc)
+            record = self.tracks.get(config, data_dir, names)
+        except NoRecord as exc:
+            if config is self.config:
+                log.info("no track record: %s", exc)
+                self._track_pending = False
+            return
+        except Exception:
+            log.exception("track record failed")
             if config is self.config:
                 self._track_pending = False
             return
         if config is not self.config:
-            return  # switched while this ran: the newer run owns the result
-        per = result.per_symbol
-        m = result.metrics
-        record = {
-            "start": result.start,
-            "end": result.end,
-            "trades": m.trades,
-            "return_pct": m.return_pct,
-            "win_rate": m.win_rate,
-            "profit_factor": m.profit_factor,
-            "avg_r": m.avg_r,
-            "symbols": {
-                broker_name: {
-                    "trades": int(per.loc[configured, "trades"]),
-                    "win_rate": float(per.loc[configured, "win_rate"]),
-                    "profit_factor": float(per.loc[configured, "profit_factor"]),
-                    "avg_r": float(per.loc[configured, "avg_r"]),
-                }
-                for broker_name, configured in names.items()
-                if configured in per.index
-            },
-        }
-        self.track_record = clean(record)
+            return  # switched while this ran: the newer run owns the screen
+        self.track_record = record
         self._track_pending = False
 
 

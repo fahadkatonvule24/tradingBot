@@ -8,11 +8,15 @@ plus an optional ``overrides`` map keyed by symbol. Unknown keys are rejected so
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, field, fields, replace
-from datetime import datetime
+from datetime import date, datetime, timezone
+from datetime import time as dt_time
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
+from zoneinfo import ZoneInfo
 
 TIMEFRAME_MINUTES = {
     "M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M6": 6, "M10": 10, "M12": 12, "M15": 15,
@@ -20,7 +24,9 @@ TIMEFRAME_MINUTES = {
     "H12": 720, "D1": 1440,
 }  # fmt: skip
 
-# Trading sessions in UTC hours [start, end). "asia" wraps midnight.
+# Trading sessions in UTC hours [start, end) while London and New York are on summer time. "asia"
+# wraps midnight. The four below that open or close in London or New York move with those cities'
+# clocks: use session_hours() for the hours on a given day.
 SESSIONS = {
     "all": (0, 24),
     "asia": (23, 8),
@@ -29,6 +35,57 @@ SESSIONS = {
     "london_new_york": (7, 21),
     "overlap": (12, 16),
 }
+
+LONDON, NEW_YORK = "Europe/London", "America/New_York"
+SESSION_CLOCKS = {
+    "london": ((LONDON, 8), (LONDON, 17)),
+    "new_york": ((NEW_YORK, 8), (NEW_YORK, 17)),
+    "london_new_york": ((LONDON, 8), (NEW_YORK, 17)),
+    "overlap": ((NEW_YORK, 8), (LONDON, 17)),
+}
+"""Open and close on the city's own clock (08:00 to 17:00 local). In UTC they are an hour later
+in winter: London opens at 07:00 UTC in summer and 08:00 UTC from late October to late March.
+Fixed UTC hours put the first hour of the session before London had opened for five months a
+year. The weeks when only one of the two cities has changed its clock are handled too."""
+CITY = {LONDON: "London", NEW_YORK: "New York"}
+
+
+@lru_cache(maxsize=8192)
+def _session_hours(name: str, day: date) -> tuple[int, int]:
+    clocks = SESSION_CLOCKS.get(name)
+    if clocks is None:
+        return SESSIONS[name]
+    hours = [
+        datetime.combine(day, dt_time(hour), ZoneInfo(zone)).astimezone(timezone.utc).hour
+        for zone, hour in clocks
+    ]
+    return hours[0], hours[1]
+
+
+def session_hours(name: str, when: datetime | date | None = None) -> tuple[int, int]:
+    """UTC hours [start, end) of session ``name`` on the UTC day of ``when`` (today if None).
+
+    ``when`` may be naive (taken as UTC) or carry a time zone.
+    """
+    if when is None:
+        day = datetime.now(timezone.utc).date()
+    elif isinstance(when, datetime):
+        day = (when.astimezone(timezone.utc) if when.tzinfo else when).date()
+    else:
+        day = when
+    return _session_hours(name, day)
+
+
+def session_clock_text(name: str) -> str:
+    """The session in the local time it follows, e.g. "London 08:00 to New York 17:00, local time"."""
+    clocks = SESSION_CLOCKS.get(name)
+    if clocks is None:
+        return ""
+    (open_zone, open_hour), (close_zone, close_hour) = clocks
+    if open_zone == close_zone:
+        return f"{open_hour:02d}:00 to {close_hour:02d}:00 {CITY[open_zone]} time"
+    return f"{CITY[open_zone]} {open_hour:02d}:00 to {CITY[close_zone]} {close_hour:02d}:00, local time"
+
 
 STRATEGIES = ("ema_cross", "breakout", "pullback", "retest")
 
@@ -109,6 +166,14 @@ class StrategyParams:
     use_fib_filter: bool = False
     fib_lookback: int = 120
     fib_tolerance_atr: float = 0.5
+    # Entry-quality heuristics. Opt in explicitly so historical strategy configs keep their rules.
+    use_signal_quality_filter: bool = False
+    quality_period: int = 20
+    quality_min_efficiency: float = 0.2
+    quality_min_body_ratio: float = 0.2
+    quality_min_close_position: float = 0.65
+    quality_max_range_atr: float = 2.5
+    quality_max_extension_atr: float = 2.0
 
     def trend_ladder(self, timeframe: str) -> tuple[str, ...]:
         """The higher timeframes the trend filter reads when trading ``timeframe``."""
@@ -131,6 +196,7 @@ class StrategyParams:
                 self.fib_lookback,
                 self.breakout_period,
                 self.retest_period,
+                self.quality_period + 1 if self.use_signal_quality_filter else 0,
             )
             + 5
         )
@@ -160,6 +226,10 @@ class RiskParams:
     """Skip a trade whose target is closer than this many times its stop distance. 0 = off. Only
     matters when a setup names its own target (the measured move); ATR targets are a fixed ratio."""
     allow_min_lot_overrisk: bool = False
+    account_trades: bool = True
+    """Live: the loss limits, losing streak, position limits, open risk and review count every
+    trade on the account, the ones you place by hand (on the phone, too) as well as the bot's.
+    False = only the bot's own (its magic number). The bot only ever manages its own positions."""
 
 
 @dataclass(frozen=True)
@@ -182,23 +252,46 @@ class ScheduleParams:
     end_hour_utc: int = 24
     trade_weekends: bool = False
     news_file: str = "config/news_blackouts.json"
+    """Your own high-impact events, for anything the feed does not carry."""
+    news_feed: str = ""
+    """URL of a weekly calendar in the ForexFactory JSON format, downloaded every few hours by the
+    dashboard and the trading loop. Empty = off; config.json turns it on."""
+    news_feed_file: str = "news_feed.json"
     news_before_minutes: int = 30
     news_after_minutes: int = 30
     max_bar_age_bars: int = 2
 
-    def hours(self) -> tuple[int, int]:
+    def hours(self, when: datetime | date | None = None) -> tuple[int, int]:
+        """UTC hours [start, end) on the day of ``when`` (today if None): London and New York hours
+        move with daylight saving, a custom window does not."""
         if self.session == "custom":
             return self.start_hour_utc, self.end_hour_utc
-        return SESSIONS[self.session]
+        return session_hours(self.session, when)
 
     def closed(self, now: datetime) -> str | None:
         """Why entries are not allowed at ``now`` (UTC) by the schedule, or None if they are."""
         if not self.trade_weekends and now.weekday() >= 5:
             return "weekend"
-        start, end = self.hours()
+        start, end = self.hours(now)
         hour = now.hour
         inside = start <= hour < end if start < end else (hour >= start or hour < end)
         return None if inside else f"{hour:02d}:00 UTC outside {start:02d}-{end:02d}"
+
+
+ALERT_LEVELS = ("important", "all")
+
+
+@dataclass(frozen=True)
+class AlertParams:
+    """What reaches your phone. The dashboard shows the other setups' tiles either way."""
+
+    other_setups: bool = False
+    """Also announce signals from the three setups that are not on screen. Off by default: every
+    setup loses on the stored history, and four of them send about four times the signals."""
+    whatsapp: str = "important"
+    """Which alerts go to WhatsApp: "important" (confirmed buy and sell signals, failed breaks,
+    get-out and reversal warnings on open positions, news, orders) or "all" (also the unconfirmed
+    forming triggers, blocked and skipped triggers, trend and analysis changes)."""
 
 
 @dataclass(frozen=True)
@@ -257,6 +350,7 @@ class BotConfig:
     management: ManagementParams = field(default_factory=ManagementParams)
     schedule: ScheduleParams = field(default_factory=ScheduleParams)
     backtest: BacktestParams = field(default_factory=BacktestParams)
+    alerts: AlertParams = field(default_factory=AlertParams)
     overrides: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     mt5: MT5Login = field(default_factory=MT5Login)
 
@@ -302,7 +396,10 @@ def _base_symbol(symbol: str, overrides: dict[str, Any]) -> str:
 
 
 def _validate(c: BotConfig) -> list[str]:
-    errors = []
+    errors = _scalar_errors(c, "config") + _scalar_errors(c.schedule, "schedule")
+    errors += _scalar_errors(c.alerts, "alerts")
+    if errors:
+        return errors
     if not c.symbols:
         errors.append("at least one symbol is required")
     if c.timeframe not in TIMEFRAME_MINUTES:
@@ -314,6 +411,16 @@ def _validate(c: BotConfig) -> list[str]:
         errors.append("schedule hours must be start 0-23 and end 1-24 (UTC)")
     if c.history_bars < 200:
         errors.append("history_bars must be at least 200")
+    if c.poll_seconds <= 0:
+        errors.append("poll_seconds must be positive")
+    if c.schedule.max_bar_age_bars < 1:
+        errors.append("schedule.max_bar_age_bars must be >= 1")
+    if c.schedule.news_before_minutes < 0 or c.schedule.news_after_minutes < 0:
+        errors.append("schedule.news_before_minutes and news_after_minutes must be >= 0")
+    if c.alerts.whatsapp not in ALERT_LEVELS:
+        errors.append(f"alerts.whatsapp {c.alerts.whatsapp!r} is not one of {', '.join(ALERT_LEVELS)}")
+    if not isinstance(c.alerts.other_setups, bool):
+        errors.append("alerts.other_setups must be true or false")
     unknown = set(c.overrides) - set(c.symbols)
     if unknown:
         errors.append(f"overrides for symbols that are not configured: {', '.join(sorted(unknown))}")
@@ -322,7 +429,50 @@ def _validate(c: BotConfig) -> list[str]:
 
 def _validate_symbol(p: SymbolParams) -> list[str]:
     s, r, m = p.strategy, p.risk, p.management
-    errors = []
+    errors = [error for name in _SECTIONS for error in _scalar_errors(getattr(p, name), name)]
+    if errors:
+        return errors
+    for name in (
+        "fast_ema",
+        "slow_ema",
+        "rsi_period",
+        "atr_period",
+        "adx_period",
+        "macd_fast",
+        "macd_slow",
+        "macd_signal",
+        "trend_ema",
+        "sr_lookback",
+        "fib_lookback",
+        "breakout_period",
+        "pullback_rsi_period",
+    ):
+        if getattr(s, name) < 1:
+            errors.append(f"strategy.{name} must be a positive integer")
+    for name in (
+        "max_spread_atr",
+        "max_margin_percent",
+        "daily_loss_limit_percent",
+        "weekly_loss_limit_percent",
+        "max_consecutive_losses",
+        "max_trades_per_day",
+        "max_positions_per_symbol",
+        "max_total_positions",
+    ):
+        if getattr(r, name) < 0:
+            errors.append(f"risk.{name} must be >= 0")
+    if r.fixed_lot is not None and r.fixed_lot <= 0:
+        errors.append("risk.fixed_lot must be positive or null")
+    for name in ("breakeven_r", "breakeven_buffer_r", "trail_start_r", "max_hold_bars"):
+        if getattr(m, name) < 0:
+            errors.append(f"management.{name} must be >= 0")
+    if m.trail_atr <= 0 or m.partial_tp_r <= 0:
+        errors.append("management.trail_atr and partial_tp_r must be positive")
+    if p.backtest.initial_balance <= 0:
+        errors.append("backtest.initial_balance must be positive")
+    for name in ("commission_per_lot", "slippage_points", "min_spread_points"):
+        if getattr(p.backtest, name) < 0:
+            errors.append(f"backtest.{name} must be >= 0")
     if s.name not in STRATEGIES:
         errors.append(f"strategy.name {s.name!r} is not one of {', '.join(STRATEGIES)}")
     if s.breakout_min_atr < 0:
@@ -335,9 +485,11 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
         errors.append("strategy.macd_fast must be lower than macd_slow")
     if s.trend_timeframe not in TIMEFRAME_MINUTES:
         errors.append(f"strategy.trend_timeframe {s.trend_timeframe!r} is not a timeframe")
-    if s.trend_timeframes != "auto":
+    if not isinstance(s.trend_timeframes, (str, list, tuple)):
+        errors.append('strategy.trend_timeframes must be "auto" or a list of timeframes')
+    elif s.trend_timeframes != "auto":
         bad = [t for t in ([s.trend_timeframes] if isinstance(s.trend_timeframes, str) else s.trend_timeframes)
-               if t not in TIMEFRAME_MINUTES]  # fmt: skip
+               if not isinstance(t, str) or t not in TIMEFRAME_MINUTES]  # fmt: skip
         if bad:
             errors.append(f'strategy.trend_timeframes must be "auto" or a list of timeframes; got {bad}')
     if r.fixed_lot is None and not 0 < r.risk_percent <= 5:
@@ -346,6 +498,22 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
         errors.append('strategy.breakout_target must be "atr" or "measured"')
     if s.volume_period < 2 or s.volume_min_ratio <= 0:
         errors.append("strategy.volume_period must be >= 2 and volume_min_ratio positive")
+    if not isinstance(s.use_signal_quality_filter, bool):
+        errors.append("strategy.use_signal_quality_filter must be a boolean")
+    if type(s.quality_period) is not int or s.quality_period < 2:
+        errors.append("strategy.quality_period must be an integer >= 2")
+    for name, minimum, maximum in (
+        ("quality_min_efficiency", 0, 1),
+        ("quality_min_body_ratio", 0, 1),
+        ("quality_min_close_position", 0.5, 1),
+        ("quality_max_range_atr", 0, None),
+        ("quality_max_extension_atr", 0, None),
+    ):
+        value = getattr(s, name)
+        finite = type(value) in (int, float) and math.isfinite(value)
+        if not finite or (not minimum < value if maximum is None else not minimum <= value <= maximum):
+            bounds = "positive and finite" if maximum is None else f"finite and in [{minimum}, {maximum}]"
+            errors.append(f"strategy.{name} must be {bounds}")
     measured = s.name == "breakout" and s.breakout_target == "measured"
     if r.min_reward_risk < 0 or (
         not measured and r.sl_atr > 0 and r.min_reward_risk > r.tp_atr / r.sl_atr + 1e-9
@@ -362,7 +530,35 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
     return errors
 
 
+def _scalar_errors(section: Any, where: str) -> list[str]:
+    """Dataclass annotations do not validate JSON: reject truthy strings and NaN before use."""
+    errors = []
+    for name, hint in get_type_hints(type(section)).items():
+        value = getattr(section, name)
+        if hint in (float | None, int | None, str | None):
+            if value is None:
+                continue
+            hint = next(t for t in hint.__args__ if t is not type(None))
+        if hint is bool and type(value) is not bool:
+            errors.append(f"{where}.{name} must be a boolean")
+        elif hint is int and type(value) is not int:
+            errors.append(f"{where}.{name} must be an integer")
+        elif hint is float:
+            try:
+                valid = type(value) in (int, float) and math.isfinite(value)
+            except OverflowError:
+                valid = False
+            if not valid:
+                errors.append(f"{where}.{name} must be a finite number")
+        elif hint is str and not isinstance(value, str):
+            errors.append(f"{where}.{name} must be a string")
+    return errors
+
+
 def _build(cls: type, data: dict[str, Any], where: str, errors: list[str]) -> Any:
+    if not isinstance(data, dict):
+        errors.append(f"{where} must be an object")
+        return cls()
     known = {f.name for f in fields(cls)}
     unknown = set(data) - known
     if unknown:
@@ -371,14 +567,22 @@ def _build(cls: type, data: dict[str, Any], where: str, errors: list[str]) -> An
 
 
 def config_from_dict(raw: dict[str, Any], env: dict[str, str] | None = None) -> BotConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("configuration must be an object")
+    for name in (*_SECTIONS, "schedule", "alerts", "overrides", "mt5"):
+        if name in raw and not isinstance(raw[name], dict):
+            raise ConfigError(f"{name} must be an object")
     env = dict(os.environ) if env is None else env
     errors: list[str] = []
-    top = {k: v for k, v in raw.items() if k not in (*_SECTIONS, "schedule", "overrides", "mt5")}
+    top = {k: v for k, v in raw.items() if k not in (*_SECTIONS, "schedule", "alerts", "overrides", "mt5")}
     sections = {name: _build(cls, raw.get(name, {}), name, errors) for name, cls in _SECTIONS.items()}
     schedule = _build(ScheduleParams, raw.get("schedule", {}), "schedule", errors)
+    alerts = _build(AlertParams, raw.get("alerts", {}), "alerts", errors)
 
     overrides: dict[str, dict[str, dict[str, Any]]] = {}
     for symbol, parts in raw.get("overrides", {}).items():
+        if not isinstance(symbol, str) or not isinstance(parts, dict):
+            raise ConfigError("overrides must map symbol names to section objects")
         overrides[symbol] = {}
         for name, values in parts.items():
             if name not in _SECTIONS:
@@ -396,12 +600,17 @@ def config_from_dict(raw: dict[str, Any], env: dict[str, str] | None = None) -> 
         server=env.get("MT5_SERVER") or mt5_raw.get("server"),
     )
     if "symbols" in top:
-        top["symbols"] = tuple(str(s) for s in top["symbols"])
+        symbols = top["symbols"]
+        if not isinstance(symbols, (list, tuple)) or any(
+            not isinstance(s, str) or not s.strip() for s in symbols
+        ):
+            raise ConfigError("symbols must be a list of nonempty symbol names")
+        top["symbols"] = tuple(symbols)
     if "timeframe" in top:
         top["timeframe"] = str(top["timeframe"]).upper()
     config = _build(
         BotConfig,
-        {**top, **sections, "schedule": schedule, "overrides": overrides, "mt5": mt5},
+        {**top, **sections, "schedule": schedule, "alerts": alerts, "overrides": overrides, "mt5": mt5},
         "config",
         errors,
     )

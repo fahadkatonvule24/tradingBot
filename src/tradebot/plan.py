@@ -9,9 +9,10 @@ trading, when not to trade, how results are reviewed, and what the rules have me
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from tradebot.config import BotConfig, StrategyParams
+from tradebot.config import BotConfig, StrategyParams, session_clock_text
 from tradebot.strategy import FILTERS
 
 SETUP_LABELS = {
@@ -102,25 +103,59 @@ def _filters(p: StrategyParams, timeframe: str) -> list[str]:
             f"Near a 38%, 50% or 62% retracement of the last {p.fib_lookback} bars "
             f"(within {p.fib_tolerance_atr:g} ATR)."
         )
+    if p.use_signal_quality_filter:
+        lines.append(
+            "Signal quality: valid closed-bar prices and finite historical baselines are required. "
+            "These checks flag potential false signals; they do not estimate a win probability."
+        )
+        if p.name in ("ema_cross", "pullback"):
+            lines.append(
+                f"Avoid chop: over the prior {p.quality_period} bars, absolute net price movement "
+                f"divided by total absolute movement must be at least {p.quality_min_efficiency:g}."
+            )
+        lines.append(
+            f"Candle confirmation: the body must point in the trade direction and cover at least "
+            f"{p.quality_min_body_ratio:.0%} of the candle range. A buy must close at least "
+            f"{p.quality_min_close_position:.0%} of the way from low to high; a sell the same "
+            f"distance from high to low."
+        )
+        lines.append(
+            f"Avoid spikes: the signal bar's true range, including gaps, must be no more than "
+            f"{p.quality_max_range_atr:g} times the previous bar's ATR."
+        )
+        lines.append(
+            f"Avoid chasing: the close must be no more than {p.quality_max_extension_atr:g} "
+            f"previous-bar ATR beyond EMA {p.fast_ema} in the trade direction."
+        )
     return lines
 
 
 def trading_plan(
-    config: BotConfig, record: dict[str, Any] | None = None, measuring: bool = False
+    config: BotConfig,
+    record: dict[str, Any] | None = None,
+    measuring: bool = False,
+    now: datetime | None = None,
 ) -> list[Section]:
     """The plan for ``config``. ``record`` is a backtest summary of these rules, if one is available:
     start, end, trades, win_rate, profit_factor, avg_r and return_pct. ``measuring`` says that one
-    is still being computed."""
+    is still being computed. ``now`` (UTC, default today) dates the session hours."""
     p, r, m, sched = config.strategy, config.risk, config.management, config.schedule
     tf = config.timeframe
-    start, end = sched.hours()
+    start, end = sched.hours(now)
+    days = "every day." if sched.trade_weekends else "Monday to Friday."
+    clock = session_clock_text(sched.session) if sched.session != "custom" else ""
+    hours = f"Hours: {start:02d}:00 to {end:02d}:00 UTC, {days}"
+    if clock:
+        hours = (
+            f"Hours: {clock} ({start:02d}:00 to {end:02d}:00 UTC today; the UTC hours move with "
+            f"daylight saving), {days}"
+        )
 
     what = [
         f"Instruments: {', '.join(config.symbols)}.",
         f"Timeframe: {tf}. A decision is made once per bar, when it closes. A bar that is still forming "
         f"is never traded.",
-        f"Hours: {start:02d}:00 to {end:02d}:00 UTC, "
-        + ("every day." if sched.trade_weekends else "Monday to Friday."),
+        hours,
     ]
     changed = [
         f"{symbol}: {section}.{key} = {value}"
@@ -157,7 +192,15 @@ def trading_plan(
     )
     exits.append(f"From +{m.trail_start_r:g}R the stop trails {m.trail_atr:g} ATR behind price.")
     if m.close_on_reverse:
-        exits.append("An opposite signal closes the position.")
+        exits.append(
+            "An opposite signal closes the position."
+            + (
+                " Signal quality checks only block new entries; the existing opposite-signal exit "
+                "still uses the original strategy filters."
+                if p.use_signal_quality_filter
+                else ""
+            )
+        )
     if m.max_hold_bars:
         exits.append(f"A position still open after {m.max_hold_bars} bars is closed.")
     exits.append("The stop only ever moves in the trade's favour. It is never widened.")

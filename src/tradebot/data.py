@@ -27,8 +27,16 @@ def load_bars(path: str | Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"{path}: missing column(s) {', '.join(missing)}")
     df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_localize(None)
+    if df["time"].isna().any():
+        raise ValueError(f"{path}: missing or invalid bar timestamp")
     if "spread" not in df:
         df["spread"] = 0
+    for column in ("open", "high", "low", "close", "spread"):
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+        if not np.isfinite(df[column]).all():
+            raise ValueError(f"{path}: {column} must contain finite numbers")
+    if (df["spread"] < 0).any():
+        raise ValueError(f"{path}: spread must be nonnegative")
     df = df.drop_duplicates("time").sort_values("time").reset_index(drop=True)
     bad = (df["high"] < df[["open", "close"]].max(axis=1)) | (df["low"] > df[["open", "close"]].min(axis=1))
     if bad.any():

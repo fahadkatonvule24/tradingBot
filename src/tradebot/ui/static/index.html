@@ -145,8 +145,8 @@ button { font: inherit; color: inherit; }
 .badge.BUY, .badge.ORDER { background: var(--up); color: var(--on-color); }
 .badge.SELL, .badge.REJECTED { background: var(--down); color: var(--on-color); }
 .badge.EXIT { background: var(--down); color: var(--on-color); }
-.badge.SKIP, .badge.BLOCKED, .badge.FAILED, .badge.REVERSAL, .badge.ENDING { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
-.badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before, .badge.REVERSAL::before, .badge.ENDING::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
+.badge.SKIP, .badge.BLOCKED, .badge.FAILED, .badge.REVERSAL, .badge.ENDING, .badge.NEWS, .badge.high { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1.5px var(--warning); }
+.badge.NEWS::before, .badge.high::before, .badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before, .badge.REVERSAL::before, .badge.ENDING::before { content: "!"; display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: var(--warning); color: #000; font-size: 10px; }
 .badge.big { font-size: 15px; padding: 7px 14px; border-radius: 8px; }
 
 /* --- advice --- */
@@ -289,10 +289,54 @@ dialog.wide li { margin: 4px 0; }
 .toast { position: fixed; right: 20px; bottom: 20px; max-width: 420px; padding: 12px 14px; border-radius: 10px; background: var(--text); color: var(--surface); display: none; z-index: 5; }
 .toast.show { display: block; }
 
+.field { display: grid; gap: 4px; margin: 0 0 10px; font-size: 12px; color: var(--text-2); }
+.field input, .field select { font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; width: 100%; }
+.fields2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.mini { border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; color: var(--text-2); margin-left: 4px; white-space: nowrap; }
+.mini:hover { color: var(--text); border-color: var(--text-3); }
+.sizes { margin-top: 10px; display: grid; gap: 4px; font-size: 13px; }
+.sizes div { display: flex; justify-content: space-between; gap: 10px; }
+.sizes .who { color: var(--text-2); }
+.market { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr); gap: 20px; }
+.market h3, .subhead { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+.market ul { margin: 0; padding-left: 18px; }
+.market li { margin: 3px 0; }
+.assessment { border-top: 3px solid var(--text-3); }
+.assessment h2 { margin-bottom: 6px; }
+.assessment .headline { font-size: 19px; line-height: 1.4; margin: 10px 0; }
+.assessment-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 14px 0; }
+.assessment ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.65; }
+.scenario { background: var(--surface-2); padding: 14px; border-radius: 8px; border-top: 2px solid var(--up); }
+.scenario.bearish { border-color: var(--down); }
+.scenario p { margin: 8px 0 0; font-size: 13px; line-height: 1.6; }
+.assessment .watch-next { font-size: 13px; line-height: 1.6; }
+.bar { display: grid; grid-template-columns: 52px 1fr 40px; gap: 8px; align-items: center; font-size: 13px; margin: 4px 0; }
+.bar .track { height: 8px; background: var(--surface-2); border-radius: 4px; position: relative; }
+.bar .track::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--text-3); }
+.bar .fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.bar .n { text-align: right; }
+.lvl { display: grid; grid-template-columns: 1fr auto 70px; gap: 10px; font-size: 13px; padding: 2px 0; }
+.lvl .n { text-align: right; }
+.lvl.here { font-weight: 650; border-top: 1px dashed var(--text-3); border-bottom: 1px dashed var(--text-3); padding: 4px 0; margin: 2px 0; }
+tr.pick { cursor: pointer; }
+.calc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 20px; }
+.calc-grid .fields2 { gap: 0 10px; }
+.calc-out .kv-list { grid-template-columns: 1fr auto; }
+.calc-out h4 { margin: 14px 0 6px; }
+.calc-out tr.chosen td { font-weight: 650; background: var(--surface-2); }
+.news-item { display: grid; grid-template-columns: 92px auto 1fr; gap: 4px 10px; align-items: baseline; font-size: 13px; padding: 6px 0; border-top: 1px solid var(--border); }
+.news-item:first-of-type { border-top: 0; }
+.news-item .when { color: var(--text-2); }
+.news-item .paused { grid-column: 2 / -1; font-size: 12px; color: var(--text); }
+@media (max-width: 820px) { .calc-grid { grid-template-columns: minmax(0, 1fr); } }
+tr.pick:hover td { background: var(--surface-2); }
+tr.pick[aria-current="true"] td { font-weight: 650; }
+
 @media (max-width: 1180px) {
-  .row2, .row3, .bottom { grid-template-columns: minmax(0, 1fr); }
+  .row2, .row3, .bottom, .market { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 820px) {
+  .assessment-grid { grid-template-columns: minmax(0, 1fr); }
   .top { padding: 10px 16px; gap: 12px; }
   .account { margin-left: 0; }
   .layout { grid-template-columns: minmax(0, 1fr); padding: 12px 16px 0; }
@@ -322,6 +366,8 @@ dialog.wide li { margin: 4px 0; }
   <div class="chips" id="chips"></div>
   <div class="account" id="account"></div>
   <div class="gate" id="gate"><span class="dot"></span><span>Connecting to MetaTrader 5…</span></div>
+  <button class="icon-btn text" id="calc-open" type="button" title="Position size, margin and leverage for any instrument">Calculator</button>
+  <button class="icon-btn text" id="acct-open" type="button" title="Your own accounts: type in the equity and every size, limit and warning is worked out for it">Account</button>
   <button class="icon-btn text" id="plan-open" type="button" title="The written trading plan: every rule the bot follows, generated from its settings">Plan</button>
   <button class="icon-btn text" id="alerts" type="button" title="Browser notification when a BUY or SELL appears">Alerts off</button>
   <button class="icon-btn" id="theme" type="button" title="Switch theme" aria-label="Switch theme">◐</button>
@@ -330,6 +376,7 @@ dialog.wide li { margin: 4px 0; }
 <main class="layout">
   <nav class="watch" id="watchlist" aria-label="Symbols"></nav>
   <section class="focus">
+    <div class="card assessment" id="assessment"><h2>Market assessment</h2><div class="muted">Reading the market context…</div></div>
     <div class="card advice" id="advice" aria-live="polite"><div class="muted">Waiting for the first update…</div></div>
     <div class="row2">
       <div class="card">
@@ -352,6 +399,9 @@ dialog.wide li { margin: 4px 0; }
   </section>
 </main>
 
+<section class="bottom single" style="padding-top:16px">
+  <div class="card"><h2>Market</h2><div id="market"></div></div>
+</section>
 <section class="bottom">
   <div class="card"><h2>Recent signals</h2><div id="signals"></div></div>
   <div class="card"><h2>Activity</h2><div id="activity"></div></div>
@@ -362,7 +412,10 @@ dialog.wide li { margin: 4px 0; }
 <section class="bottom single">
   <div class="card"><h2>Open positions</h2><div id="positions" class="table-scroll"></div></div>
 </section>
-<footer id="footer">Advice comes from the bot's own engine and risk rules. It is not financial advice; the README documents that these strategies lost money out-of-sample.</footer>
+<section class="bottom single" id="trades-section" hidden>
+  <div class="card"><h2 id="trades-title">Your closed trades</h2><div id="trades"></div></div>
+</section>
+<footer id="footer">Advice comes from the bot's own engine and risk rules; the market panel is context, not a signal. It is not financial advice; the README documents that these strategies lost money out-of-sample.</footer>
 
 <dialog id="confirm">
   <h3 id="confirm-title">Place order?</h3>
@@ -371,6 +424,27 @@ dialog.wide li { margin: 4px 0; }
     <button type="button" id="confirm-cancel">Cancel</button>
     <button type="button" class="go" id="confirm-go">Place order</button>
   </div>
+</dialog>
+<dialog id="form">
+  <h3 id="form-title"></h3>
+  <div id="form-body"></div>
+  <div class="actions">
+    <button type="button" id="form-cancel">Cancel</button>
+    <button type="button" class="go" id="form-go">Save</button>
+  </div>
+</dialog>
+<dialog id="calc" class="wide">
+  <h3>Calculator</h3>
+  <div class="calc-grid">
+    <div id="calc-form"></div>
+    <div class="calc-out" id="calc-out"><div class="muted">Fill in the left side.</div></div>
+  </div>
+  <div class="actions"><button type="button" id="calc-close">Close</button></div>
+</dialog>
+<dialog id="accounts" class="wide">
+  <h3>Your accounts</h3>
+  <div id="accounts-body"></div>
+  <div class="actions"><button type="button" id="accounts-close">Close</button></div>
 </dialog>
 <dialog id="plan-dialog" class="wide">
   <h3 id="plan-title">Trading plan</h3>
@@ -391,6 +465,8 @@ const lastBid = {};
 let hoverIndex = null;
 let planSide = 0;              // 0 = follow the bot; +1 / -1 = the side the user picked
 let lastGoodUpdate = 0;
+let lastSnapshotTime = 0;
+let lastSnapshotAdvance = 0;
 
 // --- helpers ---------------------------------------------------------------------------------
 function el(tag, props, ...children) {
@@ -468,7 +544,12 @@ async function poll() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state = await res.json();
     lastGoodUpdate = Date.now();
-    if (state.now) clockOffset = parseTime(state.now) - Date.now();
+    const snapshotTime = state.now ? Number(parseTime(state.now)) : NaN;
+    if (Number.isFinite(snapshotTime) && snapshotTime > lastSnapshotTime) {
+      clockOffset = snapshotTime - Date.now();
+      lastSnapshotTime = snapshotTime;
+      lastSnapshotAdvance = Date.now();
+    }
     const banner = $("#banner");
     if (state.error) { banner.textContent = state.error; banner.classList.add("show"); }
     else banner.classList.remove("show");
@@ -477,6 +558,10 @@ async function poll() {
     const banner = $("#banner");
     banner.textContent = "Lost contact with the tradebot process. Is `tradebot ui` still running?";
     banner.classList.add("show");
+    if (state) {
+      state = { ...state, error: "The dashboard is disconnected; fresh analysis is unavailable." };
+      renderAssessment(symbolRow(selected));
+    }
   } finally {
     setTimeout(poll, 1000);
   }
@@ -524,6 +609,7 @@ function render() {
   renderHeader();
   renderWatchlist();
   const row = symbolRow(selected);
+  renderAssessment(row);
   if (row && !row.error && row.advice) {
     renderAdvice(row);
     renderPlan(row);
@@ -535,6 +621,9 @@ function render() {
   }
   renderLimits();
   renderPositions();
+  renderMarket();
+  renderTrades();
+  renderAccounts(false);
   renderReversalBar();
   renderSignals();
   renderActivity();
@@ -590,8 +679,10 @@ function renderHeader() {
   const a = state.account;
   $("#chips").replaceChildren(
     el("span", { class: "chip", text: `Session ${state.session}` }),
-    el("span", { class: "chip", text: `${a.server || "MT5"} · ${a.is_real ? "REAL MONEY" : "demo"}` }),
+    el("span", { class: "chip", text: `Prices: ${a.server || "MT5"}` }),
+    el("span", { class: "chip", text: activeAccount() ? `Your account: ${activeAccount()}` : `MT5 account · ${a.is_real ? "REAL MONEY" : "demo"}` }),
   );
+  $("#acct-open").textContent = activeAccount() ? `Account: ${activeAccount()}` : "Account";
   const stat = (label, value) => el("div", { class: "stat" }, el("span", { class: "label", text: label }), el("span", { class: "value", text: value }));
   $("#account").replaceChildren(
     stat("Balance", money(a.balance)),
@@ -602,8 +693,136 @@ function renderHeader() {
   const g = state.gate;
   $("#gate").replaceChildren(
     el("span", { class: `dot ${g.execute ? "on" : "off"}` }),
-    el("span", { text: g.execute ? `Orders ON (${g.reason})` : `Advice only: ${g.reason}` }),
+    el("span", { text: g.execute ? `Orders ON (${g.reason})` : activeAccount() ? "Advice only: you place the orders at your broker and log them here" : `Advice only: ${g.reason}` }),
   );
+}
+
+// --- your own accounts and the trades you log ------------------------------------------------
+const lev = (n) => (n >= 1e6 ? "unlimited" : String(n));   // "unlimited" leverage is reported as about 2e9
+const activeAccount = () => (state && state.book && state.book.active) || null;
+const bookAccounts = () => (state && state.book && state.book.accounts) || [];
+// Rows are redrawn every second, so a button acts on the press: a click that straddles a redraw is lost.
+const press = (fn) => ({ onpointerdown: (e) => { e.preventDefault(); fn(); }, onclick: fn });
+async function bookOp(body) {
+  try {
+    const res = await fetch("/api/book", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Tradebot-Token": TOKEN },
+      body: JSON.stringify(body),
+    });
+    const out = await res.json();
+    toast(out.message || (out.ok ? "Done." : "That did not work."), out.ok ? 6000 : 10000);
+    return Boolean(out.ok);
+  } catch (e) {
+    toast(`Request failed: ${e.message}`);
+    return false;
+  }
+}
+// One small form for every change to the book. `fields`: [{key, label, value, options, text, placeholder}].
+function formDialog(title, intro, fields, goLabel, onGo) {
+  const dialog = $("#form");
+  if (dialog.open) return;
+  $("#form-title").textContent = title;
+  const inputs = {};
+  const nodes = fields.map((f) => {
+    const input = f.options
+      ? el("select", {}, ...f.options.map((o) => el("option", { value: o, selected: o === f.value }, o)))
+      : el("input", { type: "text", inputmode: f.text ? "text" : "decimal", autocomplete: "off", value: f.value == null ? "" : String(f.value), placeholder: f.placeholder || "" });
+    if (f.onchange) input.addEventListener("change", () => f.onchange(inputs));
+    inputs[f.key] = input;
+    return el("label", { class: "field" }, f.label, input);
+  });
+  $("#form-body").replaceChildren(...[
+    intro ? el("p", { class: "fine", style: "margin:0 0 12px", text: intro }) : null,
+    nodes.length ? el("div", { class: nodes.length > 3 ? "fields2" : "" }, ...nodes) : null].filter(Boolean));
+  const go = $("#form-go");
+  go.textContent = goLabel;
+  go.onclick = async () => {
+    const values = {};
+    for (const [key, input] of Object.entries(inputs)) values[key] = input.value.trim();
+    go.disabled = true;
+    const ok = await onGo(values);
+    go.disabled = false;
+    if (ok) dialog.close();
+  };
+  $("#form-cancel").onclick = () => dialog.close();
+  dialog.showModal();
+  const first = Object.values(inputs).find((i) => i.tagName === "INPUT");
+  if (first) { first.focus(); first.select(); }
+}
+function editAccount(account) {
+  formDialog(account ? `${account.name}: equity` : "Add an account",
+    "Type the equity your broker's app shows right now, open trades included. Every lot size, loss limit and risk figure is then worked out from it. Amounts are in the terminal's currency. Leave the lot fields empty unless your broker's smallest lot differs from the terminal's.",
+    [{ key: "name", label: "Name (the broker, for example)", value: account ? account.name : "", text: true, placeholder: "Exness" },
+     { key: "equity", label: `Equity (${currency()})`, value: account ? account.equity.toFixed(2) : "", placeholder: "500" },
+     { key: "min_lot", label: "Smallest lot (optional)", value: account && account.min_lot != null ? account.min_lot : "", placeholder: "0.01" },
+     { key: "lot_step", label: "Lot step (optional)", value: account && account.lot_step != null ? account.lot_step : "", placeholder: "0.01" },
+     { key: "leverage", label: "Leverage 1:N (optional: checks margin)", value: account && account.leverage != null ? account.leverage : "", placeholder: "500" }],
+    "Save", (v) => bookOp({ op: "account", ...v }));
+}
+let accountsKey = "";
+function renderAccounts(open) {
+  const dialog = $("#accounts");
+  if (open && !dialog.open) { accountsKey = ""; dialog.showModal(); }
+  if (!dialog.open) return;
+  const b = state.book;
+  if (!b) { $("#accounts-body").replaceChildren(el("div", { class: "muted", text: "The account book is not available in this session." })); return; }
+  const key = `${b.active}|${b.accounts.map((a) => `${a.name}:${a.balance}:${a.open}:${a.min_lot}:${a.lot_step}:${a.leverage}`).join()}`;
+  if (key === accountsKey) return;   // rebuilt only when something changed, so a click is never lost
+  accountsKey = key;
+  const head = el("tr", {}, ...["Account", "Equity", "Floating", "Open trades", "Lots", "Leverage", ""].map((h, i) => el("th", { class: i >= 1 && i <= 3 ? "n" : "", text: h })));
+  const inUse = (on) => (on ? el("span", { class: "badge BUY", text: "IN USE" }) : null);
+  const rows = b.accounts.map((a) => el("tr", {},
+    el("td", {}, a.name, " ", inUse(a.name === b.active)),
+    el("td", { class: "n", text: money(a.equity) }),
+    el("td", { class: "n", text: a.open ? money(a.floating, true) : "—" }),
+    el("td", { class: "n", text: String(a.open) }),
+    el("td", { class: "muted", text: a.min_lot == null && a.lot_step == null ? "as the terminal" : `min ${a.min_lot == null ? "—" : a.min_lot}, step ${a.lot_step == null ? "—" : a.lot_step}` }),
+    el("td", { class: "muted", text: a.leverage ? `1:${a.leverage}` : "not set" }),
+    el("td", { class: "n" },
+      a.name === b.active ? null : el("button", { class: "mini", type: "button", onclick: () => bookOp({ op: "use", name: a.name }) }, "Use"),
+      el("button", { class: "mini", type: "button", onclick: () => editAccount(a) }, "Set equity"),
+      el("button", { class: "mini", type: "button", onclick: () => formDialog(`Remove ${a.name}?`, "Its closed trades stay in the book. An account with open trades cannot be removed.", [], "Remove", () => bookOp({ op: "remove", name: a.name })) }, "Remove"))));
+  const mt5 = el("tr", {},
+    el("td", {}, `MetaTrader 5 account (${state.account.server || "terminal"})`, " ", inUse(!b.active)),
+    el("td", { class: "n muted", text: b.active ? "" : money(state.account.equity) }), el("td"), el("td"), el("td", { class: "muted", text: "the terminal's" }),
+    el("td", { class: "muted", text: b.active ? "the terminal's" : `1:${lev(state.account.leverage)}` }),
+    el("td", { class: "n" }, b.active ? el("button", { class: "mini", type: "button", onclick: () => bookOp({ op: "use", name: "" }) }, "Use") : null));
+  $("#accounts-body").replaceChildren(
+    el("div", { class: "fine", style: "margin:0 0 12px", text: "The terminal supplies prices. The account in use supplies the money: its equity sizes every trade, and the trades you log for it feed the loss limits, the reversal warnings and the review. Nothing here places an order." }),
+    el("div", { class: "table-scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows, mt5))),
+    el("div", { style: "margin-top:12px" }, el("button", { class: "order-btn", style: "width:auto;margin:0", type: "button", onclick: () => editAccount(null) }, "Add an account")),
+    el("div", { class: "fine", text: "From your phone, through the Telegram bot: /equity NAME AMOUNT, /took SYMBOL buy, /close ID, /open, /status, /market. Send /help for the list." }));
+}
+$("#acct-open").addEventListener("click", () => renderAccounts(true));
+$("#accounts-close").addEventListener("click", () => $("#accounts").close());
+function logTrade(row, p) {
+  const names = bookAccounts().map((a) => a.name);
+  if (!names.length) { renderAccounts(true); toast("Add an account first: the size is worked out from its equity."); return; }
+  const word = p.side > 0 ? "BUY" : "SELL";
+  const own = activeAccount() || names[0];
+  formDialog(`Log a ${word} of ${row.symbol}`,
+    "Record the trade you placed at your broker. Change anything that differs from the plan: the price you got, the lots, your stop. Leave lots empty to take the plan's size for that account.",
+    [{ key: "account", label: "Account", value: own, options: names, onchange: (inputs) => { inputs.volume.value = ""; } },
+     { key: "volume", label: "Lots", value: own === activeAccount() && p.volume ? p.volume : "", placeholder: "the plan's size" },
+     { key: "entry", label: "Entry price", value: px(p.entry, row.digits) },
+     { key: "sl", label: "Stop loss", value: px(p.stop, row.digits) },
+     { key: "tp", label: "Take profit", value: px(p.target, row.digits) },
+     { key: "note", label: "Note (optional)", value: "", text: true }],
+    "Log trade", (v) => bookOp({ op: "log", symbol: row.symbol, side: p.side, ...v }));
+}
+function closeTrade(p, digits, now) {
+  formDialog(`Close #${p.ticket}: ${p.side > 0 ? "BUY" : "SELL"} ${p.volume} ${p.symbol}`,
+    "Record that you closed it at your broker. Leave the result empty to have it worked out from the exit price; your broker's figure includes commission and swap, so type it in if you have it.",
+    [{ key: "price", label: "Exit price", value: now == null ? "" : px(now, digits) },
+     { key: "pnl", label: `Result at your broker (${currency()}, optional)`, value: "", placeholder: "worked out from the price" }],
+    "Close trade", (v) => bookOp({ op: "close", id: p.ticket, ...v }));
+}
+function amendTrade(p, digits) {
+  formDialog(`#${p.ticket} ${p.symbol}: stop and target`,
+    "Keep the book in step when you move the stop or the target at your broker. The stop it opened with still defines 1R.",
+    [{ key: "sl", label: "Stop loss", value: p.sl ? px(p.sl, digits) : "" }, { key: "tp", label: "Take profit", value: p.tp ? px(p.tp, digits) : "" }],
+    "Save", (v) => bookOp({ op: "amend", id: p.ticket, ...v }));
 }
 
 function sparkline(row) {
@@ -666,6 +885,45 @@ function renderWatchlist() {
     );
   });
   $("#watchlist").replaceChildren(...items);
+}
+
+function renderAssessment(row) {
+  const box = $("#assessment"), a = row && row.analysis;
+  const heading = el("h2", { text: "Market assessment" });
+  if (!a || (row && row.error)) {
+    box.replaceChildren(heading, el("div", { class: "muted", text: row && row.error ? row.error : "Waiting for enough market data." }));
+    return;
+  }
+  const expired = a.valid_until && Date.now() + clockOffset > parseTime(a.valid_until);
+  const disconnected = Date.now() - lastGoodUpdate > 10000 || Date.now() - lastSnapshotAdvance > 10000;
+  const current = a.status === "ready" && !state.error && !expired && !disconnected;
+  const stamp = a.as_of ? `Closed bar ${localTime(a.as_of)} (${utcTime(a.as_of)})` : "Closed-bar data unavailable";
+  const source = state.account && state.account.server;
+  const parts = [heading,
+    el("div", { class: "fine", text: `${stamp}${source ? ` · ${source}` : ""}` }),
+    el("div", { class: "headline", text: state.error || disconnected ? "Analysis paused: waiting for the price feed" : expired ? "Analysis expired: waiting for fresh data" : a.headline })];
+  const list = (title, items) => el("div", {}, el("h3", { class: "subhead", text: title }),
+    el("ul", {}, ...items.map((text) => el("li", { text }))));
+  if (!current) {
+    const reasons = state.error ? [state.error] : expired || disconnected ? ["A fresh quote and dashboard update are required."] : a.conflicts;
+    parts.push(list("What is missing", reasons && reasons.length ? reasons : ["Fresh data is required."]));
+    box.replaceChildren(...parts);
+    return;
+  }
+  parts.push(el("div", { class: "assessment-grid" },
+    list("Evidence", a.evidence || []),
+    list("Conflicts and cautions", a.conflicts && a.conflicts.length ? a.conflicts : ["No directional conflict in the available evidence."])));
+  if (a.scenarios && a.scenarios.length) {
+    parts.push(el("div", { class: "assessment-grid" }, ...a.scenarios.map((s) =>
+      el("div", { class: `scenario ${s.side < 0 ? "bearish" : "bullish"}` },
+        el("h3", { class: "subhead", text: s.label }),
+        el("p", {}, el("strong", { text: "Confirmation: " }), s.confirmation),
+        el("p", {}, el("strong", { text: "Invalidation: " }), s.invalidation)))));
+  }
+  if (a.watch_next && a.watch_next.length) parts.push(list("Watch next", a.watch_next));
+  if (a.change) parts.push(el("div", { class: "fine", text: `Last change ${localTime(a.change.time)}: ${a.change.text}` }));
+  parts.push(el("div", { class: "fine", text: a.limitations || "Scenarios describe conditions to watch; no win probability is estimated." }));
+  box.replaceChildren(...parts);
 }
 
 function renderAdvice(row) {
@@ -841,6 +1099,26 @@ function renderPlan(row) {
     el("div", {}, el("span", { class: "label" }, el("i", { class: "swatch", style: `background:${css("--down")}` }), "If stop is hit"), el("div", { class: "amount", text: p.volume ? money(-p.risk_amount, true) : "—" })),
     el("div", {}, el("span", { class: "label" }, el("i", { class: "swatch", style: `background:${css("--up")}` }), "If target is hit"), el("div", { class: "amount", text: p.volume ? money(p.reward_amount, true) : "—" })),
   );
+  const side = p.side > 0 ? "buy" : "sell";
+  const others = (row.sizes && row.sizes[side]) || [];
+  const sizes = others.length ? el("div", { class: "sizes" },
+    el("div", { class: "fine", style: "margin:0", text: "The same plan at your other accounts" }),
+    ...others.map((s) => el("div", {}, el("span", { class: "who", text: `${s.account} (${money(s.equity)})` }),
+      el("strong", { text: s.volume ? `${s.volume} lots · ${money(-s.risk_amount, true)}` : "no size" })))) : null;
+  const mk = state.market && state.market.symbols && state.market.symbols[row.symbol];
+  const overlap = mk && mk.overlap && mk.overlap[side] ? el("div", { class: "notice", style: "margin-top:10px", text: mk.overlap[side] }) : null;
+  if (activeAccount() || (state.book && !state.gate.execute && bookAccounts().length)) {
+    const own = activeAccount();
+    const logBtn = el("button", { class: `order-btn ${word}`, type: "button", ...press(() => logTrade(row, p)) }, `I placed this ${word}: log it`);
+    const fine = [
+      p.rejected ? `No size for ${own || "this account"}: ${p.rejected}. ` + (/minimum lot/.test(p.rejected) ? "The account is too small for the terminal's smallest lot at this stop; if your broker takes smaller lots, set them under Account." : "") : null,
+      own ? `Sized from the equity you entered for ${own} (${money(state.account.equity)}). Amounts come from the terminal's profit calculator at these prices, in ${currency()}; your broker's commission, swap and spread are not in them.`
+        : "The size above is for the MetaTrader 5 account. Choose one of your accounts under Account to size from its equity.",
+      "Nothing is sent to a broker from here. Place the trade on your phone, then log it so the loss limits, the reversal warning and the review know about it.",
+    ].filter(Boolean).map((text) => el("div", { class: "fine", text }));
+    box.replaceChildren(...[el("h2", { text: title }), toggle, el("div", { class: "sub", text: subtitle }), list, outcome, sizes, overlap, logBtn, ...fine].filter(Boolean));
+    return;
+  }
   const g = state.gate;
   let label, disabled = true;
   if (!g.execute) label = "Orders are off: advice only";
@@ -854,7 +1132,7 @@ function renderPlan(row) {
   if (!g.execute) notes.push(el("div", { class: "fine" }, "To enable the button: set ", el("code", { text: "dry_run: false" }), " and ", el("code", { text: "live_trading_confirm: true" }), ", then start with ", el("code", { text: "tradebot ui --live" }), "."));
   notes.push(el("div", { class: "fine", text: "Amounts come from MT5's own profit calculator at these exact prices, before commission and swap. A stop is a market order once touched, so a fast market or a weekend gap can fill it worse." }));
   notes.push(el("div", { class: "fine", text: "The stop and target are sent with the order. Breakeven at +1R, half off at +1.5R and the trailing stop apply while `tradebot run` manages the position." }));
-  box.replaceChildren(el("h2", { text: title }), toggle, el("div", { class: "sub", text: subtitle }), list, outcome, btn, ...notes);
+  box.replaceChildren(...[el("h2", { text: title }), toggle, el("div", { class: "sub", text: subtitle }), list, outcome, sizes, overlap, btn, ...notes].filter(Boolean));
 }
 
 function renderChecks(row) {
@@ -901,8 +1179,8 @@ function renderLimits() {
   const box = $("#limits");
   if (!r) { box.replaceChildren(el("div", { class: "empty", text: "Not available yet." })); return; }
   const tile = (label, value, limitText, used, limit) => {
-    const share = limit > 0 ? Math.max(0, Math.min(1, used / limit)) : 0;
-    const cls = limit > 0 && used >= limit ? "hit" : share >= 0.75 ? "near" : "";
+    const share = used === null ? 1 : limit > 0 ? Math.max(0, Math.min(1, used / limit)) : 0;
+    const cls = used === null || (limit > 0 && used >= limit) ? "hit" : share >= 0.75 ? "near" : "";
     return el("div", { class: `limit ${cls}` },
       el("div", { class: "label", text: label }),
       el("div", {}, el("span", { class: "value", text: value }), el("span", { class: "of", text: limit > 0 ? ` ${limitText}` : " no limit" })),
@@ -916,7 +1194,7 @@ function renderLimits() {
       tile(`Drawdown (${r.drawdown_days} days)`, `${r.drawdown.toFixed(2)}%`, `stop at ${num(r.drawdown_limit, 1)}%`, r.drawdown, r.drawdown_limit),
       tile("Losses in a row", String(r.losing_streak), `stop at ${r.streak_limit}`, r.losing_streak, r.streak_limit),
       tile("Entries today", String(r.entries_today), `of ${r.entries_limit}`, r.entries_today, r.entries_limit),
-      tile("Open risk", `${r.open_risk_percent.toFixed(2)}%`, `of ${num(r.open_risk_limit, 1)}% · ${r.positions}/${r.positions_limit} positions`, r.open_risk_percent, r.open_risk_limit)),
+      tile("Open risk", r.open_risk_percent === null ? "Unknown" : `${r.open_risk_percent.toFixed(2)}%`, `of ${num(r.open_risk_limit, 1)}% · ${r.positions}/${r.positions_limit} positions`, r.open_risk_percent, r.open_risk_limit)),
     el("div", { class: "fine", text: r.blocked
       ? `New entries are stopped: ${r.blocked}.`
       : "No limit is hit. When one is, new entries stop, for the bot's signals and for trades you place from this page alike." }),
@@ -944,8 +1222,12 @@ $("#plan-close").addEventListener("click", () => $("#plan-dialog").close());
 
 function renderPositions() {
   const rows = state.positions || [];
-  if (!rows.length) { $("#positions").replaceChildren(el("div", { class: "empty", text: "No open positions." })); return; }
+  if (!rows.length) { $("#positions").replaceChildren(el("div", { class: "empty", text: activeAccount() ? `No open trades logged for ${activeAccount()}. When you place one on your phone, log it from the plan card or with /took in Telegram.` : "No open positions." })); return; }
   const head = el("tr", {}, ...["Symbol", "Side", "Lots", "Open", "Stop", "Target", "Now", "P/L", "R", "Source"].map((h, i) => el("th", { class: i >= 2 && i <= 8 ? "n" : "", text: h })));
+  const actions = (p, d, now) => [
+    el("button", { class: "mini", type: "button", ...press(() => closeTrade(p, d, now)) }, "Close"),
+    el("button", { class: "mini", type: "button", ...press(() => amendTrade(p, d)) }, "Stops"),
+    el("button", { class: "mini", type: "button", ...press(() => formDialog(`Delete #${p.ticket} from the book?`, "For a trade logged by mistake. A trade you really took should be closed, not deleted, so it counts in the limits and the review.", [], "Delete", () => bookOp({ op: "delete", id: p.ticket }))) }, "Delete")];
   const body = rows.map((p) => {
     const sym = symbolRow(p.symbol);
     const d = sym ? sym.digits : 5;
@@ -962,9 +1244,247 @@ function renderPositions() {
       el("td", { class: "n", text: now == null ? "—" : px(now, d) }),
       el("td", { class: "n", text: money(p.profit, true) }),
       el("td", { class: "n", text: p.r == null ? "—" : `${p.r >= 0 ? "+" : "−"}${Math.abs(p.r).toFixed(2)}R` }),
-      el("td", { class: "muted", text: p.bot ? "bot" : "manual" })), turned];
+      p.book ? el("td", { class: "muted", style: "white-space:nowrap" }, `#${p.ticket} · ${p.comment === "signal" ? "bot signal" : "your call"}`, ...actions(p, d, now))
+        : el("td", { class: "muted", text: p.bot ? "bot" : "manual" })), turned];
   });
   $("#positions").replaceChildren(el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
+}
+
+// --- the market as a whole -------------------------------------------------------------------
+const signed = (v, d = 1) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(d)}`;
+function renderMarket() {
+  const box = $("#market");
+  const mk = state.market;
+  if (!mk) { box.replaceChildren(el("div", { class: "empty", text: "Not available yet." })); return; }
+  const row = symbolRow(selected);
+  const detail = (mk.symbols || {})[selected];
+  // currency strength
+  const strength = (mk.strength || []).map((r) => {
+    const share = Math.min(1, Math.abs(r.day) / 2) * 50;
+    return el("div", { class: "bar", title: r.week == null ? "" : `Last week: ${signed(r.week)}` },
+      el("strong", { text: r.asset }),
+      el("div", { class: "track" }, el("div", { class: "fill", style: `background:${css(r.day >= 0 ? "--up" : "--down")};width:${share.toFixed(1)}%;${r.day >= 0 ? "left:50%" : "right:50%"}` })),
+      el("span", { class: "n", text: signed(r.day) }));
+  });
+  const sessions = el("div", { class: "chips", style: "margin-bottom:10px" }, ...(mk.sessions || []).map((s) =>
+    el("span", { class: "chip", title: s.hours }, el("span", { class: `dot ${s.open ? "on" : ""}` }), `${s.name} ${s.open ? "open" : "closed"}`)));
+  const colStrength = el("div", {}, el("h3", { text: "Currency strength · last day" }), sessions,
+    ...(strength.length ? strength : [el("div", { class: "empty", text: "Needs a day of bars on this timeframe." })]),
+    el("div", { class: "fine", text: "Each currency's move over the last day, averaged over its instruments and scaled by ATR (hover for the last week). It describes what has happened. It did not predict the next day in the stored history." }));
+  // exposure and correlation
+  const exposure = (mk.exposure || []).map((r) => el("li", {},
+    el("strong", { text: `${r.amount > 0 ? "Long" : "Short"} ${r.asset} ` }), `${money(Math.abs(r.amount))}`,
+    r.percent == null ? "" : ` · ${Math.abs(r.percent).toFixed(0)}% of equity`, el("span", { class: "faint", text: ` · ${r.through.join(", ")}` })));
+  const corr = mk.correlation, ci = corr ? corr.symbols.indexOf(selected) : -1;
+  const peers = ci < 0 ? [] : corr.symbols.map((s, i) => ({ s, v: corr.matrix[ci][i] })).filter((x) => x.s !== selected && x.v != null).sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+  const colExposure = el("div", {}, ...[el("h3", { text: activeAccount() ? `Your exposure · ${activeAccount()}` : "Exposure" }),
+    exposure.length ? el("ul", {}, ...exposure) : el("div", { class: "empty", text: "No open positions, so nothing is exposed." }),
+    ...(mk.warnings || []).map((w) => el("div", { class: "notice", style: "margin-top:8px", text: w })),
+    el("h3", { style: "margin-top:14px", text: `${selected} has moved with` }),
+    peers.length ? el("div", {}, ...peers.map((x) => el("div", { class: "lvl" }, el("span", { text: x.s }), el("span", { class: "faint", text: Math.abs(x.v) >= 0.7 ? (x.v > 0 ? "together" : "opposite") : "loosely" }), el("strong", { class: "n", text: signed(x.v, 2) }))))
+      : el("div", { class: "empty", text: "Needs two instruments with shared bars." }),
+    corr ? el("div", { class: "fine", text: `Correlation of ${state.timeframe} returns over the last ${corr.bars} bars. Two trades on instruments above ±0.7 are close to one trade of twice the size, or to no trade at all.` }) : null].filter(Boolean));
+  // levels for the instrument on screen
+  let colLevels = el("div", {}, el("h3", { text: `${selected} · levels` }), el("div", { class: "empty", text: "No daily bars for this instrument yet." }));
+  if (row && detail && detail.levels) {
+    const L = detail.levels, v = detail.volatility;
+    const items = L.levels.map((x) => ({ ...x, here: false }));
+    items.push({ name: "Price now", price: row.bid, away_atr: 0, here: true });
+    items.sort((a, b) => b.price - a.price);
+    const facts = [];
+    if (L.range_used != null) facts.push(`Today's range is ${distance(row, L.day_range)}: ${L.range_used.toFixed(0)}% of the ${L.adr_days}-day average (${distance(row, L.adr)}).`);
+    if (v) facts.push(`Volatility is ${v.label}: ATR is higher than ${v.percentile.toFixed(0)}% of its last ${v.bars} ${state.timeframe} bars.`);
+    if (detail.swap) facts.push(`Holding overnight costs or pays, per lot and night, at the terminal's broker: buy ${money(detail.swap.long, true)}, sell ${money(detail.swap.short, true)}${detail.swap.triple ? ` (three nights on ${detail.swap.triple})` : ""}. Your broker's figure differs.`);
+    colLevels = el("div", {}, el("h3", { text: `${selected} · levels` }),
+      ...items.map((x) => el("div", { class: `lvl ${x.here ? "here" : ""}` }, el("span", { class: x.here ? "" : "muted", text: x.name }), el("span", { class: "n", text: px(x.price, row.digits) }),
+        el("span", { class: "n faint", text: x.here ? "" : `${signed(x.away_atr)} ATR` }))),
+      ...facts.map((text) => el("div", { class: "fine", text })));
+  }
+  // every instrument on one line
+  const head = el("tr", {}, ...["Symbol", "Advice", "Trend", "Higher timeframes", "RSI", "ADX", "Volatility", "Day range used", "Nearest level"].map((h, i) => el("th", { class: i >= 4 && i <= 7 ? "n" : "", text: h })));
+  const body = state.symbols.filter((s) => s.advice).map((s) => {
+    const d = (mk.symbols || {})[s.symbol] || {}, t = s.trend, L = d.levels;
+    const higher = t ? (t.higher || []).map((h) => `${h.timeframe} ${h.direction > 0 ? "▲" : h.direction < 0 ? "▼" : "•"}`).join("  ") : "—";
+    return el("tr", { class: "pick", "aria-current": s.symbol === selected ? "true" : "false", ...press(() => { if (s.symbol !== selected) select(s.symbol); }) },
+      el("td", { text: s.symbol }),
+      el("td", {}, el("span", { class: `badge ${s.advice.action}`, text: badgeText(s.advice) })),
+      el("td", {}, trendArrow(t, false), t && t.direction ? ` ${t.state === "ending" ? "likely ending" : t.state === "weakening" ? "weakening" : `${t.age} bars`}` : " none"),
+      el("td", { class: "muted", text: higher }),
+      el("td", { class: "n", text: d.rsi == null ? "—" : d.rsi.toFixed(0) }),
+      el("td", { class: "n", text: d.adx == null ? "—" : d.adx.toFixed(0) }),
+      el("td", { class: "n", text: d.volatility ? `${d.volatility.label} (${d.volatility.percentile.toFixed(0)}%)` : "—" }),
+      el("td", { class: "n", text: L && L.range_used != null ? `${L.range_used.toFixed(0)}%` : "—" }),
+      el("td", { class: "muted", text: L ? `${L.nearest.name} · ${signed(L.nearest.away_atr)} ATR` : "—" }));
+  });
+  box.replaceChildren(
+    el("div", { class: "market" }, colStrength, colExposure, colLevels),
+    newsBlock(mk.news),
+    el("div", { class: "subhead", style: "margin-top:18px", text: "Every instrument" }),
+    el("div", { class: "table-scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body))),
+    el("div", { class: "fine", text: "Context for a decision you make, not a signal. Levels are the previous day and week from the terminal's daily bars, and the classic floor pivots. Click a row to open that instrument." }));
+}
+
+// --- the news --------------------------------------------------------------------------------
+function newsBlock(news) {
+  if (!news) return null;
+  const head = el("div", { class: "subhead", style: "margin-top:18px", text: "News · next 36 hours" });
+  const status = !news.on ? "The news feed is off (schedule.news_feed in config.json); only your own news file is used."
+    : news.error ? `The calendar could not be updated: ${news.error}. The last download is still used.`
+    : news.updated ? `Economic calendar pulled from the ForexFactory feed, last updated ${localTime(news.updated)}. High-impact events pause new entries on the instruments they touch.`
+    : "Downloading the economic calendar…";
+  if (!news.events.length) return el("div", {}, head, el("div", { class: "empty", text: "Nothing high or medium impact for your instruments." }), el("div", { class: "fine", text: status }));
+  const rows = news.events.map((e) => {
+    const t = parseTime(e.time), left = t - (Date.now() + clockOffset);
+    const day = t.toLocaleDateString([], { weekday: "short" });
+    const mins = Math.round(left / 60000), hours = Math.floor(mins / 60);
+    const when = left < -60000 ? `${day} ${localTime(e.time)}` : left < 60000 ? "now"
+      : mins < 60 ? `in ${mins} min` : hours < 24 ? `in ${hours} h ${String(mins % 60).padStart(2, "0")} min` : `${day} ${localTime(e.time)}`;
+    const figures = [e.forecast ? `forecast ${e.forecast}` : "", e.previous ? `previous ${e.previous}` : ""].filter(Boolean).join(" · ");
+    return el("div", { class: "news-item" },
+      el("span", { class: "when", title: `${day} ${localTime(e.time)} (${utcTime(e.time)})`, text: when }),
+      el("span", { class: `badge ${e.impact}`, text: `${e.currency} ${e.impact.toUpperCase()}` }),
+      el("span", {}, el("strong", { text: e.title }), figures ? el("span", { class: "faint", text: ` · ${figures}` }) : null,
+        el("span", { class: "faint", text: ` · ${e.symbols.join(", ")}` })),
+      e.paused_now ? el("span", { class: "paused" }, el("strong", { text: "New entries paused" }), ` on ${e.symbols.join(", ")} until ${localTime(e.pause_to)}.`) : null);
+  });
+  return el("div", {}, head, ...rows, el("div", { class: "fine", text: status }));
+}
+
+// --- the calculator --------------------------------------------------------------------------
+const calcState = { symbol: null, side: 1, timer: null, last: null };
+const CALC_FIELDS = [
+  ["entry", "Entry price", "live price"], ["stop", "Stop loss (price)", "the plan's"], ["stop_pips", "or stop distance (pips)", ""],
+  ["target", "Take profit (price)", "the plan's"], ["risk_percent", "Risk (% of equity)", ""], ["risk_amount", "or risk (money)", ""],
+  ["lots", "or lots", ""], ["equity", "Equity", ""], ["margin_cap", "Margin cap (% of equity)", ""],
+];
+function openCalc() {
+  const row = symbolRow(selected);
+  calcState.symbol = selected;
+  calcState.side = (row && planFor(row) && planFor(row).side) || 1;
+  const inputs = {};
+  const symbolSelect = el("select", { onchange: () => { calcState.symbol = symbolSelect.value; for (const k of ["entry", "stop", "target"]) inputs[k].value = ""; runCalc(inputs); } },
+    ...state.symbols.map((r) => el("option", { value: r.symbol, selected: r.symbol === selected }, r.symbol)));
+  const sideButtons = [1, -1].map((side) => el("button", { type: "button", "aria-pressed": side === calcState.side ? "true" : "false",
+    onclick: () => { calcState.side = side; sideButtons.forEach((b, i) => b.setAttribute("aria-pressed", [1, -1][i] === side ? "true" : "false")); for (const k of ["stop", "target"]) inputs[k].value = ""; runCalc(inputs); } }, side > 0 ? "Buy" : "Sell"));
+  const leverage = el("select", { onchange: () => runCalc(inputs) },
+    el("option", { value: "", text: `Account's (1:${lev(state.account.leverage)})` }),
+    ...[10, 20, 30, 50, 100, 200, 300, 400, 500, 1000, 2000].map((n) => el("option", { value: String(n) }, `1:${n}`)));
+  inputs.leverage = leverage;
+  const fields = CALC_FIELDS.map(([key, label, hint]) => {
+    const input = el("input", { type: "text", inputmode: "decimal", autocomplete: "off", placeholder: hint });
+    input.addEventListener("input", () => {   // a stop as a price or as pips, and one way to size: the other is cleared
+      const pairs = { stop: ["stop_pips"], stop_pips: ["stop"], risk_percent: ["risk_amount", "lots"], risk_amount: ["risk_percent", "lots"], lots: ["risk_percent", "risk_amount"] };
+      if (input.value) for (const other of pairs[key] || []) inputs[other].value = "";
+      clearTimeout(calcState.timer);
+      calcState.timer = setTimeout(() => runCalc(inputs), 300);
+    });
+    inputs[key] = input;
+    return el("label", { class: "field" }, label, input);
+  });
+  $("#calc-form").replaceChildren(
+    el("label", { class: "field" }, "Instrument", symbolSelect),
+    el("div", { class: "seg", role: "group", "aria-label": "Side" }, ...sideButtons),
+    el("div", { class: "fields2" }, ...fields, el("label", { class: "field" }, "Leverage", leverage)),
+    el("div", { class: "fine", text: "Left empty: the live price, the bot's plan for the stop and target, the config's risk per trade and margin cap, and the account's equity and leverage. Some brokers give gold, indices or crypto less leverage than forex: choose that instrument's leverage." }));
+  $("#calc").showModal();
+  runCalc(inputs);
+}
+async function runCalc(inputs) {
+  const body = { symbol: calcState.symbol, side: calcState.side };
+  for (const [key, input] of Object.entries(inputs)) if (input.value.trim()) body[key] = input.value.trim();
+  try {
+    const res = await fetch("/api/calc", { method: "POST", headers: { "Content-Type": "application/json", "X-Tradebot-Token": TOKEN }, body: JSON.stringify(body) });
+    const out = await res.json();
+    if (!out.ok) { $("#calc-out").replaceChildren(el("div", { class: "notice", style: "grid-column:auto", text: out.message })); return; }
+    renderCalc(out.result, inputs);
+  } catch (e) {
+    $("#calc-out").replaceChildren(el("div", { class: "notice", style: "grid-column:auto", text: `Could not calculate: ${e.message}` }));
+  }
+}
+function renderCalc(r, inputs) {
+  const d = r.digits, unit = r.pip_label;
+  const m = (v, signed) => (v == null ? "—" : new Intl.NumberFormat(undefined, { style: "currency", currency: r.currency, signDisplay: signed ? "exceptZero" : "auto" }).format(v));
+  if (!inputs.stop.value && !inputs.stop_pips.value && r.stop != null) inputs.stop.placeholder = `${px(r.stop, d)} (plan)`;
+  if (!inputs.target.value && r.target != null) inputs.target.placeholder = `${px(r.target, d)} (plan)`;
+  if (!inputs.risk_percent.value && !inputs.risk_amount.value && !inputs.lots.value && r.risk_percent_asked) inputs.risk_percent.placeholder = `${r.risk_percent_asked} (config)`;
+  if (!inputs.equity.value) inputs.equity.placeholder = `${num(r.equity)} (account)`;
+  if (!inputs.margin_cap.value && r.margin_cap) inputs.margin_cap.placeholder = `${r.margin_cap} (config)`;
+  const line = (k, v, x) => [el("span", { class: "k", text: k }), el("span", { class: "v", text: v }), ...(x ? [el("span", { class: "x", style: "grid-column:1/-1;text-align:left;margin-top:-4px", text: x })] : [])];
+  const pct = (v, digits = 1) => (v == null ? "—" : `${v.toFixed(digits)}%`);
+  const pipsAway = (v) => (v == null ? "—" : `${Math.round(v).toLocaleString()} ${unit}`);
+  const size = el("div", { class: "kv-list" },
+    ...line("Size", r.lots ? `${r.lots} lots` : "—", r.lots ? r.lots_how : `minimum ${r.volume_min}, step ${r.volume_step}`),
+    ...line(`Value of a ${unit.slice(0, -1)}`, m(r.pip_value), `${m(r.pip_value_per_lot)} a lot`),
+    ...line("Entry", `${px(r.entry, d)}${r.live ? " (live)" : ""}`),
+    ...line("Stop loss", r.stop == null ? "—" : `${px(r.stop, d)} · ${r.stop_pips.toFixed(1)} ${unit}`),
+    ...line("Take profit", r.target == null ? "—" : `${px(r.target, d)} · ${r.target_pips.toFixed(1)} ${unit}`),
+    ...line("Loss at the stop", r.risk_amount == null ? "—" : `${m(-r.risk_amount, true)} · ${pct(r.risk_percent, 2)}`),
+    ...line("Profit at the target", r.reward_amount == null ? "—" : `${m(r.reward_amount, true)} · ${r.reward_risk.toFixed(1)}R`));
+  const margin = el("div", { class: "kv-list" },
+    ...line("Position controls", m(r.notional)),
+    ...line(`Margin at 1:${r.leverage_label}`, m(r.margin), r.margin_method + (r.terminal_margin != null && r.margin_method !== "the terminal's own figure" ? `; the terminal says ${m(r.terminal_margin)} at its 1:${r.account_leverage_label}` : "")),
+    ...line("Margin, this trade", pct(r.margin_percent)),
+    ...line("Margin with what is open", pct(r.total_margin_percent), r.margin_cap ? `your cap is ${r.margin_cap}%` : ""),
+    ...line("Free margin after", m(r.free_margin_after)),
+    ...line("Margin level after", r.margin_level_after == null ? "—" : `${Math.round(r.margin_level_after).toLocaleString()}%`),
+    ...line("Margin call (100%) after", pipsAway(r.pips_to_margin_call), "price moving against you, with nothing else changing"),
+    ...line("Stop-out (50%) after", pipsAway(r.pips_to_stop_out), "brokers set this level; 20% and 30% are common too"),
+    ...line("Most lots", `${r.max_lots_by_free_margin} on all free margin`, r.max_lots_by_cap != null ? `${r.max_lots_by_cap} within your ${r.margin_cap}% cap` : ""),
+    ...line("Account leverage in use", `${r.effective_leverage.toFixed(1)}x`, `everything open plus this trade, against equity (${r.open_positions} open)`));
+  const lev = el("table", {}, el("thead", {}, el("tr", {}, ...["Leverage", "Margin", "% of equity", "Most lots in cap"].map((h, i) => el("th", { class: i ? "n" : "", text: h })))),
+    el("tbody", {}, ...r.by_leverage.map((x) => el("tr", { class: x.leverage === r.leverage ? "chosen" : "" },
+      el("td", { text: `1:${x.leverage}` }), el("td", { class: "n", text: m(x.margin) }), el("td", { class: "n", text: pct(x.margin_percent) }),
+      el("td", { class: "n", text: x.max_lots_by_cap == null ? "—" : String(Math.max(0, x.max_lots_by_cap)) })))));
+  $("#calc-out").replaceChildren(
+    ...r.warnings.map((w) => el("div", { class: "notice", style: "grid-column:auto;margin-bottom:8px", text: w })),
+    el("h4", { text: `${r.side > 0 ? "Buy" : "Sell"} ${r.symbol} · equity ${m(r.equity)}` }), size,
+    el("h4", { text: "Margin and leverage" }), margin,
+    el("h4", { text: "The same size at each leverage" }), el("div", { class: "table-scroll" }, lev),
+    el("div", { class: "fine", text: `Money from the terminal's profit calculator at these prices, in ${r.currency}, before commission and swap.` }));
+}
+$("#calc-open").addEventListener("click", openCalc);
+$("#calc-close").addEventListener("click", () => $("#calc").close());
+
+// Closed trades of the account in use, and what they add up to in R.
+function renderTrades() {
+  const b = state.book;
+  const section = $("#trades-section");
+  if (!b || !b.review) { section.hidden = true; return; }
+  section.hidden = false;
+  $("#trades-title").textContent = `Closed trades · ${b.active || "MetaTrader 5 account, every trade on it"}`;
+  const rv = b.review, rows = b.closed || [];
+  const r = (v) => (v == null ? "—" : `${signed(v, 2)}R`);
+  const fig = (label, value) => el("div", {}, el("div", { class: "label", text: label }), el("div", { class: "value", text: value }));
+  const group = (g) => (g && g.trades ? `${g.trades} trade${g.trades === 1 ? "" : "s"}, ${g.win_rate.toFixed(0)}% won, ${r(g.avg_r)} each` : "none yet");
+  const summary = rv && rv.all.trades ? [
+    el("div", { class: "figures" }, fig("Trades", String(rv.all.trades)), fig("Won", `${rv.all.win_rate.toFixed(0)}%`), fig("Net", money(rv.all.net, true)), fig("Average", r(rv.all.avg_r))),
+    el("div", { class: "fine", text: `Last ${rv.days} days. ${rv.verdict}` }),
+    el("div", { class: "fine", text: `Taken while the bot was signalling them: ${group(rv.signal)}. Your own calls: ${group(rv.own)}.` })]
+    : [el("div", { class: "empty", text: b.active ? "No closed trades in the book yet. Once there are some, this shows whether your trades make money per unit of risk."
+        : "No closed trades on this account in the last 90 days. Trades you place on your phone on this MT5 account appear here by themselves." })];
+  if (!rows.length) { $("#trades").replaceChildren(...summary); return; }
+  const when = (iso) => { const d = parseTime(iso); return `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${localTime(iso)}`; };
+  const head = el("tr", {}, ...["Closed", "Symbol", "Side", "Lots", "Entry", "Exit", "How", "Result", "R", ""].map((h, i) => el("th", { class: (i >= 3 && i <= 5) || i === 7 || i === 8 ? "n" : "", text: h })));
+  const body = rows.map((t) => {
+    const sym = symbolRow(t.symbol), d = sym ? sym.digits : 5;
+    return el("tr", {},
+      el("td", { class: "muted", text: when(t.closed) }),
+      el("td", { text: t.symbol }),
+      el("td", {}, el("span", { class: `badge ${t.side > 0 ? "BUY" : "SELL"}`, text: t.side > 0 ? "BUY" : "SELL" })),
+      el("td", { class: "n", text: String(t.volume) }),
+      el("td", { class: "n", text: px(t.entry, d) }),
+      el("td", { class: "n", text: px(t.exit_price, d) }),
+      el("td", { class: "muted", text: `${t.exit_reason}${t.assumed ? " · assumed" : ""} · ${t.source === "signal" ? "bot signal" : t.source === "bot" ? "the bot" : "your call"}` }),
+      el("td", { class: "n", text: money(t.pnl, true) }),
+      el("td", { class: "n", text: r(t.r) }),
+      !b.active ? el("td") : el("td", { class: "n", style: "white-space:nowrap" },
+        el("button", { class: "mini", type: "button", ...press(() => formDialog(`#${t.id} ${t.symbol}: result`, "Type the result your broker shows for this trade, commission and swap included.", [{ key: "pnl", label: `Result (${currency()})`, value: t.pnl == null ? "" : t.pnl.toFixed(2) }], "Save", (v) => bookOp({ op: "result", id: t.id, ...v }))) }, "Result"),
+        el("button", { class: "mini", type: "button", ...press(() => formDialog(`Reopen #${t.id} ${t.symbol}?`, "For a trade the dashboard assumed was closed at its stop or target while it is still running at your broker. Move its stop afterwards if yours has moved.", [], "Reopen", () => bookOp({ op: "reopen", id: t.id }))) }, "Reopen")));
+  });
+  $("#trades").replaceChildren(...summary, el("div", { class: "table-scroll", style: "margin-top:12px" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body))),
+    el("div", { class: "fine", text: b.active
+      ? "\"Assumed\" means the terminal's price crossed your stop or target, so the dashboard closed the trade in the book at that level. Another broker's prices differ slightly: set the result your broker shows, or reopen the trade if it is still running."
+      : "Read from the terminal's history once a minute: trades you place on your phone on this account appear here by themselves, net of commission and swap. R needs a stop; one added after the trade opened is taken from when the dashboard first saw it." }));
 }
 
 function renderSignals() {
@@ -1020,6 +1540,15 @@ $("#alerts").addEventListener("click", async () => {
   showAlertsState();
 });
 function announce() {
+  for (const sym of state.symbols) {
+    const a = sym.analysis, change = a && a.change;
+    if (!change || state.error || Math.abs(parseTime(state.now) - parseTime(change.time)) > 180000) continue;
+    const key = `analysis:${change.id}`;
+    if (announced[key]) continue;
+    announced[key] = true;
+    if (!alertsOn || Notification.permission !== "granted") continue;
+    try { new Notification(`Analysis changed · ${sym.symbol}`, { body: change.text, tag: key }); } catch (err) { /* unavailable */ }
+  }
   const live = state.symbols.filter((sym) => sym.advice && sym.advice.actionable);
   const out = reversals().filter((p) => p.reversal.level === "exit");
   const others = state.symbols.flatMap((sym) => otherSignals(sym).map((s) => ({ ...s, symbol: sym.symbol, bar: sym.advice && sym.advice.bar_time })));
@@ -1192,6 +1721,24 @@ function drawChart() {
     ctx.fillText(label, Math.max(pad.l, Math.min(X(i) - 12, plotRight - 40)), H - 8);
   }
 
+  // yesterday's and last week's levels, where they are on screen
+  const dayLevels = state.market && state.market.symbols && state.market.symbols[selected] && state.market.symbols[selected].levels;
+  if (dayLevels) {
+    const short = { "Previous day high": "PDH", "Previous day low": "PDL", "Pivot": "Pivot", "Previous week high": "PWH", "Previous week low": "PWL" };
+    ctx.setLineDash([1, 4]); ctx.strokeStyle = C.text3; ctx.fillStyle = C.text3; ctx.lineWidth = 1;
+    const labelled = [];   // levels a few pixels apart share a line; their labels must not overprint
+    for (const L of dayLevels.levels) {
+      if (!short[L.name] || L.price <= lo || L.price >= hi) continue;
+      const y = Math.round(Y(L.price)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(plotRight, y); ctx.stroke();
+      const near = labelled.find((other) => Math.abs(other.y - y) < 12);
+      if (near) { near.text += `/${short[L.name]}`; continue; }
+      labelled.push({ y, text: short[L.name] });
+    }
+    for (const label of labelled) ctx.fillText(label.text, pad.l + 2, label.y - 3);
+    ctx.setLineDash([]);
+  }
+
   // plan zones: from the last closed bar into the future
   if (plan) {
     const x0 = X(bars.length - 1.5), x1 = plotRight;
@@ -1346,6 +1893,7 @@ function confirmOrder(row, p, manual) {
 setInterval(() => {   // keep countdowns and the clock moving between polls
   if (state && state.ready) {
     const row = symbolRow(selected);
+    renderAssessment(row);
     if (row && row.advice) renderAdvice(row);
     renderHeader();
   }
