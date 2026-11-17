@@ -175,6 +175,71 @@ def test_switching_setup_applies_to_symbols_with_their_own_strategy_override(cfg
     assert (params.name, params.adx_min) == ("ema_cross", 15.0)  # other overrides are kept
 
 
+def test_switching_back_to_the_configured_setup_restores_per_symbol_setups(cfg, broker):
+    from dataclasses import replace
+
+    cfg = replace(cfg, overrides={SYMBOL: {"strategy": {"name": "breakout"}}})  # main setup: retest
+    monitor = Monitor(cfg, broker, [SYMBOL])
+    assert monitor._apply_strategy("pullback")["ok"]
+    assert monitor.config.for_symbol(SYMBOL).strategy.name == "pullback"
+    assert monitor._apply_strategy("retest")["ok"]
+    assert monitor.config.for_symbol(SYMBOL).strategy.name == "breakout"  # as configured again
+
+
+def test_the_page_names_each_symbols_own_setup(cfg, broker):
+    from dataclasses import replace
+
+    cfg = replace(cfg, overrides={SYMBOL: {"strategy": {"name": "breakout"}}})
+    monitor = Monitor(cfg, broker, [SYMBOL])
+    monitor.refresh()
+    state = monitor.snapshot()
+    assert state["setups"] == {SYMBOL: "breakout"} and state["setup_text"] == "Breakout"
+
+
+def test_command_line_setup_applies_to_symbols_with_their_own_setup(tmp_path):
+    from tradebot.cli import main
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"symbols": ["EURUSD", "GBPUSD"],
+                                "overrides": {"GBPUSD": {"strategy": {"name": "breakout", "adx_min": 15}}}}))  # fmt: skip
+    config = BotConfig(
+        symbols=("EURUSD", "GBPUSD"), overrides={"GBPUSD": {"strategy": {"name": "breakout", "adx_min": 15}}}
+    )
+    assert config.setups() == {"EURUSD": "ema_cross", "GBPUSD": "breakout"}
+    assert config.setup_groups() == [("ema_cross", ["EURUSD"]), ("breakout", ["GBPUSD"])]
+    every = config.with_setup("pullback")
+    assert every.setups() == {"EURUSD": "pullback", "GBPUSD": "pullback"}
+    assert every.for_symbol("GBPUSD").strategy.adx_min == 15  # other overrides are kept
+    seen = {}
+
+    def capture(config, args):
+        seen["setups"] = config.setups()
+        return 0
+
+    import tradebot.cli as cli
+
+    original = cli.cmd_backtest
+    cli.cmd_backtest = capture
+    try:
+        assert main(["-c", str(path), "backtest", "--strategy", "retest"]) == 0
+    finally:
+        cli.cmd_backtest = original
+    assert seen["setups"] == {"EURUSD": "retest", "GBPUSD": "retest"}
+
+
+def test_setup_text_names_the_symbols_on_another_setup():
+    from tradebot.plan import plan_title, setup_text, trading_plan
+
+    config = BotConfig(symbols=("EURUSD", "GBPUSD", "XAUUSD"),
+                       overrides={"GBPUSD": {"strategy": {"name": "breakout"}}, "XAUUSD": {"strategy": {"name": "breakout"}}})  # fmt: skip
+    assert setup_text(config) == "EMA cross (Breakout on GBPUSD, XAUUSD)"
+    assert plan_title(config) == "Trading plan: EMA cross (Breakout on GBPUSD, XAUUSD) on M15"
+    lines = [line for s in trading_plan(config) for line in s.lines]
+    assert any(line.startswith("Setup on EURUSD (EMA cross)") for line in lines)
+    assert any(line.startswith("Setup on GBPUSD, XAUUSD (Breakout)") for line in lines)
+    assert setup_text(BotConfig(symbols=("EURUSD",))) == "EMA cross"
+
+
 def test_setup_switch_goes_through_the_worker_thread(cfg, broker):
     monitor = Monitor(cfg, broker, [SYMBOL], interval=0.01)
     worker = threading.Thread(target=monitor.run, daemon=True)

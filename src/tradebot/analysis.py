@@ -308,7 +308,9 @@ def _scenarios(
             and round(value, digits) != round(close, digits)
         ):
             candidates.append((str(item["name"]), value))
-    above, below = [p for p in candidates if p[1] >= close], [p for p in candidates if p[1] <= close]
+    # A level exactly at the close (a bar that closed on its high) bounds neither side: counted
+    # as both, it left no room between the scenarios and the card said there was no structure.
+    above, below = [p for p in candidates if p[1] > close], [p for p in candidates if p[1] < close]
     if not above or not below:
         return []
     upper, lower = min(above, key=lambda p: p[1]), max(below, key=lambda p: p[1])

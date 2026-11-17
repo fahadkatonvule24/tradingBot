@@ -328,3 +328,33 @@ def test_connect_waits_for_a_terminal_that_is_still_starting(fake_mt5):
     with pytest.raises(Exception, match=r"initialize failed \(-6\): Terminal: Authorization failed"):
         broker.connect(attempts=2)
     assert not broker.reconnect()  # a reconnect tries once; Link spaces the retries
+
+
+def test_the_clock_rule_is_read_from_a_weekday_instrument_not_crypto():
+    """Regression: the first quoted symbol decided the server clock. A crypto pair trades through
+    weekends, so it has no week opens and a New York-following server was read as fixed."""
+    from types import SimpleNamespace
+
+    now = datetime(2026, 5, 5, 12)
+    forex = np.array(weekly_history(70, NY_CLOSE.offset_at))
+    start = forex[-1] - 12_000 * 3600
+    crypto = np.arange(start, forex[-1] + 1, 3600.0)  # every hour, weekends included
+
+    class Terminal:
+        TIMEFRAME_H1 = 60
+
+        def symbols_get(self, group=None):
+            return [
+                SimpleNamespace(name="BTCUSD", visible=True),
+                SimpleNamespace(name="EURUSD", visible=True),
+            ]
+
+        def symbol_info_tick(self, name):
+            return SimpleNamespace(time=NY_CLOSE.utc_to_server_epoch(now))
+
+        def copy_rates_from_pos(self, name, timeframe, start, count):
+            times = crypto if name == "BTCUSD" else forex
+            return {"time": times[-count:]}
+
+    broker = MT5Broker(MT5Login(), module=Terminal(), clock=lambda: now)
+    assert broker.server_clock == ServerClock(7, follows_new_york=True)

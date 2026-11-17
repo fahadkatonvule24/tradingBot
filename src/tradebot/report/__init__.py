@@ -60,6 +60,8 @@ def render_backtest(
     per_symbol = walk_forward.oos_per_symbol if walk_forward else result.per_symbol
     metrics = walk_forward.oos_metrics if walk_forward else result.metrics
     config = result.config
+    from tradebot.plan import setup_text
+
     return (
         _env()
         .get_template("backtest.html")
@@ -68,6 +70,7 @@ def render_backtest(
             version=__version__,
             generated=datetime.now(),
             config=config,
+            setup=setup_text(config),
             config_json=json.dumps(config.to_dict(), indent=2, default=str),
             result=result,
             wf=walk_forward,

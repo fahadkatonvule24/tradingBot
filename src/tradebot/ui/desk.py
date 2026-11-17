@@ -242,7 +242,7 @@ class Desk:
         return text
 
     def amend(self, trade_id: int, sl: float | None, tp: float | None) -> str:
-        trade = self.book.amend(trade_id, sl, tp)
+        trade = self.book.amend(trade_id, sl, tp, self.broker.now())
         d = self._digits(trade.symbol)
         return (
             f"#{trade.id} {WORD[trade.side]} {trade.symbol}: stop "
@@ -254,7 +254,7 @@ class Desk:
         return f"#{trade.id} {trade.symbol}: result set to {self._money(trade.pnl or 0.0, True)}."
 
     def reopen(self, trade_id: int) -> str:
-        trade = self.book.reopen(trade_id)
+        trade = self.book.reopen(trade_id, self.broker.now())
         self._swept[trade.id] = self._last_bar(trade.symbol)  # do not close it again on the same bars
         return (
             f"#{trade.id} {WORD[trade.side]} {trade.symbol} is open again. Move its stop if yours has moved."
@@ -315,7 +315,10 @@ class Desk:
         features = self.m.features(trade.symbol)
         if features is not None and self._swept.get(trade.id) != features["time"].iloc[-1]:
             self._swept[trade.id] = features["time"].iloc[-1]
-            bars = features[features["time"] >= pd.Timestamp(trade.opened)]
+            # Only bars that opened after the trade did, and after its levels were last moved: a
+            # stop moved to breakeven must not be "hit" by a dip from before it was moved.
+            since = max(trade.opened, trade.levels_set or trade.opened)
+            bars = features[features["time"] >= pd.Timestamp(since)]
             spec = self.broker.symbol(trade.symbol)
             step = timedelta(minutes=self.m.config.bar_minutes)
             for bar in bars.itertuples(index=False):

@@ -11,6 +11,7 @@ start the download; a backtest never touches the network. The request carries no
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -83,17 +84,20 @@ class NewsCalendar:
     def __init__(self, path: str | Path | None, feed_path: str | Path | None = None) -> None:
         self.path = Path(path) if path else None
         self.feed_path = Path(feed_path) if feed_path else None
-        self._files: dict[Path, tuple[int, list[NewsEvent]]] = {}
+        self._files: dict[Path, tuple[tuple[int, int, int], list[NewsEvent]]] = {}
 
     def _read(self, path: Path | None) -> list[NewsEvent]:
         if path is None:
             return []
         cached = self._files.get(path)
         try:
-            mtime = path.stat().st_mtime_ns
+            info = path.stat()
         except OSError:
             return cached[1] if cached is not None else []
-        if cached is None or cached[0] != mtime:  # reload when the file is edited while the bot runs
+        # Reload when the file is edited while the bot runs. The modified time alone missed an edit
+        # made within the same clock tick (Windows timestamps are coarse); size and file id catch it.
+        stamp = (info.st_mtime_ns, info.st_size, info.st_ino)
+        if cached is None or cached[0] != stamp:
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 events = parse_events(raw)
@@ -102,7 +106,7 @@ class NewsCalendar:
             except (OSError, ValueError, NewsError) as exc:
                 log.warning("could not read news calendar %s: %s", path, exc)
                 events = cached[1] if cached is not None else []
-            cached = (mtime, events)
+            cached = (stamp, events)
             self._files[path] = cached
         return cached[1]
 
@@ -171,7 +175,7 @@ class NewsFeed:
         except urllib.error.HTTPError as exc:
             hint = " (asked too often: it is retried later)" if exc.code == 429 else ""
             raise NewsError(f"the news feed answered {exc.code}{hint}") from None
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise NewsError(f"could not reach the news feed ({type(exc).__name__})") from None
         except ValueError:
             raise NewsError("the news feed sent something that is not JSON") from None
@@ -211,9 +215,13 @@ class NewsFeed:
                     count = self.refresh()
                     log.info("news calendar updated: %d events this week", count)
                     wait = FEED_REFRESH
-                except NewsError as exc:
-                    if str(exc) != self.error:  # the same failure every half hour is logged once
-                        log.warning("news calendar not updated: %s", exc)
-                    self.error = str(exc)
+                except Exception as exc:  # NewsError, or e.g. http.client.IncompleteRead: retry later,
+                    # never end the thread (a dead thread meant no calendar, so no blackouts, all week)
+                    text = (
+                        str(exc) if isinstance(exc, NewsError) else f"unexpected error ({type(exc).__name__})"
+                    )
+                    if text != self.error:  # the same failure every half hour is logged once
+                        log.warning("news calendar not updated: %s", text)
+                    self.error = text
                     wait = FEED_RETRY
             self._stop.wait(wait.total_seconds())

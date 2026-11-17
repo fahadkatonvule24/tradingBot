@@ -163,6 +163,13 @@ button { font: inherit; color: inherit; }
 .legend i { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 .legend i.zone { height: 10px; width: 10px; border-radius: 2px; }
 .chart-wrap { position: relative; flex: 1 1 auto; min-height: 300px; }
+.chart-view { display: flex; align-items: center; gap: 6px; margin: 2px 0 6px; flex-wrap: wrap; font-size: 11px; }
+.chart-view #chart-expand { margin-left: auto; }
+.chart-view .hint { opacity: 0.8; }
+#chart { touch-action: none; }
+.chart-card.expanded { position: fixed; inset: 16px; z-index: 60; min-height: 0; overflow: auto; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45); }
+.chart-card.expanded .chart-wrap { min-height: 0; }
+body.chart-open::after { content: ""; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 55; }
 #chart { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
 .tooltip { position: absolute; pointer-events: none; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); display: none; min-width: 150px; z-index: 2; }
 .tooltip .t { font-weight: 600; margin-bottom: 4px; }
@@ -243,6 +250,10 @@ button { font: inherit; color: inherit; }
 }
 .badge.BUY, .badge.ORDER { background: var(--up); color: var(--on-color); border-color: var(--up); }
 .badge.SELL, .badge.REJECTED, .badge.EXIT { background: var(--down); color: var(--on-color); border-color: var(--down); }
+.badge.JOIN.up { background: var(--up); color: var(--on-color); border-color: var(--up); }
+.badge.JOIN.down { background: var(--down); color: var(--on-color); border-color: var(--down); }
+.badge.TREND.up { background: transparent; color: var(--up); border-color: var(--up); }
+.badge.TREND.down { background: transparent; color: var(--down); border-color: var(--down); }
 .badge.SKIP, .badge.BLOCKED, .badge.FAILED, .badge.REVERSAL, .badge.ENDING, .badge.NEWS, .badge.high { background: transparent; color: var(--text); border-color: var(--warning); }
 .badge.NEWS::before, .badge.high::before, .badge.SKIP::before, .badge.BLOCKED::before, .badge.FAILED::before, .badge.REVERSAL::before, .badge.ENDING::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warning); }
 .badge.big { font-size: 13px; padding: 5px 11px; }
@@ -464,6 +475,14 @@ dialog.wide ul { margin: 0; padding-left: 18px; } dialog.wide li { margin: 4px 0
                 </div>
                 <div class="chart-price"><span class="big" id="chart-price">—</span><span id="chart-chg"></span></div>
                 <div class="chart-head"><span class="title" id="chart-title">—</span><div class="legend" id="legend"></div></div>
+                <div class="chart-view" role="group" aria-label="Chart view">
+                  <button type="button" class="mini" id="chart-out" title="Zoom out: more bars (or scroll the wheel down)">−</button>
+                  <button type="button" class="mini" id="chart-in" title="Zoom in: fewer bars (or scroll the wheel up)">+</button>
+                  <button type="button" class="mini" id="chart-reset" title="Back to the newest bars (or double-click the chart)">Reset</button>
+                  <span class="faint" id="chart-zoom"></span>
+                  <span class="faint hint">Wheel to zoom · drag to scroll back · double-click to reset</span>
+                  <button type="button" class="mini" id="chart-expand" title="Open the chart in a large view">⤢ Expand</button>
+                </div>
                 <div class="chart-wrap">
                   <canvas id="chart" role="img" aria-label="Price chart"></canvas>
                   <div class="tooltip" id="tooltip"></div>
@@ -563,6 +582,8 @@ let clockOffset = 0;            // server time minus local time, ms
 const charts = {};              // symbol -> {bars, fast, slow, barTime}
 const lastBid = {};
 let hoverIndex = null;
+const DEFAULT_VIEW_BARS = 120, MIN_VIEW_BARS = 20;
+const view = { count: null, end: null };   // the bars on the chart; end null = follow the newest bar
 let planSide = 0;              // 0 = follow the bot; +1 / -1 = the side the user picked
 let lastGoodUpdate = 0;
 let lastSnapshotTime = 0;
@@ -693,6 +714,7 @@ function select(symbol) {
   selected = symbol;
   planSide = 0;
   hoverIndex = null;
+  view.end = null;   // a new symbol opens on its newest bars
   try { history.replaceState(null, "", `#${encodeURIComponent(symbol)}`); } catch (e) { /* ignore */ }
   render();
   loadChart(symbol, true);
@@ -746,10 +768,22 @@ function showView(name) {
   for (const b of document.querySelectorAll(".nav [data-view]")) b.setAttribute("aria-current", String(b.dataset.view === name));
   for (const v of document.querySelectorAll(".content > .view")) v.hidden = v.dataset.view !== name;
   $("#view-title").textContent = VIEW_TITLES[name];
+  placeChart(name);
   if (name === "activity" && state) { seenActivity = (state.activity || []).length; $("#count-activity").textContent = ""; }
   $(".content").scrollTop = 0;
 }
 for (const b of document.querySelectorAll(".nav [data-view]")) b.addEventListener("click", () => showView(b.dataset.view));
+// One chart, shown on the dashboard and under the advice on the signal page.
+const chartCard = document.querySelector(".chart-card");
+const chartHome = chartCard.parentElement, chartNext = chartCard.nextElementSibling;
+function placeChart(view) {
+  if (view === "signal") {
+    const advice = $("#advice");
+    if (advice.nextElementSibling !== chartCard) advice.after(chartCard);
+  } else if (view === "dashboard" && chartCard.parentElement !== chartHome) {
+    chartHome.insertBefore(chartCard, chartNext);
+  }
+}
 for (const b of document.querySelectorAll("[data-open]")) b.addEventListener("click", () => showView(b.dataset.open));
 for (const b of document.querySelectorAll("[data-click]")) b.addEventListener("click", () => $(`#${b.dataset.click}`).click());
 showView(activeView);
@@ -787,7 +821,7 @@ function renderDashboard() {
     chg.className = change > 0 ? "up" : change < 0 ? "down" : "faint";
   }
   renderInsight(row);
-  $("#overview-sub").textContent = `${state.timeframe} · ${(SETUPS[state.strategy] || [state.strategy])[0]} setup · click a card to open it`;
+  $("#overview-sub").textContent = `${state.timeframe} · ${state.setup_text || (SETUPS[state.strategy] || [state.strategy])[0]} setup · click a card to open it`;
 
   const mk = state.market || {};
   const strength = (mk.strength || []).map((s) => {
@@ -848,7 +882,7 @@ function renderInsight(row) {
   const rec = ((state.track_record || {}).symbols || {})[row.symbol];
   const won = rec && rec.trades >= 20 ? rec.win_rate : null;
   const R = 31, C = 2 * Math.PI * R;
-  const ring = el("div", { class: "ring", title: won == null ? "No backtest for this symbol yet" : `${(SETUPS[state.strategy] || [""])[0]} on ${row.symbol}: won ${num(won, 1)}% of ${rec.trades} trades in the stored history` });
+  const ring = el("div", { class: "ring", title: won == null ? "No backtest for this symbol yet" : `${((row.setups || []).find((x) => x.active) || {}).label || (SETUPS[state.strategy] || [""])[0]} on ${row.symbol}: won ${num(won, 1)}% of ${rec.trades} trades in the stored history` });
   const svg = svgEl("svg", { viewBox: "0 0 74 74" });
   svg.append(svgEl("circle", { cx: 37, cy: 37, r: R, fill: "none", stroke: css("--surface-2"), "stroke-width": 7 }));
   if (won != null) svg.append(svgEl("circle", { cx: 37, cy: 37, r: R, fill: "none", stroke: css(won >= 50 ? "--up" : "--warning"), "stroke-width": 7, "stroke-linecap": "round", "stroke-dasharray": `${(C * won) / 100} ${C}` }));
@@ -868,14 +902,14 @@ function renderInsight(row) {
       el("div", {}, el("div", { class: "faint", text: "Direction" }), el("div", { class: `bias ${cls}`, text: word }),
         el("div", { class: "regime", text: ready ? an.regime : "Waiting for fresh data" })),
       ring),
-    el("div", { class: "headline-txt" }, el("span", { class: `badge ${adv.action}`, text: badgeText(adv) }), " ", adv.headline),
+    el("div", { class: "headline-txt" }, el("span", { class: `badge ${badgeCls(adv)}`, text: badgeText(adv) }), " ", adv.headline),
     el("div", { class: "lines" },
       line("Higher timeframes", row.trend && row.trend.higher ? row.trend.higher.map((h) => `${h.timeframe} ${h.direction > 0 ? "▲" : h.direction < 0 ? "▼" : "•"}`).join("  ") : "—"),
       line(adv.entries_from ? "Entries resume" : "Next decision", mins == null ? "—" : mins >= 60 ? `in ${Math.floor(mins / 60)} h ${mins % 60} min` : `in ${mins} min`),
       ...levels),
     el("div", { class: "setups-mini" }, el("div", { class: "faint", text: "All four setups on this bar" }),
       ...(row.setups || []).map((x) => el("div", { class: `srow ${x.active ? "on" : ""}`, title: x.text },
-        el("span", { text: x.label }), el("span", { class: `badge ${x.action}`, text: x.action === "BLOCKED" ? `${x.side > 0 ? "BUY" : "SELL"} BLOCKED` : x.action })))),
+        el("span", { text: x.label }), el("span", { class: `badge ${badgeCls(x)}`, text: badgeText(x) })))),
     el("button", { class: "wide-btn go", type: "button", onclick: () => showView("signal") }, "Open signal & plan"));
 }
 let chartFrame = 0;   // at most one redraw per frame when the chart panel changes size
@@ -1092,7 +1126,11 @@ function sparkline(row) {
 }
 
 const barsAgo = (n) => (n === 0 ? "on the last bar" : `${n} bar${n === 1 ? "" : "s"} ago`);
-const badgeText = (a) => (a.action === "BLOCKED" ? `${a.side > 0 ? "BUY" : "SELL"} BLOCKED` : a.action);
+const badgeText = (a) => (a.action === "BLOCKED" ? `${a.side > 0 ? "BUY" : "SELL"} BLOCKED`
+  : a.action === "JOIN" ? `JOIN ${a.side > 0 ? "BUY" : "SELL"}`
+  : a.action === "TREND" ? (a.side > 0 ? "UPTREND" : "DOWNTREND") : a.action);
+// JOIN and TREND take their colour from the direction
+const badgeCls = (a) => `${a.action}${a.action === "JOIN" || a.action === "TREND" ? (a.side > 0 ? " up" : " down") : ""}`;
 
 function renderWatchlist() {
   const items = state.symbols.map((row) => {
@@ -1104,7 +1142,7 @@ function renderWatchlist() {
     const action = row.advice.action;
     const recent = row.advice.last_trigger;
     const recentNote = recent && !row.advice.actionable
-      ? `${recent.side > 0 ? "Buy" : "Sell"} trigger ${recent.bars_ago === 0 ? "on the last bar" : `${recent.bars_ago} bar${recent.bars_ago === 1 ? "" : "s"} ago`} · ${recent.taken ? "taken" : "blocked"}`
+      ? `${recent.side > 0 ? "Buy" : "Sell"} ${recent.taken ? "signal" : "trigger"} ${recent.bars_ago === 0 ? "on the last bar" : `${recent.bars_ago} bar${recent.bars_ago === 1 ? "" : "s"} ago`}${recent.taken ? "" : " · filtered out"}`
       : null;
     const failed = row.advice.failed_break;
     const failedNote = failed && !failed.recovered && !row.advice.actionable && row.advice.action !== "BLOCKED"
@@ -1125,7 +1163,7 @@ function renderWatchlist() {
     const change = first ? Math.round(((row.bid - first) / first) * 10000) / 100 : 0;
     return el("button", { class: "sym", type: "button", "aria-current": row.symbol === selected ? "true" : "false", onclick: () => select(row.symbol) },
       el("span", { class: "name" }, row.symbol, trendArrow(row.trend, true)),
-      el("span", { class: `badge ${action}`, text: badgeText(row.advice) }),
+      el("span", { class: `badge ${badgeCls(row.advice)}`, text: badgeText(row.advice) }),
       pxEl,
       el("span", { class: "chg muted", title: `Change over the last ${(row.spark || []).length - 1} ${state.timeframe} bars`, text: `${change > 0 ? "+" : change < 0 ? "−" : ""}${Math.abs(change).toFixed(2)}%` }),
       el("span", { class: "sub" }, el("span", { text: `spread ${distance(row, row.spread)}` }), sparkline(row)),
@@ -1191,7 +1229,7 @@ function renderAdvice(row) {
         el("div", { class: "faint", text: `at ${localTime(target)} (${utcTime(target)})` }))
     : el("div", { class: "when" });
   const parts = [
-    el("span", { class: `badge big ${a.action}`, text: badgeText(a) }),
+    el("span", { class: `badge big ${badgeCls(a)}`, text: badgeText(a) }),
     el("div", {}, el("div", { class: "headline", text: a.headline }), el("div", { class: "detail", text: a.detail }),
       a.direction_note ? el("div", { class: "detail", text: a.direction_note }) : null,
       triggerLine(row), failedLine(row), earlyLine(row)),
@@ -1200,7 +1238,7 @@ function renderAdvice(row) {
   if (a.blocker && a.action !== "SKIP") {
     parts.push(el("div", { class: "notice", text: `Entries are paused right now: ${a.blocker}.` }));
   }
-  $("#advice").replaceChildren(...[...reversals(row.symbol).map((p) => reversalBox(p, row.digits)), ...parts, setupsRow(row), trendBox(row)].filter(Boolean));
+  $("#advice").replaceChildren(...[...reversals(row.symbol).map((p) => reversalBox(p, row.digits)), ...parts, setupsRow(row), trendBox(row), structureBox(row)].filter(Boolean));
 }
 
 // --- all four setups, and the trend ----------------------------------------------------------
@@ -1215,7 +1253,7 @@ function setupsRow(row) {
     ...items.map((s) => el("button", { class: "setuptile", type: "button", "aria-pressed": s.active ? "true" : "false",
       title: s.active ? "Shown in detail on this page" : "Show this setup in detail", onclick: () => switchTo("strategy", s.name) },
       el("div", { class: "tilehead" }, el("span", { text: s.label }),
-        el("span", { class: `badge ${s.action}`, text: s.action === "BLOCKED" ? `${s.side > 0 ? "BUY" : "SELL"} BLOCKED` : s.action })),
+        el("span", { class: `badge ${badgeCls(s)}`, text: badgeText(s) })),
       el("div", { class: "txt", title: s.text, text: s.text }))));
 }
 function trendArrow(t, small) {
@@ -1241,6 +1279,40 @@ function trendBox(row) {
       note ? el("div", { class: "fine", text: note }) : null,
       rest.length ? el("div", { class: "fine", text: `Also showing, not reliable on their own: ${rest.map((s) => s.text).join(" ")}` }) : null,
       facts ? el("div", { class: "fine", text: facts }) : null));
+}
+
+// Market structure, zones, round numbers and chart patterns: context to read a signal by, with
+// what each was worth as an entry on the stored history. None of them is a signal on its own.
+function structureBox(row) {
+  const st = row.structure;
+  if (!st) return null;
+  const d = row.digits, atr = st.atr || row.atr;
+  const zoneText = (z) => `${z.side === "inside" ? "Price is inside a zone" : z.side === "resistance" ? "Resistance" : "Support"} ${px(z.low, d)}–${px(z.high, d)}`
+    + ` · ${z.touches} touches${z.flipped ? " · role reversal (it has been both support and resistance)" : ""}`
+    + (z.side === "inside" ? "" : ` · ${z.distance_atr.toFixed(1)} ATR away`);
+  const lines = [];
+  if (st.zones && st.zones.length) lines.push(...st.zones.map((z) => el("li", { text: zoneText(z) })));
+  else lines.push(el("li", { text: "No zone with two or more touches in the last 300 bars near the price." }));
+  if (st.round && st.round.above != null) {
+    lines.push(el("li", { text: `Round numbers: ${px(st.round.below, d)} below, ${px(st.round.above, d)} above.` }));
+  }
+  const side = row.advice && row.advice.side;
+  const ahead = st.round && side ? (side > 0 ? st.round.above - row.bid : row.bid - st.round.below) : null;
+  const pats = (st.patterns || []).map((x) => el("li", {},
+    el("strong", { text: `${x.name} · ${x.status}` }),
+    x.side ? ` (${x.side > 0 ? "bullish" : "bearish"}; ${x.kind && x.kind.endsWith("triangle") ? "line" : "neckline"} ${px(x.neckline, d)}${x.target != null ? `, measured target ${px(x.target, d)}` : ""}). ` : ` (no direction until it breaks). `,
+    el("span", { class: "fine", text: x.record })));
+  return el("div", { class: "trendbox structure" },
+    el("span", { class: "arrow", text: st.state === "up" ? "↗" : st.state === "down" ? "↘" : "↔" }),
+    el("div", {},
+      el("div", { class: "head", text: `Structure: ${st.text}` }),
+      st.broken_record ? el("div", { class: "fine", text: st.broken_record }) : null,
+      el("ul", {}, ...lines),
+      ahead != null && atr && ahead >= 0 && ahead <= 0.5 * atr
+        ? el("div", { class: "notice", text: `${ahead < 0.05 * atr ? `Price is at the round number ${px(side > 0 ? st.round.above : st.round.below, d)}` : `A round number, ${px(side > 0 ? st.round.above : st.round.below, d)}, is ${(ahead / atr).toFixed(1)} ATR in the way of a ${side > 0 ? "buy" : "sell"}`}. ${st.round_record}` }) : null,
+      pats.length ? el("div", { class: "fine", style: "margin-top:4px" }, "Chart patterns:") : null,
+      pats.length ? el("ul", {}, ...pats) : null,
+      el("div", { class: "fine", text: "Context, not signals: none of these made money as an entry on the stored history once costs were paid. The bot's signals do not use them." })));
 }
 
 // --- reversal against an open position -------------------------------------------------------
@@ -1315,12 +1387,15 @@ function failedLine(row) {
 function triggerLine(row) {
   const a = row.advice, t = a.last_trigger;
   if (!t || a.actionable) return null;
+  if ((a.action === "JOIN" || a.action === "TREND") && t.side === a.side) return null;   // the headline says it
   const word = t.side > 0 ? "BUY" : "SELL";
   const ago = t.bars_ago === 0 ? "on the last bar" : `${t.bars_ago} bar${t.bars_ago === 1 ? "" : "s"} ago`;
-  const verdict = t.taken ? "it passed the filters" : `the bot did not take it (${t.blocked_by})`;
-  const moved = `${Math.abs(t.r_since).toFixed(1)}R ${t.r_since >= 0 ? "in its favour" : "against it"}`;
-  return el("div", { class: "detail" }, el("strong", { text: `${word} trigger ${ago}` }),
-    ` at ${px(t.price, row.digits)} (${localTime(t.time)}): ${verdict}. Price has since moved ${moved}.`);
+  const moved = `${Math.abs(t.r_since).toFixed(1)}R ${t.r_since >= 0 ? "its way" : "against it"}`;
+  return t.taken
+    ? el("div", { class: "detail" }, el("strong", { text: `The bot signalled ${word} ${ago}` }),
+        ` at ${px(t.price, row.digits)} (${localTime(t.time)}). Price has moved ${moved} since.`)
+    : el("div", { class: "detail" }, el("strong", { text: `A ${word} trigger ${ago} was filtered out` }),
+        ` at ${px(t.price, row.digits)} (${localTime(t.time)}): ${t.blocked_by}. Price has moved ${moved} since.`);
 }
 
 function renderPlan(row) {
@@ -1333,11 +1408,13 @@ function renderPlan(row) {
   const word = p.side > 0 ? "BUY" : "SELL";
   const live = isBotPlan(a, p);
   const title = live ? `Trade plan · ${word}` : `${word} plan at the live price`;
+  const joining = a.action === "JOIN" && a.side === p.side;
   const subtitle = live ? "The bot's signal. Priced at the live quote; this is the order it would send." :
+    joining ? "Joining the bot's recent signal, still inside the join window. Priced at the live quote: the stop and target are measured from your entry." :
     "Not a bot signal. These are the levels and size the bot's risk rules give this trade if you take it on your own call.";
   const pick = (side, label) => el("button", { type: "button", "aria-pressed": p.side === side ? "true" : "false",
     onclick: () => { planSide = side; render(); } }, label,
-    el("small", { text: a.actionable && a.side === side ? "bot signal" : a.side === side ? "bot is watching" : "your call" }));
+    el("small", { text: a.actionable && a.side === side ? "bot signal" : a.action === "JOIN" && a.side === side ? "join window open" : a.side === side ? "bot is watching" : "your call" }));
   const toggle = el("div", { class: "seg", role: "group", "aria-label": "Plan direction" }, pick(1, "Buy"), pick(-1, "Sell"));
   const line = (k, v, x, sw) => [el("span", { class: "k" }, sw ? el("i", { class: "swatch", style: `background:${sw}` }) : null, k), el("span", { class: "v", text: v }), el("span", { class: "x", text: x })];
   const list = el("div", { class: "kv-list" },
@@ -1560,7 +1637,7 @@ function renderMarket() {
     const higher = t ? (t.higher || []).map((h) => `${h.timeframe} ${h.direction > 0 ? "▲" : h.direction < 0 ? "▼" : "•"}`).join("  ") : "—";
     return el("tr", { class: "pick", "aria-current": s.symbol === selected ? "true" : "false", ...press(() => { if (s.symbol !== selected) select(s.symbol); }) },
       el("td", { text: s.symbol }),
-      el("td", {}, el("span", { class: `badge ${s.advice.action}`, text: badgeText(s.advice) })),
+      el("td", {}, el("span", { class: `badge ${badgeCls(s.advice)}`, text: badgeText(s.advice) })),
       el("td", {}, trendArrow(t, false), t && t.direction ? ` ${t.state === "ending" ? "likely ending" : t.state === "weakening" ? "weakening" : `${t.age} bars`}` : " none"),
       el("td", { class: "muted", text: higher }),
       el("td", { class: "n", text: d.rsi == null ? "—" : d.rsi.toFixed(0) }),
@@ -1939,26 +2016,37 @@ function drawChart() {
   $("#chart-sub").textContent = `${state.timeframe} · bid ${px(row.bid, row.digits)} · ask ${px(row.ask, row.digits)}`;
   const legendItem = (color, label, zone) => el("span", {}, el("i", { class: zone ? "zone" : "", style: `background:${color}` }), label);
   $("#legend").replaceChildren(legendItem(C.fast, `EMA ${data.fast}`), legendItem(C.slow, `EMA ${data.slow}`),
-    legendItem(C.upTint, "Profit zone", true), legendItem(C.downTint, "Loss zone", true));
+    legendItem(C.upTint, "Profit zone", true), legendItem(C.downTint, "Loss zone", true),
+    el("span", { title: `A taken signal in the trend's direction can be joined for ${data.join_bars || 5} bars; later entries lost money in the stored history` },
+      el("i", { class: "zone", style: `background:${C.text3};opacity:.35` }), "Join window"),
+    el("span", { title: "▲ ▼ the bot's signals; hollow ones were filtered out" }, "▲▼ Signals"),
+    el("span", { title: "The strip under the candles: green while an uptrend runs, red while a downtrend runs" }, "▬ Trend"),
+    el("span", { title: "Shaded bands: support (S) and resistance (R) zones where two or more swing highs or lows turned; ×n = touches, ⇄ = role reversal. HH/HL/LH/LL label the swings. Dashed lines: round numbers. Context only: none of these made money as an entry." }, "S/R zones · swings"));
 
   const bars = data.bars.map((b) => ({ ...b, forming: false }));
   if (row.forming && (!bars.length || row.forming.time > bars[bars.length - 1].time)) {
     bars.push({ ...row.forming, ema_fast: null, ema_slow: null, forming: true });
   }
   const pad = { l: 8, r: 98, t: 14, b: 26 };
-  const future = 14;
-  const slots = bars.length + future;
+  // The bars on screen: the newest ones unless the chart was scrolled back (drag) or zoomed (wheel).
+  const total = bars.length;
+  const count = Math.min(total, Math.max(MIN_VIEW_BARS, view.count || DEFAULT_VIEW_BARS));
+  const endIdx = view.end == null ? total - 1 : Math.max(count - 1, Math.min(view.end, total - 1));
+  const vStart = Math.max(0, endIdx - count + 1);
+  const atLatest = endIdx === total - 1;
+  const future = atLatest ? Math.max(4, Math.round(count * 0.12)) : 0;   // room for the plan zones
+  const slots = endIdx - vStart + 1 + future;
   const step = (W - pad.l - pad.r) / slots;
-  const X = (i) => pad.l + step * (i + 0.5);
+  const X = (i) => pad.l + step * (i - vStart + 0.5);
   const a = row.advice, plan = planFor(row);
   // The trigger line: the close that would fire the next trigger, drawn only when it is near.
   const rawTrig = a.early && a.early.level != null ? a.early.level : a.trigger_level;
   const trig = rawTrig != null && Math.abs(rawTrig - row.bid) <= 4 * row.atr ? rawTrig : null;
   let lo = Infinity, hi = -Infinity;
-  for (const b of bars) { lo = Math.min(lo, b.low); hi = Math.max(hi, b.high); }
-  const levels = [row.bid];
-  if (plan) levels.push(plan.stop, plan.target, plan.entry);
-  if (trig != null) levels.push(trig);
+  for (let i = vStart; i <= endIdx; i++) { lo = Math.min(lo, bars[i].low); hi = Math.max(hi, bars[i].high); }
+  const levels = atLatest ? [row.bid] : [];   // scrolled back, the live levels would squash the old bars
+  if (plan && atLatest) levels.push(plan.stop, plan.target, plan.entry);
+  if (trig != null && atLatest) levels.push(trig);
   for (const v of levels) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
   const span = hi - lo || 1;
   lo -= span * 0.05; hi += span * 0.05;
@@ -1966,7 +2054,7 @@ function drawChart() {
   const plotRight = W - pad.r;
 
   // grid + price axis (labels give way to the price tags drawn later)
-  const tagValues = [row.bid, trig, ...(plan ? [plan.stop, plan.target, plan.entry] : [])].filter((v) => v != null);
+  const tagValues = (atLatest ? [row.bid, trig, ...(plan ? [plan.stop, plan.target, plan.entry] : [])] : []).filter((v) => v != null);
   // where the price tags will end up (the same stacking as below), so the axis labels stay clear of them
   const finalTagYs = stackTags(tagValues.map((v) => ({ y: Y(v) })), pad.t + 10, H - pad.b - 10).map((t) => t.y);
   ctx.lineWidth = 1;
@@ -1984,7 +2072,7 @@ function drawChart() {
   ctx.textBaseline = "alphabetic";
   const every = Math.max(1, Math.ceil(90 / step));
   let lastDay = null;
-  for (let i = 0; i < bars.length; i += every) {
+  for (let i = vStart; i <= endIdx; i += every) {
     const d = new Date(bars[i].time);
     const day = d.toDateString();
     const label = day !== lastDay ? d.toLocaleDateString([], { day: "numeric", month: "short" }) : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -1992,6 +2080,9 @@ function drawChart() {
     ctx.fillStyle = C.text3;
     ctx.fillText(label, Math.max(pad.l, Math.min(X(i) - 12, plotRight - 40)), H - 8);
   }
+
+  ctx.save();   // everything from here to the price tags stays inside the plot
+  ctx.beginPath(); ctx.rect(pad.l, 0, plotRight - pad.l, H); ctx.clip();
 
   // yesterday's and last week's levels, where they are on screen
   const dayLevels = state.market && state.market.symbols && state.market.symbols[selected] && state.market.symbols[selected].levels;
@@ -2029,16 +2120,73 @@ function drawChart() {
     }
     ctx.setLineDash([]);
   }
-  if (trig != null) {
+  if (trig != null && atLatest) {
     const y = Math.round(Y(trig)) + 0.5;
     ctx.strokeStyle = C.text2; ctx.setLineDash([2, 3]);
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(plotRight, y); ctx.stroke();
     ctx.setLineDash([]);
   }
 
+  // support and resistance zones, and the round numbers either side of the price
+  const shape = data.structure;
+  if (shape) {
+    ctx.font = "600 10px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    const zoneLabels = [];   // label rows already used, so two close zones do not overprint
+    for (const z of shape.zones || []) {
+      const top = Y(Math.min(z.high + 0.08 * row.atr, hi)), bottom = Y(Math.max(z.low - 0.08 * row.atr, lo));
+      if (bottom <= pad.t || top >= H - pad.b) continue;
+      ctx.fillStyle = z.side === "resistance" ? C.downTint : z.side === "support" ? C.upTint : C.surface2;
+      ctx.globalAlpha = 0.8;
+      ctx.fillRect(pad.l, top, plotRight - pad.l, Math.max(2, bottom - top));
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = C.text2;
+      let ly = top + 10;
+      while (zoneLabels.some((y) => Math.abs(y - ly) < 11)) ly += 11;
+      zoneLabels.push(ly);
+      ctx.fillText(`${z.side === "resistance" ? "R" : z.side === "support" ? "S" : "Zone"} ×${z.touches}${z.flipped ? " ⇄" : ""}`, pad.l + 4, ly);
+    }
+    ctx.setLineDash([6, 4]); ctx.strokeStyle = C.text3; ctx.lineWidth = 1;
+    for (const v of [shape.round && shape.round.below, shape.round && shape.round.above]) {
+      if (v == null || v <= lo || v >= hi) continue;
+      const y = Math.round(Y(v)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(plotRight, y); ctx.stroke();
+      ctx.fillStyle = C.text3; ctx.fillText(px(v, row.digits), plotRight - 52, y - 3);
+    }
+    ctx.setLineDash([]);
+    ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  }
+
+  // join windows: a taken signal in the running trend's direction, and the bars it could be joined on
+  const marks = data.marks || [], trendAt = data.trend || [], joinBars = data.join_bars || 5;
+  let lastJoinLabel = -Infinity;   // windows side by side share one label
+  for (const m of marks) {
+    if (!m.taken || trendAt[m.i] !== m.side) continue;
+    const end = Math.min(m.i + joinBars, bars.length - 1);
+    const x0 = X(m.i) - step / 2, x1 = X(end) + step / 2;
+    const last = data.bars.length - 1;   // the window is still open on the last closed bar, trend unchanged
+    const open = m.i + joinBars >= last && trendAt[last] === m.side;
+    ctx.fillStyle = m.side > 0 ? C.upTint : C.downTint;
+    ctx.globalAlpha = open ? 0.9 : 0.45;
+    ctx.fillRect(x0, pad.t, x1 - x0, H - pad.t - pad.b);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = m.side > 0 ? C.up : C.down;
+    ctx.font = "600 10px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    if (open || x0 - lastJoinLabel > 34) { ctx.fillText(open ? "JOIN NOW" : "join", x0 + 2, pad.t + 10); lastJoinLabel = x0; }
+    ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  }
+  // trend strip along the bottom of the plot
+  trendAt.forEach((t, i) => {
+    if (!t || i >= bars.length) return;
+    ctx.fillStyle = t > 0 ? C.up : C.down;
+    ctx.globalAlpha = 0.7;
+    ctx.fillRect(X(i) - step / 2, H - pad.b - 4, step + 0.5, 4);
+  });
+  ctx.globalAlpha = 1;
+
   // candles
   const body = Math.max(1, Math.min(14, step * 0.62));
   bars.forEach((b, i) => {
+    if (i < vStart || i > endIdx) return;
     const x = Math.round(X(i)) + 0.5;
     const color = b.close >= b.open ? C.up : C.down;
     ctx.globalAlpha = b.forming ? 0.5 : 1;
@@ -2055,27 +2203,74 @@ function drawChart() {
     ctx.beginPath();
     let started = false;
     bars.forEach((b, i) => {
-      if (b[key] == null) return;
+      if (b[key] == null || i < vStart - 1 || i > endIdx + 1) return;
       const x = X(i), y = Y(b[key]);
       if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
     });
     ctx.stroke();
   }
 
-  // live bid line
-  const yb = Math.round(Y(row.bid)) + 0.5;
-  ctx.strokeStyle = C.text3; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
-  ctx.beginPath(); ctx.moveTo(pad.l, yb); ctx.lineTo(plotRight, yb); ctx.stroke();
-  ctx.setLineDash([]);
+  // swing labels (HH, HL, LH, LL) and pattern lines
+  if (shape) {
+    ctx.font = "600 10px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    for (const sw of shape.swings || []) {
+      const b = bars[sw.i];
+      if (!b || !sw.label) continue;
+      ctx.fillStyle = sw.label[0] === "H" ? C.up : sw.label[0] === "L" ? C.down : C.text2;
+      ctx.fillText(sw.label, X(sw.i), sw.kind === "high" ? Y(b.high) - 6 : Y(b.low) + 14);
+    }
+    ctx.textAlign = "left";
+    const patternColor = css("--accent") || C.text;
+    for (const pt of shape.patterns || []) {
+      ctx.strokeStyle = patternColor; ctx.lineWidth = 1.5; ctx.setLineDash(pt.status === "confirmed" ? [] : [5, 4]);
+      for (const [i0, p0, i1, p1] of pt.lines) {
+        ctx.beginPath(); ctx.moveTo(X(i0), Y(p0)); ctx.lineTo(X(Math.min(i1, bars.length - 1)), Y(p1)); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      const [i0, p0] = pt.lines[0];
+      ctx.fillStyle = patternColor;
+      ctx.fillText(`${pt.name}${pt.status === "confirmed" ? "" : " (forming)"}`, X(i0) + 2, Y(p0) - 5);
+    }
+    ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  }
+
+  // signal markers: ▲ under a buy bar, ▼ over a sell bar; filtered triggers hollow
+  for (const m of marks) {
+    const b = bars[m.i];
+    if (!b) continue;
+    const x = X(m.i), size = Math.max(6, Math.min(9, step * 0.7));
+    const y = m.side > 0 ? Y(b.low) + size + 5 : Y(b.high) - size - 5;
+    const color = m.side > 0 ? C.up : C.down;
+    ctx.beginPath();
+    ctx.moveTo(x, m.side > 0 ? y - size : y + size);
+    ctx.lineTo(x - size, m.side > 0 ? y + size : y - size);
+    ctx.lineTo(x + size, m.side > 0 ? y + size : y - size);
+    ctx.closePath();
+    if (m.taken) {
+      ctx.fillStyle = color; ctx.fill();
+      ctx.strokeStyle = C.surface; ctx.lineWidth = 1.5; ctx.stroke();   // stands out over candles
+    } else { ctx.strokeStyle = C.text2; ctx.lineWidth = 1.5; ctx.stroke(); }
+  }
+
+  // live bid line (only while the newest bars are on screen)
+  if (atLatest) {
+    const yb = Math.round(Y(row.bid)) + 0.5;
+    ctx.strokeStyle = C.text3; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(pad.l, yb); ctx.lineTo(plotRight, yb); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
 
   // right-axis tags, nudged apart so they never overlap
-  const tags = [{ v: row.bid, label: px(row.bid, row.digits), bg: css("--accent") || C.text, fg: "#fff" }];
-  if (plan) {
+  const tags = atLatest ? [{ v: row.bid, label: px(row.bid, row.digits), bg: css("--accent") || C.text, fg: "#fff" }] : [];
+  if (plan && atLatest) {
     tags.push({ v: plan.target, label: `TP ${px(plan.target, row.digits)}`, bg: C.up, fg: "#fff" });
     tags.push({ v: plan.stop, label: `SL ${px(plan.stop, row.digits)}`, bg: C.down, fg: "#fff" });
     tags.push({ v: plan.entry, label: `In ${px(plan.entry, row.digits)}`, bg: C.surface2, fg: C.text });
   }
-  if (trig != null) tags.push({ v: trig, label: `Trig ${px(trig, row.digits)}`, bg: C.surface2, fg: C.text2 });
+  if (trig != null && atLatest) tags.push({ v: trig, label: `Trig ${px(trig, row.digits)}`, bg: C.surface2, fg: C.text2 });
   tags.forEach((t) => (t.y = Y(t.v)));
   stackTags(tags, pad.t + 10, H - pad.b - 10);
   ctx.textBaseline = "middle";
@@ -2109,6 +2304,8 @@ function drawChart() {
       kv("Open", px(b.open, row.digits)), kv("High", px(b.high, row.digits)), kv("Low", px(b.low, row.digits)), kv("Close", px(b.close, row.digits)),
       b.ema_fast != null ? kv(`EMA ${data.fast}`, px(b.ema_fast, row.digits)) : null,
       b.ema_slow != null ? kv(`EMA ${data.slow}`, px(b.ema_slow, row.digits)) : null,
+      ...(data.marks || []).filter((m) => m.i === hoverIndex).map((m) =>
+        kv(`${m.side > 0 ? "Buy" : "Sell"} ${m.taken ? "signal" : "trigger"}`, m.taken ? "taken" : `filtered: ${m.blocked_by}`)),
     );
     tip.style.display = "block";
     const left = x + 14 + tip.offsetWidth > W ? x - 14 - tip.offsetWidth : x + 14;
@@ -2119,18 +2316,85 @@ function drawChart() {
   }
   canvas.dataset.bars = String(bars.length);
   canvas.dataset.step = String(step);
+  canvas.dataset.start = String(vStart);
+  canvas.dataset.end = String(endIdx);
+  const zoom = $("#chart-zoom");
+  if (zoom) zoom.textContent = `${endIdx - vStart + 1} of ${total} bars${atLatest ? "" : " · scrolled back"}`;
 }
 
 const canvas = $("#chart");
-canvas.addEventListener("pointermove", (e) => {
-  const step = Number(canvas.dataset.step || 0), n = Number(canvas.dataset.bars || 0);
-  if (!step) return;
+// --- zoom, scroll and the expanded view (wheel to zoom, drag to scroll back, double-click to reset)
+let drag = null;
+const chartBars = () => Number(canvas.dataset.bars || 0);
+function zoomChart(factor, anchor) {
+  const total = chartBars();
+  if (!total) return;
+  const start = Number(canvas.dataset.start || 0), end = Number(canvas.dataset.end || total - 1);
+  const shown = end - start + 1;
+  const count = Math.min(total, Math.max(MIN_VIEW_BARS, Math.round(shown * factor)));
+  if (count === shown) return;
+  // keep the bar under the mouse (or the right edge) where it is
+  const at = anchor == null ? end : anchor;
+  const right = view.end == null && anchor == null ? null : Math.round(at + (end - at) * (count / shown));
+  view.count = count;
+  view.end = right == null || right >= total - 1 ? null : Math.max(count - 1, right);
+  drawChart();
+}
+function resetChartView() { view.count = null; view.end = null; drawChart(); }
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const step = Number(canvas.dataset.step || 0);
   const rect = canvas.getBoundingClientRect();
-  const i = Math.floor((e.clientX - rect.left - 8) / step);
-  const next = i >= 0 && i < n ? i : null;
+  const anchor = step ? Number(canvas.dataset.start || 0) + Math.floor((e.clientX - rect.left - 8) / step) : null;
+  zoomChart(e.deltaY > 0 ? 1.15 : 1 / 1.15, anchor);
+}, { passive: false });
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  drag = { x: e.clientX, end: Number(canvas.dataset.end || 0), moved: false };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointerup", (e) => { drag = null; try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* gone */ } });
+canvas.addEventListener("dblclick", resetChartView);
+canvas.addEventListener("pointermove", (e) => {
+  const step = Number(canvas.dataset.step || 0), n = chartBars();
+  if (!step) return;
+  if (drag) {   // drag right = back in time
+    const shift = Math.round((e.clientX - drag.x) / step);
+    if (shift) {
+      const start = Number(canvas.dataset.start || 0), end = Number(canvas.dataset.end || n - 1);
+      const shown = end - start + 1;
+      const next = Math.max(shown - 1, Math.min(n - 1, drag.end - shift));
+      view.count = shown;
+      view.end = next >= n - 1 ? null : next;
+      drag.moved = true;
+      hoverIndex = null;
+      drawChart();
+    }
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const i = Number(canvas.dataset.start || 0) + Math.floor((e.clientX - rect.left - 8) / step);
+  const next = i >= 0 && i < n && i <= Number(canvas.dataset.end || n - 1) ? i : null;
   if (next !== hoverIndex) { hoverIndex = next; drawChart(); }
 });
-canvas.addEventListener("pointerleave", () => { hoverIndex = null; drawChart(); });
+canvas.addEventListener("pointerleave", () => { if (!drag) { hoverIndex = null; drawChart(); } });
+function setChartExpanded(on) {
+  const card = document.querySelector(".chart-card");
+  card.classList.toggle("expanded", on);
+  document.body.classList.toggle("chart-open", on);
+  $("#chart-expand").textContent = on ? "✕ Close" : "⤢ Expand";
+  $("#chart-expand").title = on ? "Back to the page (Esc)" : "Open the chart in a large view";
+  if (on && view.count == null) view.count = Math.min(chartBars() || 300, 300);   // more history when large
+  if (!on) { view.count = null; view.end = null; }
+  requestAnimationFrame(drawChart);
+}
+$("#chart-expand").addEventListener("click", () => setChartExpanded(!document.querySelector(".chart-card").classList.contains("expanded")));
+$("#chart-in").addEventListener("click", () => zoomChart(1 / 1.3));
+$("#chart-out").addEventListener("click", () => zoomChart(1.3));
+$("#chart-reset").addEventListener("click", resetChartView);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.querySelector(".chart-card.expanded")) setChartExpanded(false);
+});
 window.addEventListener("resize", () => drawChart());
 
 // --- orders ----------------------------------------------------------------------------------

@@ -374,6 +374,29 @@ class BotConfig:
     def with_strategy(self, **changes: Any) -> BotConfig:
         return replace(self, strategy=replace(self.strategy, **changes))
 
+    def with_setup(self, name: str) -> BotConfig:
+        """This config with ``name`` as the setup of every symbol. A per-symbol setup name would
+        otherwise silently keep that symbol on its own setup; its other overrides are kept."""
+        overrides = {
+            symbol: {
+                section: {k: v for k, v in values.items() if not (section == "strategy" and k == "name")}
+                for section, values in sections.items()
+            }
+            for symbol, sections in self.overrides.items()
+        }
+        return replace(self.with_strategy(name=name), overrides=overrides)
+
+    def setups(self) -> dict[str, str]:
+        """The setup each symbol trades, after its overrides."""
+        return {symbol: self.for_symbol(symbol).strategy.name for symbol in self.symbols}
+
+    def setup_groups(self) -> list[tuple[str, list[str]]]:
+        """(setup, symbols) pairs, the config's own setup first: one pair unless symbols differ."""
+        groups: dict[str, list[str]] = {self.strategy.name: []}
+        for symbol, name in self.setups().items():
+            groups.setdefault(name, []).append(symbol)
+        return [(name, symbols) for name, symbols in groups.items() if symbols]
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["symbols"] = list(self.symbols)
@@ -412,6 +435,8 @@ def _validate(c: BotConfig) -> list[str]:
     start, end = c.schedule.start_hour_utc, c.schedule.end_hour_utc
     if not (0 <= start <= 23 and 1 <= end <= 24):
         errors.append("schedule hours must be start 0-23 and end 1-24 (UTC)")
+    elif c.schedule.session == "custom" and start == end:  # would read as open around the clock
+        errors.append("schedule start_hour_utc and end_hour_utc are equal: use 0 and 24 for all day")
     if c.history_bars < 200:
         errors.append("history_bars must be at least 200")
     if c.poll_seconds <= 0:

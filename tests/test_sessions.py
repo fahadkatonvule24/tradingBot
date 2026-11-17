@@ -128,3 +128,13 @@ def test_a_sell_an_hour_before_the_winter_london_open_is_a_skip():
 def test_the_same_sell_at_the_winter_open_or_at_07_00_in_summer_is_advice():
     assert _sell_at(datetime(2026, 11, 16, 8, 2))[0] == "SELL"
     assert _sell_at(datetime(2026, 7, 6, 7, 2))[0] == "SELL"
+
+
+def test_a_custom_window_with_equal_hours_is_refused():
+    import pytest
+
+    from tradebot.config import BotConfig, ConfigError, ScheduleParams
+
+    with pytest.raises(ConfigError, match="are equal"):
+        BotConfig(schedule=ScheduleParams(session="custom", start_hour_utc=6, end_hour_utc=6)).validate()
+    BotConfig(schedule=ScheduleParams(session="custom", start_hour_utc=6, end_hour_utc=17)).validate()

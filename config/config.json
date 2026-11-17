@@ -72,7 +72,9 @@
   },
 
   "schedule": {
-    "session": "london_new_york",
+    "session": "custom",
+    "start_hour_utc": 6,
+    "end_hour_utc": 17,
     "news_file": "config/news_blackouts.json",
     "news_feed": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     "news_before_minutes": 30,
@@ -93,7 +95,8 @@
   },
 
   "overrides": {
-    "XAUUSD": { "backtest": { "min_spread_points": 25 } },
+    "GBPUSD": { "strategy": { "name": "breakout" } },
+    "XAUUSD": { "strategy": { "name": "breakout" }, "backtest": { "min_spread_points": 25 } },
     "USDJPY": { "backtest": { "min_spread_points": 12 } }
   }
 }

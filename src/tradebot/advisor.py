@@ -74,6 +74,7 @@ class Advice:
     blocker: str | None = None
     plan: TradePlan | None = None
     entries_from: datetime | None = None
+    """When trading hours are closed: the first bar close at which an entry is allowed again."""
     direction_note: str = ""
     """Why only one direction is being considered, when the chart may look like the other."""
     plans: dict[str, TradePlan] = field(default_factory=dict)
@@ -84,7 +85,6 @@ class Advice:
     """What the bar that is still forming would do: see ``early_warning``."""
     failed_break: dict | None = None
     """A break in the last few bars that has closed back through its level: see ``failed_break``."""
-    """When trading hours are closed: the first bar close at which an entry is allowed again."""
 
 
 def next_entry_time(schedule: ScheduleParams, after: datetime, bar: timedelta) -> datetime | None:
@@ -239,23 +239,110 @@ def advise(
             actionable=False, **common,
         )  # fmt: skip
     failed = common["failed_break"]
-    if failed and not failed["recovered"]:
+    trend_advice = _trend_advice(symbol, row, p, common, spec, config.timeframe, bar)
+    if failed and not failed["recovered"] and not (trend_advice and failed["side"] != trend_side(row, p)):
         ago = "on the last bar" if failed["bars_ago"] == 0 else _bars_ago(failed["bars_ago"])
-        level = f"{failed['level']:.{spec.digits}f}"
+        broken_at = f"{failed['level']:.{spec.digits}f}"
         back = "below" if failed["side"] > 0 else "above"
         return Advice(
             symbol, "WAIT", f"{WORD[failed['side']].title()} break failed {ago}",
-            f"Price broke {'above' if failed['side'] > 0 else 'below'} {level} and has closed back {back} it, "
+            f"Price broke {'above' if failed['side'] > 0 else 'below'} {broken_at} and has closed back {back} it, "
             f"so that break no longer holds. {trigger}",
             actionable=False, **common,
         )  # fmt: skip
+    if trend_advice:
+        return trend_advice
     recent = common["last_trigger"]
     if recent and recent["bars_ago"] > 0:
         word = WORD[recent["side"]].title()
-        ago = f"{recent['bars_ago']} bar{'' if recent['bars_ago'] == 1 else 's'} ago"
-        outcome = "taken" if recent["taken"] else f"blocked ({recent['blocked_by']})"
-        return Advice(symbol, "WAIT", f"{word} trigger {ago}, {outcome}", trigger, actionable=False, **common)
+        ago = _bars_ago(recent["bars_ago"])
+        headline = (
+            f"{word} signal {ago}"
+            if recent["taken"]
+            else f"{word} trigger {ago} was filtered out ({recent['blocked_by']})"
+        )
+        return Advice(symbol, "WAIT", headline, trigger, actionable=False, **common)
     return Advice(symbol, "WAIT", "No setup yet", trigger, actionable=False, **common)
+
+
+JOIN_WINDOW_BARS = 5
+"""How many bars after a taken signal it still made sense to join it at the market.
+
+Measured on the stored H1 history of the six configured symbols inside the trading hours
+(``scripts/research_late_entry.py``), with a fresh stop and target from the late entry: entering
+0 to 5 bars after a signal averaged -0.03R to +0.04R a trade, the same as taking it on time.
+Ten bars after it averaged -0.06R (2017-22) and -0.10R (2023-26), and -0.14R to -0.18R when price
+had already moved 0 to 0.5R the signal's way. Every way tried of joining a running trend without
+a fresh signal (a dip to EMA 10, a dip to EMA 50, a flag break) lost 0.07R to 0.19R a trade."""
+
+
+def trend_side(row: pd.Series, p: StrategyParams) -> int:
+    """The direction of a running trend, or 0: the higher timeframes agree (the setup's trend
+    filter) and the trading timeframe's averages point the same way."""
+    if not (p.use_trend_filter and "trend" in FILTERS[p.name]):
+        return 0
+    side = int(row["trend"])
+    fast, slow = float(row["ema_fast"]), float(row["ema_slow"])
+    if side == 0 or not (np.isfinite(fast) and np.isfinite(slow)):
+        return 0
+    return side if np.sign(fast - slow) == side else 0
+
+
+def _trend_advice(
+    symbol: str,
+    row: pd.Series,
+    p: StrategyParams,
+    common: dict,
+    spec: SymbolSpec,
+    timeframe: str,
+    bar: timedelta,
+) -> Advice | None:
+    """TREND or JOIN instead of WAIT while a trend runs: whether the last signal in its direction
+    can still be joined, and if not, what the next entry is."""
+    side = trend_side(row, p)
+    if not side:
+        return None
+    name, word = ("Uptrend" if side > 0 else "Downtrend"), WORD[side].lower()
+    trend = f"The higher timeframes and the {timeframe} averages all point {'up' if side > 0 else 'down'}."
+    fields = {**common, "side": side, "plan": common["plans"]["buy" if side > 0 else "sell"]}
+    recent = common["last_trigger"]
+    ours = recent if recent and recent["side"] == side and recent["bars_ago"] > 0 else None
+    if ours and ours["taken"]:
+        n, price = ours["bars_ago"], f"{ours['price']:.{spec.digits}f}"
+        moved = f"{abs(ours['r_since']):.1f}R {'its way' if ours['r_since'] >= 0 else 'against it'}"
+        said = f"The bot signalled {word.upper()} {_bars_ago(n)} at {price}; price has moved {moved} since."
+        if n <= JOIN_WINDOW_BARS:
+            left = JOIN_WINDOW_BARS - n
+            until = ours["time"] + bar * JOIN_WINDOW_BARS
+            window = (
+                f"for {left} more bar{'' if left == 1 else 's'} (until {until:%H:%M} UTC)"
+                if left
+                else "until this bar closes"
+            )
+            return Advice(
+                symbol, "JOIN", f"{name}: you can still join the {word}",
+                f"{said} In the stored history, joining up to {JOIN_WINDOW_BARS} bars after a signal did about as "
+                f"well as taking it on time, so the plan still applies {window}. The stop and target are measured "
+                f"from your entry, not the bot's.",
+                actionable=False, **fields,
+            )  # fmt: skip
+        return Advice(
+            symbol, "TREND", f"{name}: too late to join this {word}",
+            f"{said} Joining more than {JOIN_WINDOW_BARS} bars after a signal lost money in the stored history "
+            f"(about -0.1R a trade). Wait for the next {word} entry: {common['trigger']}",
+            actionable=False, **fields,
+        )  # fmt: skip
+    filtered = (
+        f"The last {word} trigger, {_bars_ago(ours['bars_ago'])}, was filtered out ({ours['blocked_by']}). "
+        if ours
+        else ""
+    )
+    return Advice(
+        symbol, "TREND", f"{name}: next {word} entry",
+        f"{trend} {filtered}Entering without a signal lost money in the stored history; the next {word} "
+        f"entry: {common['trigger']}",
+        actionable=False, **fields,
+    )  # fmt: skip
 
 
 def cross_level(features: pd.DataFrame, p: StrategyParams) -> tuple[int, float] | None:

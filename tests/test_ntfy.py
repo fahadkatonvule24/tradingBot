@@ -144,3 +144,40 @@ def test_setup_saves_a_topic_then_tests_it(bare_config, monkeypatch, capsys, tmp
     monkeypatch.setenv("NTFY_TOPIC", topic)  # the next run reads it from .env (the test guard blocks that)
     assert main(["-c", bare_config, "ntfy"]) == 0
     assert sent == [("https://ntfy.sh", topic)]
+
+
+def test_an_unexpected_delivery_error_does_not_end_alerts():
+    """Regression: an error outside the expected ones (http.client.IncompleteRead) killed the
+    sending thread, and every later alert waited in the queue for ever."""
+    import http.client
+    import threading
+
+    from tradebot.notify import Ntfy
+
+    sent, calls = [], []
+    done = threading.Event()
+
+    class Reply:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n):
+            if not calls:
+                calls.append(1)
+                raise http.client.IncompleteRead(b"")
+            return b""
+
+    def opener(request, timeout):
+        sent.append(request)
+        if len(sent) == 2:
+            done.set()
+        return Reply()
+
+    channel = Ntfy("tradebot-test", opener=opener, gap_seconds=0)
+    channel.send("first\nbody", "signal")
+    channel.send("second\nbody", "signal")
+    assert done.wait(5), "the second alert was never sent"
+    channel.close()

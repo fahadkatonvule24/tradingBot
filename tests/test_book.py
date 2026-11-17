@@ -324,6 +324,22 @@ def test_a_stop_hit_on_a_closed_bar_is_found_after_a_restart(cfg, broker, book):
     ].to_pydatetime() + timedelta(minutes=15)
 
 
+def test_a_moved_stop_is_not_hit_by_a_bar_from_before_it_moved(cfg, broker, book):
+    """Regression: every new bar re-tested all bars since the trade opened against the current
+    stop, so a stop moved to breakeven was "hit" by a dip from before it was moved."""
+    frame = features()
+    opened = frame["time"].iloc[-6].to_pydatetime() - timedelta(minutes=1)
+    book.save_account("A", 2000, NOW)
+    book.open_trade("A", SYMBOL, -1, 0.05, 1.0990, opened, sl=1.1010, tp=1.0960)
+    frame.loc[frame.index[-3], "high"] = 1.1003  # under the first stop: the trade survived it
+    monitor = desk_monitor(cfg, broker, book, frame)
+    assert monitor.desk.op({"op": "amend", "id": 1, "sl": 1.1002, "tp": 1.0960})["ok"]
+    assert book.trade(1).levels_set == NOW
+    monitor.refresh()  # a fresh dashboard, as after a restart
+    trade = book.trade(1)
+    assert trade.is_open and trade.sl == 1.1002 and trade.initial_sl == 1.1010
+
+
 def test_an_alert_gives_the_size_at_every_account(cfg, broker, book):
     inbox = Inbox()
     monitor = desk_monitor(cfg, broker, book, features({"signal": 1, "raw_signal": 1}), notifier=inbox)

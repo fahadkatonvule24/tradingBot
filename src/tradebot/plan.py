@@ -167,7 +167,17 @@ def trading_plan(
     if changed:
         what.append("Per-instrument exceptions: " + "; ".join(changed) + ".")
 
-    entry = [f"Setup ({SETUP_LABELS[p.name]}): {_setup(p, tf)}", *_filters(p, tf)]
+    groups = config.setup_groups()
+    if len(groups) == 1:
+        entry = [f"Setup ({SETUP_LABELS[p.name]}): {_setup(p, tf)}", *_filters(p, tf)]
+    else:  # symbols on different setups: the rules of each, with the symbols it applies to
+        entry = []
+        for name, symbols in groups:
+            own = config.for_symbol(symbols[0]).strategy
+            entry += [
+                f"Setup on {', '.join(symbols)} ({SETUP_LABELS[name]}): {_setup(own, tf)}",
+                *_filters(own, tf),
+            ]
     entry.append("All of these must be true on the same closed bar. If one is not, there is no trade.")
 
     exits = [
@@ -336,8 +346,19 @@ def backtest_record(result: Any) -> dict[str, Any]:
     }
 
 
+def setup_text(config: BotConfig) -> str:
+    """The setup in use, naming the symbols that trade another one: "EMA cross (Breakout on
+    GBPUSD, XAUUSD)"."""
+    groups = config.setup_groups()
+    main, *others = groups
+    text = SETUP_LABELS[main[0]]
+    if others:
+        text += " (" + "; ".join(f"{SETUP_LABELS[n]} on {', '.join(s)}" for n, s in others) + ")"
+    return text
+
+
 def plan_title(config: BotConfig) -> str:
-    return f"Trading plan: {SETUP_LABELS[config.strategy.name]} on {config.timeframe}"
+    return f"Trading plan: {setup_text(config)} on {config.timeframe}"
 
 
 def to_markdown(config: BotConfig, sections: list[Section]) -> str:

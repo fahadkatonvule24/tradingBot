@@ -104,11 +104,67 @@ def test_filtered_trigger_says_which_filter(cfg, broker):
 def test_a_blocked_trigger_stays_in_the_headline_on_later_bars(cfg, broker):
     """Regression for a real complaint: one bar after a blocked sell the screen said 'No setup yet'."""
     frame = features()
+    frame["trend"] = 0  # no running trend: the trend states are tested on their own
     frame.loc[len(frame) - 2, ["raw_signal", "block"]] = [-1, "rsi"]
     a = advice_for(cfg, broker, frame)
-    assert a.action == "WAIT" and a.headline == "Sell trigger 1 bar ago, blocked (RSI stretched)"
+    assert a.action == "WAIT" and a.headline == "Sell trigger 1 bar ago was filtered out (RSI stretched)"
     frame.loc[len(frame) - 2, ["signal", "block"]] = [-1, ""]
-    assert advice_for(cfg, broker, frame).headline == "Sell trigger 1 bar ago, taken"
+    assert advice_for(cfg, broker, frame).headline == "Sell signal 1 bar ago"
+
+
+# --- a running trend: join the last signal, or wait for the next one ---------------------------------
+
+
+def test_a_running_trend_says_trend_not_wait(cfg, broker):
+    a = advice_for(cfg, broker, features())  # H4 up, EMA 10 above EMA 50, no signal on screen
+    assert (a.action, a.side, a.actionable) == ("TREND", 1, False)
+    assert a.headline == "Uptrend: next buy entry"
+    assert "Entering without a signal lost money" in a.detail and "fresh cross" in a.detail
+    assert a.plan == a.plans["buy"]
+
+
+def test_a_taken_signal_can_be_joined_for_five_bars(cfg, broker):
+    from tradebot.advisor import JOIN_WINDOW_BARS
+
+    frame = features()
+    frame.loc[len(frame) - 4, ["signal", "raw_signal"]] = [1, 1]  # 3 bars ago
+    a = advice_for(cfg, broker, frame)
+    assert (a.action, a.side, a.actionable) == ("JOIN", 1, False)
+    assert a.headline == "Uptrend: you can still join the buy"
+    assert "The bot signalled BUY 3 bars ago" in a.detail and "for 2 more bars (until 12:30 UTC)" in a.detail
+    frame = features()
+    frame.loc[len(frame) - 1 - JOIN_WINDOW_BARS - 1, ["signal", "raw_signal"]] = [1, 1]  # 6 bars ago
+    late = advice_for(cfg, broker, frame)
+    assert (late.action, late.headline) == ("TREND", "Uptrend: too late to join this buy")
+    assert "lost money in the stored history" in late.detail
+
+
+def test_no_trend_state_against_the_trend_or_without_the_filter(cfg, broker):
+    mixed = features()
+    mixed["ema_fast"] = 1.0980  # the M15 averages point down while H4 is up
+    assert advice_for(cfg, broker, mixed).action == "WAIT"
+    off = replace(cfg, strategy=replace(cfg.strategy, use_trend_filter=False))
+    assert advice_for(off, broker, features()).action == "WAIT"
+
+
+def test_the_chart_marks_signals_and_the_trend(cfg, broker):
+    frame = features()
+    frame.loc[len(frame) - 4, ["signal", "raw_signal"]] = [1, 1]
+    frame.loc[len(frame) - 8, ["raw_signal", "block"]] = [-1, "trend"]
+    monitor = primed(Monitor(cfg, broker, [SYMBOL]), frame)
+    chart = monitor.chart(SYMBOL)
+    n = len(chart["bars"])
+    assert chart["join_bars"] == 5 and chart["trend"] == [1] * n
+    assert chart["marks"] == [
+        {
+            "i": n - 8,
+            "side": -1,
+            "taken": False,
+            "price": chart["bars"][n - 8]["close"],
+            "blocked_by": "against higher-timeframe trend",
+        },
+        {"i": n - 4, "side": 1, "taken": True, "price": chart["bars"][n - 4]["close"], "blocked_by": ""},
+    ]
 
 
 def test_recent_signals_include_blocked_triggers(cfg):
@@ -126,7 +182,7 @@ def test_recent_signals_include_blocked_triggers(cfg):
 def test_no_setup_explains_the_next_trigger(cfg, broker):
     # fast EMA above slow with an up trend: the next buy needs a fresh cross
     a = advice_for(cfg, broker, features())
-    assert a.action == "WAIT" and a.side == 1
+    assert a.action == "TREND" and a.side == 1
     assert "fresh cross" in a.trigger
     down = advice_for(cfg, broker, features({"trend": -1}))
     assert down.side == -1 and "closes below EMA 50" in down.trigger
@@ -282,9 +338,13 @@ def test_snapshot_is_strict_json(cfg, broker):
     json.dumps(state, allow_nan=False)
     row = state["symbols"][0]
     assert state["gate"] == {"execute": False, "reason": "dry_run is true in the config", "live_flag": False}
-    assert row["advice"]["action"] in {"BUY", "SELL", "WAIT", "SKIP"}
+    assert row["advice"]["action"] in {"BUY", "SELL", "WAIT", "SKIP", "TREND", "JOIN"}
     assert row["forming"]["time"] == "2026-03-04T12:00:00Z"
     assert monitor.chart(SYMBOL)["bars"][-1]["time"] == "2026-03-04T11:45:00Z"
+    assert set(row["structure"]) >= {"state", "text", "zones", "round", "patterns", "swings"}
+    drawn = monitor.chart(SYMBOL)["structure"]  # computed with the snapshot, drawn on the chart
+    assert set(drawn) == {"swings", "zones", "round", "patterns"}
+    json.dumps(monitor.chart(SYMBOL), allow_nan=False)
 
 
 def test_orders_refused_while_the_gate_is_closed(cfg, broker, fake):

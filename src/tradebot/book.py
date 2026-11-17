@@ -98,6 +98,9 @@ class BookTrade:
     source: str = OWN_CALL
     """``signal`` if the bot was signalling this side when it was logged, else ``own call``."""
     note: str = ""
+    levels_set: datetime | None = None
+    """When the stop or target was last moved (or the trade reopened); None if never. Price history
+    before it was judged against the old levels, so the sweep must not test it against the new."""
 
     @property
     def is_open(self) -> bool:
@@ -106,7 +109,7 @@ class BookTrade:
 
 _COLUMNS = (
     "id, account, symbol, side, volume, entry, sl, tp, initial_sl, opened_utc, closed_utc, "
-    "exit_price, pnl, exit_reason, assumed, source, note"
+    "exit_price, pnl, exit_reason, assumed, source, note, levels_utc"
 )
 
 
@@ -119,7 +122,7 @@ def _trade(row: tuple) -> BookTrade:
         id=row[0], account=row[1], symbol=row[2], side=row[3], volume=row[4], entry=row[5], sl=row[6],
         tp=row[7], initial_sl=row[8], opened=datetime.fromisoformat(row[9]), closed=_when(row[10]),
         exit_price=row[11], pnl=row[12], exit_reason=row[13] or "", assumed=bool(row[14]),
-        source=row[15], note=row[16],
+        source=row[15], note=row[16], levels_set=_when(row[17]),
     )  # fmt: skip
 
 
@@ -147,6 +150,10 @@ class Book:
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(book_accounts)")}
         if "leverage" not in columns:  # a book made before leverage was added
             self._db.execute("ALTER TABLE book_accounts ADD COLUMN leverage REAL")
+            self._db.commit()
+        trade_columns = {row[1] for row in self._db.execute("PRAGMA table_info(book_trades)")}
+        if "levels_utc" not in trade_columns:  # a book made before amended stops were dated
+            self._db.execute("ALTER TABLE book_trades ADD COLUMN levels_utc TEXT")
             self._db.commit()
         self._stops: dict[int, float] | None = None
         self.version = 0
@@ -315,8 +322,11 @@ class Book:
             )  # fmt: skip
             return self.trade(int(cursor.lastrowid))
 
-    def amend(self, trade_id: int, sl: float | None, tp: float | None) -> BookTrade:
-        """Move the stop or target of an open trade. The stop it opened with still defines 1R."""
+    def amend(
+        self, trade_id: int, sl: float | None, tp: float | None, now: datetime | None = None
+    ) -> BookTrade:
+        """Move the stop or target of an open trade. The stop it opened with still defines 1R.
+        ``now`` dates the change, so bars before it are not tested against the new levels."""
         trade = self._need_open(trade_id)
         sl, tp = sl or None, tp or None
         for label, level in (("stop", sl), ("target", tp)):
@@ -326,8 +336,15 @@ class Book:
             raise BookError("the target must be on the winning side of the entry")
         with self._lock:
             self._write(
-                "UPDATE book_trades SET sl = ?, tp = ?, initial_sl = COALESCE(initial_sl, ?) WHERE id = ?",
-                (sl, tp, sl if sl is not None and (sl - trade.entry) * trade.side < 0 else None, trade_id),
+                "UPDATE book_trades SET sl = ?, tp = ?, initial_sl = COALESCE(initial_sl, ?), "
+                "levels_utc = COALESCE(?, levels_utc) WHERE id = ?",
+                (
+                    sl,
+                    tp,
+                    sl if sl is not None and (sl - trade.entry) * trade.side < 0 else None,
+                    now.isoformat(timespec="seconds") if now else None,
+                    trade_id,
+                ),
             )
         return self.trade(trade_id)
 
@@ -363,16 +380,17 @@ class Book:
             self._move_balance(trade.account, pnl - (trade.pnl or 0.0))
         return self.trade(trade_id)
 
-    def reopen(self, trade_id: int) -> BookTrade:
-        """Undo a close, for a trade the dashboard assumed was stopped out and was not."""
+    def reopen(self, trade_id: int, now: datetime | None = None) -> BookTrade:
+        """Undo a close, for a trade the dashboard assumed was stopped out and was not. ``now``
+        dates the reopening, so the bars that seemed to close it are not tested again."""
         trade = self.trade(trade_id)
         if trade.is_open:
             raise BookError(f"trade #{trade_id} is already open")
         with self._lock:
             self._write(
                 "UPDATE book_trades SET closed_utc = NULL, exit_price = NULL, pnl = NULL, exit_reason = NULL, "
-                "assumed = 0 WHERE id = ?",
-                (trade_id,),
+                "assumed = 0, levels_utc = COALESCE(?, levels_utc) WHERE id = ?",
+                (now.isoformat(timespec="seconds") if now else None, trade_id),
             )
             self._move_balance(trade.account, -(trade.pnl or 0.0))
         return self.trade(trade_id)

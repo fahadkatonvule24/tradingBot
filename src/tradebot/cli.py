@@ -35,6 +35,7 @@ from rich.table import Table
 
 from tradebot import __version__
 from tradebot.config import STRATEGIES, BotConfig, ConfigError, load_config
+from tradebot.plan import setup_text
 
 console = Console(highlight=False)
 log = logging.getLogger("tradebot")
@@ -187,7 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             keep = {k: v for k, v in config.overrides.items() if k in args.symbols}
             config = replace(config, symbols=tuple(args.symbols), overrides=keep)
         if getattr(args, "strategy", None):
-            config = config.with_strategy(name=args.strategy)
+            config = config.with_setup(args.strategy)  # every symbol, per-symbol setups included
         if getattr(args, "timeframe", None):
             config = replace(config, timeframe=args.timeframe)
         config.validate()
@@ -799,7 +800,7 @@ def cmd_backtest(config: BotConfig, args: argparse.Namespace) -> int:
     print_summary(
         result.metrics,
         result.per_symbol,
-        f"Backtest · {config.strategy.name} · {config.timeframe}",
+        f"Backtest · {setup_text(config)} · {config.timeframe}",
         result.start,
         result.end,
     )
@@ -815,10 +816,9 @@ def cmd_backtest(config: BotConfig, args: argparse.Namespace) -> int:
             f"({config.risk.max_drawdown_percent:g}% below the {config.risk.drawdown_days}-day peak). "
             f"The backtest trades on, to show what the rules do."
         )
-    report = write_report(
-        render_backtest(result), args.out, f"backtest_{config.strategy.name}_{config.timeframe}.html"
-    )
-    trades_path = args.out / f"trades_{config.strategy.name}_{config.timeframe}.csv"
+    name = "+".join(n for n, _ in config.setup_groups())  # e.g. ema_cross+breakout
+    report = write_report(render_backtest(result), args.out, f"backtest_{name}_{config.timeframe}.html")
+    trades_path = args.out / f"trades_{name}_{config.timeframe}.csv"
     _write_trades(result.trades, trades_path)
     console.print(f"\n[grey50]Report[/]  {report}\n[grey50]Trades[/]  {trades_path}")
     return 0
@@ -830,7 +830,7 @@ def cmd_optimize(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.report import render_backtest, write_report
 
     data, specs, htf = _load(config, args)
-    with console.status(f"Walk-forward: {config.strategy.name}, {args.folds} folds…"):
+    with console.status(f"Walk-forward: {setup_text(config)}, {args.folds} folds…"):
         wf = walk_forward(
             config,
             data,
@@ -860,7 +860,7 @@ def cmd_optimize(config: BotConfig, args: argparse.Namespace) -> int:
     print_summary(
         wf.oos_metrics,
         wf.oos_per_symbol,
-        f"Out-of-sample (stitched) · {config.strategy.name}",
+        f"Out-of-sample (stitched) · {setup_text(config)}",
         wf.oos_equity.index[0],
         wf.oos_equity.index[-1],
     )
@@ -932,6 +932,22 @@ def cmd_plan(config: BotConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+class _SeenStops:
+    """The terminal, with the first stop the dashboard saw on a trade that opened without one
+    (a phone trade often gets its stop a moment later). The dashboard's review already used it;
+    without it ``tradebot review`` could not measure those trades in R."""
+
+    def __init__(self, inner: Any, book: Any) -> None:
+        self.inner, self.book = inner, book
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def opening(self, ticket: int) -> tuple[float | None, float | None]:
+        volume, stop = self.inner.opening(ticket)
+        return volume, stop or (self.book.seen_stop(ticket) if self.book else None)
+
+
 def cmd_review(config: BotConfig, args: argparse.Namespace) -> int:
     from datetime import timedelta
 
@@ -942,9 +958,9 @@ def cmd_review(config: BotConfig, args: argparse.Namespace) -> int:
     try:
         now = broker.now()
         since = now - timedelta(days=args.days)
-        if args.account:  # the trades you logged for one of your own accounts
-            from tradebot.book import Book, BookBroker
+        from tradebot.book import Book, BookBroker
 
+        if args.account:  # the trades you logged for one of your own accounts
             book = Book(config.journal)
             if book.account(args.account) is None:
                 raise ValueError(f"no account named {args.account!r}: see `tradebot account`")
@@ -953,7 +969,8 @@ def cmd_review(config: BotConfig, args: argparse.Namespace) -> int:
                 trades = closed_trades(own, config.magic, since)
         else:
             scope = None if config.risk.account_trades else config.magic  # phone trades count too
-            trades = closed_trades(broker, scope, since, bot_magic=config.magic)
+            book = Book(config.journal) if Path(config.journal).is_file() else None
+            trades = closed_trades(_SeenStops(broker, book), scope, since, bot_magic=config.magic)
     finally:
         if book:
             book.close()

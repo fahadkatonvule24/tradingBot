@@ -77,7 +77,7 @@ class TrackRecords:
         self, command: Callable[[Path, str | Path, dict[str, str]], Sequence[str]] | None = None
     ) -> None:
         self._command = command or _child_command
-        self._cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._cache: dict[tuple[str, tuple[tuple[str, str], ...], str], dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
 
@@ -130,8 +130,10 @@ class TrackRecords:
             _kill_tree(self._process)
 
 
-def _key(config: BotConfig) -> tuple[str, str]:
-    return config.strategy.name, config.timeframe
+def _key(config: BotConfig) -> tuple[str, tuple[tuple[str, str], ...], str]:
+    """Per setup and timeframe, with each symbol's own setup: two configs with the same main setup
+    can trade different setups on some symbols."""
+    return config.strategy.name, tuple(sorted(config.setups().items())), config.timeframe
 
 
 def _child_command(config_path: Path, data_dir: str | Path, names: dict[str, str]) -> list[str]:

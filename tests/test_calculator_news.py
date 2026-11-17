@@ -402,3 +402,35 @@ def test_unlimited_leverage_as_exness_reports_it(broker, fake):
     assert "· 1:unlimited" in calculator.summary(r)
     chosen = calculate(broker, SYMBOL, 1, stop_pips=20, lots=0.5, leverage=200)
     assert chosen["margin"] == pytest.approx(55_006 / 200) and chosen["account_leverage_label"] == "unlimited"
+
+
+def test_the_feed_thread_survives_an_unexpected_download_error(tmp_path):
+    """Regression: an error outside the expected ones (a cut-off reply) ended the download thread,
+    and the calendar was never refreshed again until a restart."""
+    import http.client
+    import threading
+    from datetime import datetime
+
+    from tradebot.news import NewsFeed
+
+    calls, second = [], threading.Event()
+
+    def opener(request, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise http.client.IncompleteRead(b"")
+        second.set()
+        raise OSError("offline")
+
+    feed = NewsFeed("https://example.invalid/feed.json", tmp_path / "feed.json", opener=opener,
+                    clock=lambda: datetime(2026, 11, 17, 12))  # fmt: skip
+    import tradebot.news as news
+
+    retry, news.FEED_RETRY = news.FEED_RETRY, news.timedelta(seconds=0.05)
+    try:
+        feed.start()
+        assert second.wait(5), "the thread died after the first error"
+        assert feed.error  # the failure is reported on the page, and the thread carried on
+    finally:
+        feed.stop()
+        news.FEED_RETRY = retry

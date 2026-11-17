@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="tradebot {{ version }}">
-<title>{{ title }} · {{ config.strategy.name }}</title>
+<title>{{ title }} · {{ setup }}</title>
 <style>
 :root {
   color-scheme: light;
@@ -97,7 +97,7 @@ footer { color: var(--muted); font-size: 12.5px; margin-top: 28px; text-align: c
 <header class="top">
   <div>
     <p class="eyebrow">tradebot · {{ title }}</p>
-    <h1>{{ config.strategy.name | replace("_", " ") | title }} · {{ config.timeframe }} · {{ result.symbols | join(", ") }}</h1>
+    <h1>{{ setup }} · {{ config.timeframe }} · {{ result.symbols | join(", ") }}</h1>
   </div>
   <div class="meta">
     <div>{{ start | dt("%d %b %Y") }} → {{ end | dt("%d %b %Y") }} ({{ "%.1f" | format(m.years) }} years)</div>

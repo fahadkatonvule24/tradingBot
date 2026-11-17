@@ -272,3 +272,20 @@ def test_aware_and_naive_timestamps_describe_the_same_utc_instant():
         analyze(now=NOW.replace(tzinfo=timezone.utc), quote_time=NOW.replace(tzinfo=timezone.utc))
         == analyze()
     )
+
+
+def test_a_bar_closing_on_its_high_still_gets_both_scenarios():
+    """Regression: the window's own high equal to the close counted as both boundaries, so a
+    strong bar that closed on its high left the card with no scenarios at all."""
+    frame = bars()
+    frame.loc[frame.index[-1], "high"] = frame["close"].iloc[-1] + 0.0010  # a new 40-bar high...
+    frame.loc[frame.index[-1], "close"] = frame["high"].iloc[-1]  # ...and the bar closed on it
+    frame.loc[frame.index[-1], "ema_fast"] = frame["close"].iloc[-1] - 0.0001
+    above = float(frame["close"].iloc[-1]) + 0.0020
+    result = analyze(frame, context={"levels": {"levels": [{"name": "Previous week high", "price": above}]}},
+                     price=float(frame["close"].iloc[-1]))  # fmt: skip
+    assert [s["level"] for s in result["scenarios"]] == [
+        round(above, 5),
+        pytest.approx(result["scenarios"][1]["level"]),
+    ]
+    assert result["scenarios"][0]["level"] == round(above, 5)

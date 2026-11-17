@@ -33,7 +33,7 @@ from tradebot.broker.base import (
     SymbolSpec,
     Tick,
 )
-from tradebot.broker.clock import ServerClock, detect_convention
+from tradebot.broker.clock import ServerClock, detect_convention, week_opens
 from tradebot.config import TIMEFRAME_MINUTES, MT5Login
 
 log = logging.getLogger(__name__)
@@ -162,6 +162,7 @@ class MT5Broker:
         broker's own H1 history to see whether the server follows New York daylight saving."""
         now = self._clock()
         now_epoch = now.replace(tzinfo=timezone.utc).timestamp()
+        fallback: tuple[ServerClock, str] | None = None
         for symbol in self.mt5.symbols_get() or []:
             if not getattr(symbol, "visible", True):
                 continue
@@ -175,7 +176,20 @@ class MT5Broker:
             rates = self.mt5.copy_rates_from_pos(symbol.name, self.mt5.TIMEFRAME_H1, 0, 12_000)
             times = [] if rates is None else rates["time"]
             clock = detect_convention(times, offset, now)
+            # A symbol that trades through weekends (crypto) has no week opens to read the
+            # daylight-saving rule from: its answer is only the measured offset. Prefer a
+            # weekday instrument; keep the first answer in case there is none.
+            if len(week_opens(times)) < 20 and fallback is None:
+                fallback = (clock, symbol.name)
+                continue
+            if len(week_opens(times)) < 20:
+                continue
             log.info("server time is %s (from %s)", clock.describe(now), symbol.name)
+            return clock
+        if fallback is not None:
+            clock, name = fallback
+            log.info("server time is %s (from %s; no weekday instrument to check daylight saving)",
+                     clock.describe(now), name)  # fmt: skip
             return clock
         log.warning(
             "no fresh tick (market closed?); assuming server time = UTC. Set server_utc_offset_hours to override."

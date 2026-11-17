@@ -22,15 +22,25 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from tradebot import __version__, analysis, market
-from tradebot.advisor import WORD, Advice, advise, next_trigger, pip_size, recent_signals, watch_side
+from tradebot import __version__, analysis, market, structure
+from tradebot.advisor import (
+    JOIN_WINDOW_BARS,
+    WORD,
+    Advice,
+    advise,
+    next_trigger,
+    pip_size,
+    recent_signals,
+    trend_side,
+    watch_side,
+)
 from tradebot.book import REFUSAL, Book, BookBroker, BookError
 from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
 from tradebot.config import STRATEGIES, BotConfig
 from tradebot.engine import Engine
 from tradebot.journal import Journal, JournalEvent
 from tradebot.live import BAR_COLUMNS, Gate, Link, fetch_frames, preview_features, trading_gate
-from tradebot.plan import SETUP_LABELS
+from tradebot.plan import SETUP_LABELS, setup_text
 from tradebot.reversal import EXIT, Alerts, Reversal, Watch, assess, holding_text, watch_position
 from tradebot.strategy import BLOCK_LABELS, compute_signals, explain
 from tradebot.trend import TrendAlerts, describe
@@ -40,7 +50,8 @@ from tradebot.ui.track import NoRecord, TrackRecords
 log = logging.getLogger(__name__)
 
 SPARK_BARS = 48
-CHART_BARS = 120
+CHART_BARS = 600
+"""Bars sent to the chart: it shows the newest 120 and scrolls back through the rest."""
 SPEC_REFRESH = timedelta(minutes=5)
 PREVIEW_SECONDS = 3.0
 LOST_LINK = "Lost the connection to MetaTrader 5. Is the terminal open? Prices are frozen; retrying."
@@ -91,6 +102,8 @@ class Monitor:
         if book is not None and not isinstance(broker, BookBroker):
             broker = BookBroker(broker, book, config.magic)  # your own accounts, when one is selected
         self.config, self.broker, self.symbols = config, broker, symbols
+        # the setups as configured, restored when the dashboard switches back to the config's own
+        self._configured_setup, self._configured_overrides = config.strategy.name, config.overrides
         self.currency = "USD"
         self.market_cache: tuple[Any, dict[str, Any]] | None = None
         self.levels_cache: dict[str, tuple[float, Any]] = {}
@@ -127,6 +140,7 @@ class Monitor:
         self._engines: dict[str, Engine] = {}
         self._signal_seen: set[tuple[Any, ...]] = set()
         self._trends: dict[str, tuple[Any, dict[str, Any]]] = {}
+        self._structures: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._trend_alerts = TrendAlerts()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
         self._last_action: dict[str, str] = {}
@@ -361,6 +375,7 @@ class Monitor:
             self._others,
             self._engines,
             self._trends,
+            self._structures,
             self._analysis_seen,
             self._analysis_changes,
         ):
@@ -383,14 +398,10 @@ class Monitor:
         if name not in STRATEGIES:
             return {"ok": False, "message": f"strategy must be one of {', '.join(STRATEGIES)}"}
         if name != self.config.strategy.name:
-            overrides = {  # a per-symbol strategy name would silently keep the old setup
-                symbol: {
-                    section: {k: v for k, v in values.items() if not (section == "strategy" and k == "name")}
-                    for section, values in sections.items()
-                }
-                for symbol, sections in self.config.overrides.items()
-            }
-            error = self._reconfigure(replace(self.config.with_strategy(name=name), overrides=overrides))
+            config = self.config.with_setup(name)
+            if name == self._configured_setup:  # back to the config's own: its per-symbol setups too
+                config = replace(config, overrides=self._configured_overrides)
+            error = self._reconfigure(config)
             if error:
                 return {"ok": False, "message": error}
             log.info("setup switched to %s", name)
@@ -432,7 +443,30 @@ class Monitor:
         p = self.config.for_symbol(symbol).strategy
         tail = features.tail(CHART_BARS)
         bars = tail[["time", "open", "high", "low", "close", "ema_fast", "ema_slow"]].to_dict("records")
-        return clean({"symbol": symbol, "fast": p.fast_ema, "slow": p.slow_ema, "bars": bars})
+        trend = [trend_side(row, p) for _, row in tail.iterrows()]  # a running trend, bar by bar
+        marks = [  # every entry trigger on screen: taken ones open a join window
+            {"i": i, "side": int(row["raw_signal"]), "taken": bool(row["signal"] != 0), "price": float(row["close"]),
+             "blocked_by": "" if row["signal"] != 0 else BLOCK_LABELS.get(row["block"], str(row["block"]))}
+            for i, (_, row) in enumerate(tail.iterrows())
+            if row["raw_signal"] != 0
+        ]  # fmt: skip
+        offset = len(features) - len(tail)  # structure positions are in the full frame
+        found = self._structures.get(symbol)
+        shape = found[1] if found and found[0] == features["time"].iloc[-1] else None
+        drawn = None
+        if shape:
+            drawn = {
+                "swings": [{**s, "i": s["i"] - offset} for s in shape["swings"] if s["i"] >= offset],
+                "zones": shape["zones"],
+                "round": shape["round"],
+                "patterns": [
+                    {"name": x["name"], "status": x["status"], "side": x["side"],
+                     "lines": [_clip_line(line, offset) for line in x["lines"]]}
+                    for x in shape["patterns"]
+                ],
+            }  # fmt: skip
+        return clean({"symbol": symbol, "fast": p.fast_ema, "slow": p.slow_ema, "bars": bars, "trend": trend,
+                      "marks": marks, "join_bars": JOIN_WINDOW_BARS, "structure": drawn})  # fmt: skip
 
     def submit(self, symbol: str, side: int, manual: bool = False, timeout: float = 20.0) -> dict[str, Any]:
         """Queue an order for the worker thread and wait for its outcome."""
@@ -574,6 +608,8 @@ class Monitor:
             "version": __version__,
             "now": now,
             "strategy": self.config.strategy.name,
+            "setups": self.config.setups(),
+            "setup_text": setup_text(self.config),
             "strategies": list(STRATEGIES),
             "timeframe": self.config.timeframe,
             "timeframes": list(SWITCHABLE),
@@ -679,6 +715,7 @@ class Monitor:
             "sizes": sizes,
             "setups": setups,
             "trend": trend,
+            "structure": self._structure_for(symbol, features, spec),
             "history": self._history(symbol, features),
         }
 
@@ -686,14 +723,7 @@ class Monitor:
 
     def _setup_config(self, name: str) -> BotConfig:
         """This config with another setup named, for every symbol."""
-        overrides = {  # a per-symbol strategy name would silently keep the old setup
-            symbol: {
-                section: {k: v for k, v in values.items() if not (section == "strategy" and k == "name")}
-                for section, values in sections.items()
-            }
-            for symbol, sections in self.config.overrides.items()
-        }
-        return replace(self.config.with_strategy(name=name), overrides=overrides)
+        return self.config.with_setup(name)
 
     def _setups(
         self, symbol: str, features: pd.DataFrame, advice: Advice, tick: Any, spec: SymbolSpec, now: datetime
@@ -805,6 +835,20 @@ class Monitor:
             cached = (key, found)
             self._trends[symbol] = cached
             self._note_trend(symbol, found, now)
+        return cached[1]
+
+    def _structure_for(self, symbol: str, features: pd.DataFrame, spec: SymbolSpec) -> dict | None:
+        """Swings, zones, round numbers and patterns as of the last closed bar (once per bar)."""
+        key = features["time"].iloc[-1]
+        cached = self._structures.get(symbol)
+        if cached is None or cached[0] != key:
+            try:
+                found = structure.describe(features, spec.digits)
+            except Exception:
+                log.debug("%s: structure not computed", symbol, exc_info=True)
+                return None
+            cached = (key, found)
+            self._structures[symbol] = cached
         return cached[1]
 
     def _note_trend(self, symbol: str, trend: dict[str, Any], now: datetime) -> None:
@@ -988,7 +1032,7 @@ class Monitor:
             self._heartbeat_day = now.date()
             self._send(
                 f"STARTED · tradebot\nThe dashboard is watching {', '.join(self.symbols)} on {self.config.timeframe}, "
-                f"{SETUP_LABELS[self.config.strategy.name]} setup. A RUNNING message follows every trading "
+                f"{setup_text(self.config)} setup. A RUNNING message follows every trading "
                 "day at the session open; if one is missing, alerts are not running.",
                 "status",
             )
@@ -999,7 +1043,7 @@ class Monitor:
         self._heartbeat_day = now.date()
         self._send(
             f"RUNNING · tradebot\nWatching {', '.join(self.symbols)} on {self.config.timeframe}, "
-            f"{SETUP_LABELS[self.config.strategy.name]} setup. Alerts are on.",
+            f"{setup_text(self.config)} setup. Alerts are on.",
             "status",
         )
 
@@ -1017,9 +1061,10 @@ class Monitor:
         key = f"{advice.action}:{advice.bar_time}"
         previous = self._last_action.get(symbol)
         self._last_action[symbol] = key
-        if previous == key or (previous is None and advice.action in ("WAIT", "CLOSED")):
+        quiet = ("WAIT", "CLOSED", "TREND", "JOIN")  # states, not events: logged when they change
+        if previous == key or (previous is None and advice.action in quiet):
             return
-        if previous is not None and previous.split(":")[0] == advice.action and advice.action == "WAIT":
+        if previous is not None and previous.split(":")[0] == advice.action and advice.action in quiet:
             return
         if advice.action in ("BUY", "SELL", "SKIP", "BLOCKED"):  # said already, before a switch?
             mark = (symbol, *self._setup_key(symbol), pd.Timestamp(advice.bar_time), advice.action)
@@ -1181,6 +1226,14 @@ class Monitor:
             return  # switched while this ran: the newer run owns the screen
         self.track_record = record
         self._track_pending = False
+
+
+def _clip_line(line: list[float], offset: int) -> list[float]:
+    """A line [i0, p0, i1, p1] in frame positions, moved to chart positions and cut at the left edge."""
+    a, pa, b, pb = line
+    if a < offset and b != a:
+        pa, a = pa + (pb - pa) * (offset - a) / (b - a), offset
+    return [a - offset, pa, b - offset, pb]
 
 
 def clean(value: Any) -> Any:

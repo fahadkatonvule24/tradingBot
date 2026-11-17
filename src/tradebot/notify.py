@@ -20,6 +20,7 @@ logged and dropped, and neither the token nor the API key is ever written to a l
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -79,7 +80,7 @@ def call(
         reason = {401: "the bot token was rejected", 400: "bad request (is the chat id right?)",
                   403: "the bot cannot message this chat (send it /start first)"}.get(exc.code, exc.reason)  # fmt: skip
         raise TelegramError(f"Telegram answered {exc.code}: {reason}") from None
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         raise TelegramError(f"could not reach Telegram ({type(exc).__name__})") from None
     except ValueError:
         raise TelegramError("Telegram sent an unreadable answer") from None
@@ -186,7 +187,10 @@ class Notifier:
 
     def _drain(self) -> None:
         while (text := self._queue.get()) is not None:
-            self._deliver(text)
+            try:
+                self._deliver(text)
+            except Exception:  # one bad reply must not end alerts for the rest of the session
+                log.warning("Telegram alert not sent: unexpected error", exc_info=True)
 
     def _deliver(self, text: str) -> bool:
         try:
@@ -230,7 +234,7 @@ def whatsapp_call(
             body = response.read(4000).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         raise WhatsAppError(f"CallMeBot answered {exc.code}") from None
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         raise WhatsAppError(f"could not reach CallMeBot ({type(exc).__name__})") from None
     if "apikey" in body.lower() and ("invalid" in body.lower() or "not valid" in body.lower()):
         raise WhatsAppError("CallMeBot rejected the API key (check WHATSAPP_APIKEY and WHATSAPP_PHONE)")
@@ -308,7 +312,10 @@ class _Channel:
                 else:
                     batch.append(more)
             for text, kind in self._merge(batch):
-                self._deliver(text, kind)
+                try:
+                    self._deliver(text, kind)
+                except Exception:  # e.g. http.client.IncompleteRead: one bad reply must not end alerts
+                    log.warning("%s alert not sent: unexpected error", self.name, exc_info=True)
                 self._closing.wait(self._gap)
             if done:
                 return
@@ -397,7 +404,7 @@ def ntfy_call(
                   429: "too many messages: ntfy.sh allows 250 a day", 413: "the message is too large",
                   400: "bad request (check NTFY_TOPIC)"}.get(exc.code, exc.reason)  # fmt: skip
         raise NtfyError(f"ntfy answered {exc.code}: {reason}") from None
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         where = urllib.parse.urlsplit(server).netloc or server
         raise NtfyError(f"could not reach {where} ({type(exc).__name__})") from None
 

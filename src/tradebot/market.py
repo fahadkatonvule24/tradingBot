@@ -12,8 +12,9 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -243,10 +244,18 @@ def key_levels(
 SESSION_NAMES = (("asia", "Asia"), ("london", "London"), ("new_york", "New York"))
 
 
+def fx_weekend(now: datetime) -> bool:
+    """Forex is shut from Friday 17:00 to Sunday 17:00 New York time (``now`` is UTC). Counting the
+    whole of Sunday as closed showed the Asia session closed for its first hours every week."""
+    local = now.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    day, hour = local.weekday(), local.hour
+    return day == 5 or (day == 4 and hour >= 17) or (day == 6 and hour < 17)
+
+
 def sessions(now: datetime) -> list[dict[str, Any]]:
     """Which of the three main sessions are open at ``now`` (UTC), by the bot's own session hours."""
     out = []
-    weekend = now.weekday() >= 5
+    weekend = fx_weekend(now)
     for key, label in SESSION_NAMES:
         start, end = session_hours(key, now)
         inside = start <= now.hour < end if start < end else (now.hour >= start or now.hour < end)

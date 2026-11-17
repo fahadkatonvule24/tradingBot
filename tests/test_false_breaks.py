@@ -163,7 +163,7 @@ def test_a_break_that_recovered_is_not_the_headline(cfg, broker):
     """Price closed back below 1.0995, but the last bar closed above it again: unsettled, not dead."""
     a = advice_for(cfg, broker, with_failure(bars_ago=3, level=1.0995))
     assert a.failed_break["recovered"] is True
-    assert a.headline == "No setup yet"
+    assert a.headline == "Uptrend: next buy entry"  # not "break failed": the trend runs on
 
 
 def test_breakout_advice_states_the_margin(cfg, broker):

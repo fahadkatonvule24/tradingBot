@@ -168,7 +168,14 @@ def walk_forward(
 ) -> WalkForwardResult:
     if objective not in OBJECTIVES:
         raise ValueError(f"objective must be one of {', '.join(OBJECTIVES)}")
-    grid = grid or DEFAULT_GRIDS[config.strategy.name]
+    setups = set(config.setups().values())  # per-symbol overrides can name another setup
+    if grid is None:
+        if len(setups) > 1:
+            raise ValueError(
+                f"the symbols trade different setups ({', '.join(sorted(setups))}): optimise one at a "
+                "time, e.g. --symbols GBPUSD XAUUSD --strategy breakout"
+            )
+        grid = DEFAULT_GRIDS[next(iter(setups))]
     combos = expand_grid(grid)
     start = min(df["time"].iloc[0] for df in data.values()).to_pydatetime()
     end = max(df["time"].iloc[-1] for df in data.values()).to_pydatetime()
@@ -190,7 +197,7 @@ def walk_forward(
     final = max(range(len(combos)), key=lambda i: score(table[i][folds], objective, min_trades))
     equity, trades = _stitch(oos_runs, config.backtest.initial_balance)
     return WalkForwardResult(
-        strategy=config.strategy.name,
+        strategy=" + ".join(sorted(setups)),
         objective=objective,
         folds=fold_results,
         oos_equity=equity,

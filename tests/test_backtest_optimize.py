@@ -84,6 +84,17 @@ def test_split_windows_are_contiguous():
     assert all(a[1] == b[0] for a, b in itertools.pairwise(windows))
 
 
+def test_walk_forward_tunes_the_setup_the_symbols_trade(cfg, market):
+    data, specs = market
+    mixed = replace(cfg, overrides={"GBPUSD": {"strategy": {"name": "breakout"}}})
+    with pytest.raises(ValueError, match="different setups"):
+        walk_forward(mixed, data, specs, folds=2, jobs=1)
+    every = replace(cfg, overrides={s: {"strategy": {"name": "breakout"}} for s in cfg.symbols})
+    wf = walk_forward(every, data, specs, folds=2, min_trades=1, jobs=1)
+    assert wf.strategy == "breakout"
+    assert "strategy.breakout_period" in wf.folds[0].params  # the breakout grid, not the EMA one
+
+
 def test_walk_forward_trades_only_out_of_sample(cfg, market):
     data, specs = market
     grid = {"strategy.fast_ema": [8, 13], "strategy.slow_ema": [34, 55]}

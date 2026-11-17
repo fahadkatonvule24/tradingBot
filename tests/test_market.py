@@ -179,3 +179,17 @@ def test_swap_is_converted_to_money_per_lot(fake_mt5):
     }
     info.swap_mode = 5  # charged as an interest rate: not converted, not guessed
     assert broker.swap("EURUSDm") is None
+
+
+def test_the_fx_week_opens_on_sunday_evening():
+    from datetime import datetime
+
+    from tradebot.market import fx_weekend, sessions
+
+    assert fx_weekend(datetime(2026, 11, 22, 21, 0))  # Sunday 16:00 New York: still shut
+    assert not fx_weekend(datetime(2026, 11, 22, 23, 0))  # Sunday 18:00 New York: open
+    asia = {s["name"]: s["open"] for s in sessions(datetime(2026, 11, 22, 23, 30))}["Asia"]
+    assert asia is True  # it used to show closed all Sunday
+    assert fx_weekend(datetime(2026, 11, 20, 22, 30))  # Friday 17:30 New York: closed
+    assert not fx_weekend(datetime(2026, 11, 20, 21, 30))  # Friday 16:30 New York: open
+    assert fx_weekend(datetime(2026, 11, 21, 12, 0))  # Saturday
