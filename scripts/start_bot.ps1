@@ -1,7 +1,8 @@
 # Opens MetaTrader 5 and starts the live trading loop, each only if it is not already running.
 #
-# Run at logon by the "tradebot autostart" scheduled task, so a reboot (Windows Update, a power cut,
-# a shutdown) no longer leaves the bot off. Safe to run by hand at any time: it never starts a
+# Run by the "tradebot autostart" scheduled task at logon and every 15 minutes after, so a reboot
+# (Windows Update, a power cut, a shutdown) or a stopped loop (Ctrl+C, a closed window, a crash)
+# leaves the bot off for at most 15 minutes. Safe to run by hand at any time: it never starts a
 # second terminal or a second loop (the loop also refuses a second copy in the same folder).
 #
 # MT5 is opened here, not by the bot: a terminal the bot's own process starts is that process's
@@ -9,8 +10,9 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot.ps1
 #
-# Pausing: create a file named STOP in the tradingBot folder (no new entries; trades are still
-# managed). Closing the loop's window stops it until the next logon or the next run of this script.
+# Pausing new entries: create a file named STOP in the tradingBot folder (the loop keeps running
+# and still manages open trades). Keeping the bot off: create a file named OFF there; this script
+# then starts nothing until it is deleted. Only actions are logged, to start_bot.log.
 
 param(
     [string]$Terminal = "C:\Program Files\MetaTrader 5\terminal64.exe",
@@ -29,26 +31,30 @@ function Write-Line([string]$text) {
 }
 
 try {
-    if (Get-Process terminal64 -ErrorAction SilentlyContinue) {
-        Write-Line "MT5 already open"
-    } elseif (-not (Test-Path $Terminal)) {
-        Write-Line "MT5 not found at ${Terminal}: nothing started"
-        exit 1
-    } else {
+    if (Test-Path (Join-Path $root "OFF")) {
+        exit 0  # kept off on purpose: nothing to log every 15 minutes
+    }
+
+    if (-not (Get-Process terminal64 -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path $Terminal)) {
+            Write-Line "MT5 not found at ${Terminal}: nothing started"
+            exit 1
+        }
         Start-Process -FilePath $Terminal
-        Write-Line "MT5 opened; waiting $ConnectSeconds s for it to log in"
+        Write-Line "MT5 was not open: opened it; waiting $ConnectSeconds s for it to log in"
         Start-Sleep -Seconds $ConnectSeconds
     }
 
-    $loop = Get-CimInstance Win32_Process -Filter "Name='tradebot.exe'" |
-        Where-Object { $_.CommandLine -match "\brun\b" -and $_.CommandLine -match "--live" }
+    # however it was started: tradebot.exe, or python -m tradebot (as another tool may start it)
+    $loop = Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -match '^(tradebot|python|pythonw)\.exe$' -and $_.CommandLine -match 'tradebot' -and
+                       $_.CommandLine -match '\brun\b' -and $_.CommandLine -match '--live' }
     if ($loop) {
-        Write-Line "trading loop already running (process $($loop.ProcessId -join ', '))"
-        exit 0
+        exit 0  # running: nothing to do
     }
     $exe = Join-Path $root ".venv\Scripts\tradebot.exe"
     Start-Process -FilePath $exe -ArgumentList "-c", $Config, "run", "--live" -WorkingDirectory $root -WindowStyle Normal
-    Write-Line "trading loop started ($Config)"
+    Write-Line "trading loop was not running: started it ($Config)"
 } catch {
     Write-Line "failed: $($_.Exception.Message)"
     exit 1

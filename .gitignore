@@ -13,6 +13,8 @@ htmlcov/
 config/*.local.json
 config.tuned.json
 STOP
+OFF
+start_bot.log
 *.log
 trade_journal.*
 news_feed.json
