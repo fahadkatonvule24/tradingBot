@@ -17,6 +17,8 @@ STOP
 trade_journal.*
 news_feed.json
 news_feed.tmp
+news_feed.*.tmp
 data/
 reports/
 .screenshots-tmp/
+tradebot.*.lock

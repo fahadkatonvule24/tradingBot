@@ -9,14 +9,16 @@ Execution model (deliberately conservative):
   assumed to have been hit first.
 - Commission is charged per lot actually traded (v23 charged it on the minimum lot only).
 - Pip value is recomputed from the current price for USD-quoted and USD-based pairs instead of
-  using one snapshot for the whole history.
+  using one snapshot for the whole history. Sizing (``calc_profit``, ``symbol``), the recorded
+  risk and the result all use that same conversion, so 1R is the loss at the stop.
 """
 
 from __future__ import annotations
 
 from bisect import bisect_left
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -31,6 +33,26 @@ from tradebot.broker.base import (
     Tick,
 )
 from tradebot.config import BacktestParams
+
+NEW_YORK = ZoneInfo("America/New_York")
+ROLLOVER_HOUR = 17
+"""Brokers roll positions over, and charge or pay swap, at 17:00 New York time."""
+
+
+def rollovers(opened: datetime, now: datetime, triple_day: int) -> int:
+    """Swap nights between two naive UTC times: each weekday's 17:00 New York rollover crossed
+    counts once, the triple day's (``triple_day``, Monday = 0) three times, which pays for the
+    weekend. Forex and metals triple on Wednesday; stocks at Exness on Friday."""
+    start = opened.replace(tzinfo=timezone.utc).astimezone(NEW_YORK)
+    end = now.replace(tzinfo=timezone.utc).astimezone(NEW_YORK)
+    day = start.date() if start.hour < ROLLOVER_HOUR else start.date() + timedelta(days=1)
+    last = end.date() if end.hour >= ROLLOVER_HOUR else end.date() - timedelta(days=1)
+    nights = 0
+    while day <= last:
+        if day.weekday() < 5:
+            nights += 3 if day.weekday() == triple_day else 1
+        day += timedelta(days=1)
+    return nights
 
 
 @dataclass
@@ -105,6 +127,11 @@ class SimBroker:
         for position in list(self._positions.values()):
             self._close_volume(position, position.volume, self._exit_price(position), reason)
 
+    def close_symbol(self, symbol: str, reason: str) -> None:
+        """Close ``symbol``'s positions at its last bar's close (before the next bar is started)."""
+        for position in [p for p in self._positions.values() if p.symbol == symbol]:
+            self._close_volume(position, position.volume, self._exit_price(position), reason)
+
     # --- Broker interface ---------------------------------------------------------------------
 
     def now(self) -> datetime:
@@ -117,7 +144,22 @@ class SimBroker:
         return Account(self.balance, self.balance + floating, margin, self.currency, False, self.leverage)
 
     def symbol(self, name: str) -> SymbolSpec:
-        return self.specs[name]
+        """The instrument, with its tick value at the current price (open risk is measured with it)."""
+        spec = self.specs[name]
+        bar = self._bars.get(name)
+        if bar is None:
+            return spec
+        value = self._tick_value(spec, float(bar["close"]))
+        return spec if value == spec.tick_value else replace(spec, tick_value=value)
+
+    def calc_profit(
+        self, symbol: str, side: int, volume: float, price_open: float, price_close: float
+    ) -> float:
+        """Account-currency result from ``price_open`` to ``price_close``, converted at the closing
+        price as the simulated result is: the engine sizes from this, as live from the terminal."""
+        spec = self.specs[symbol]
+        move = (price_close - price_open) * side
+        return move / spec.tick_size * self._tick_value(spec, price_close) * volume
 
     def tick(self, name: str) -> Tick:
         bar = self._bars[name]
@@ -127,7 +169,8 @@ class SimBroker:
     def bars(self, name: str, timeframe: str, count: int) -> pd.DataFrame:  # pragma: no cover
         raise NotImplementedError("the backtester feeds bars directly")
 
-    def positions(self, magic: int) -> list[Position]:
+    def positions(self, magic: int | None) -> list[Position]:
+        """Every simulated position: a backtest has only the bot's own."""
         return list(self._positions.values())
 
     def deals(self, since: datetime, magic: int | None) -> list[Deal]:
@@ -157,7 +200,9 @@ class SimBroker:
         )
         commission = self._commission(request.symbol, request.volume)
         self.balance -= commission
-        risk_amount = abs(price - sl) / spec.tick_size * self._tick_value(spec, price) * request.volume
+        risk_amount = (
+            abs(price - sl) / spec.tick_size * self._tick_value(spec, sl) * request.volume
+        )  # the loss at sl
         self._positions[position.ticket] = position
         self._ledgers[position.ticket] = _Ledger(self._bar_index[request.symbol], risk_amount, -commission)
         self._add_deal(position, request.volume, price, -commission, "in", request.comment)
@@ -211,10 +256,17 @@ class SimBroker:
     def _commission(self, symbol: str, volume: float) -> float:
         return self.params[symbol].commission_per_lot / 2 * volume
 
+    def _swap(self, p: Position, volume: float) -> float:
+        """Overnight financing on ``volume`` lots held from the open until now: the broker's rate
+        for the side (usually a cost, so negative) per rollover crossed."""
+        params = self.params[p.symbol]
+        rate = params.swap_long if p.side == BUY else params.swap_short
+        if not rate:
+            return 0.0
+        return rate * volume * rollovers(p.time_open, self.now(), params.swap_triple_day)
+
     def _pnl(self, position: Position, exit_price: float, volume: float) -> float:
-        spec = self.specs[position.symbol]
-        move = (exit_price - position.price_open) * position.side
-        return move / spec.tick_size * self._tick_value(spec, exit_price) * volume
+        return self.calc_profit(position.symbol, position.side, volume, position.price_open, exit_price)
 
     def _exit_price(self, position: Position) -> float:
         bar = self._bars[position.symbol]
@@ -258,7 +310,7 @@ class SimBroker:
         return None
 
     def _close_volume(self, p: Position, volume: float, price: float, reason: str) -> None:
-        pnl = self._pnl(p, price, volume) - self._commission(p.symbol, volume)
+        pnl = self._pnl(p, price, volume) - self._commission(p.symbol, volume) + self._swap(p, volume)
         self.balance += pnl
         self._add_deal(p, volume, price, pnl, "out", reason)
         ledger = self._ledgers[p.ticket]

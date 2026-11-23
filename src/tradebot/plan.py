@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from tradebot.config import BotConfig, StrategyParams, session_clock_text
+from tradebot.smc import SWEEP_RECENT_BARS
 from tradebot.strategy import FILTERS
 
 SETUP_LABELS = {
@@ -169,6 +170,8 @@ def trading_plan(
 
     groups = config.setup_groups()
     if len(groups) == 1:
+        # one setup for every symbol, but maybe not the main one: each may override it
+        p = config.for_symbol(groups[0][1][0]).strategy
         entry = [f"Setup ({SETUP_LABELS[p.name]}): {_setup(p, tf)}", *_filters(p, tf)]
     else:  # symbols on different setups: the rules of each, with the symbols it applies to
         entry = []
@@ -179,6 +182,13 @@ def trading_plan(
                 *_filters(own, tf),
             ]
     entry.append("All of these must be true on the same closed bar. If one is not, there is no trade.")
+    if p.auto_join and p.use_trend_filter:
+        entry.append(
+            f"Join: a signal the bot did not take (a guard or limit stopped it) is entered late, "
+            f"once, within {p.join_window_bars} bars, while the trend still runs its way, the break it rode "
+            f"has not failed, no trade was entered on the instrument since, and price is not at an opposite "
+            f"supply or demand zone or just after a closed sweep against it: the dashboard's JOIN."
+        )
 
     exits = [
         f"Stop: {r.sl_atr:g} ATR from the entry price, sent with the order. Beyond it the setup is wrong.",
@@ -203,7 +213,12 @@ def trading_plan(
     exits.append(f"From +{m.trail_start_r:g}R the stop trails {m.trail_atr:g} ATR behind price.")
     if m.close_on_reverse:
         exits.append(
-            "An opposite signal closes the position."
+            "An opposite signal closes the position"
+            + (
+                " while it is in profit; a losing one is left to its stop."
+                if m.reverse_exit_in_profit_only
+                else "."
+            )
             + (
                 " Signal quality checks only block new entries; the existing opposite-signal exit "
                 "still uses the original strategy filters."
@@ -220,8 +235,31 @@ def trading_plan(
         f"close beyond the prior {p.breakout_period}-bar extreme; EMA {p.fast_ema} crossing EMA {p.slow_ema} "
         f"against the trade; the higher-timeframe trend turning against it; the break it was riding failing. "
         f"One sign is a warning. The opposite signal, or two signs standing together, is the get-out level. "
-        f"It is a warning to a person: the bot itself closes only on the opposite signal and its stops."
+        + (
+            "For a trade placed by hand the dashboard acts on a confirmed sign (see below); for its own "
+            "trades the bot closes only on the opposite signal and its stops."
+            if m.auto_reverse_exit
+            else "It is a warning to a person: the bot itself closes only on the opposite signal and its stops."
+        )
     )
+    hand = [  # tradebot.protect: what the dashboard does to trades placed by hand
+        f"a stop at {r.sl_atr:g} ATR if it has none after two minutes" if m.auto_stop else "",
+        f"{m.partial_tp_fraction:.0%} closed at +{m.partial_tp_r:g}R" if m.auto_partial else "",
+        f"the stop to the entry plus {m.breakeven_buffer_r:g}R at +{m.breakeven_r:g}R"
+        if m.auto_breakeven
+        else "",
+        f"the stop trailed {m.trail_atr:g} ATR behind the last close from +{m.trail_start_r:g}R"
+        if m.auto_trailing
+        else "",
+        "the whole trade closed on a confirmed reversal sign while it is in profit"
+        if m.auto_reverse_exit
+        else "",
+    ]
+    if any(hand):
+        exits.append(
+            "Trades placed by hand (the phone included) on the MT5 account, while the dashboard runs with "
+            "algo trading allowed: " + "; ".join(h for h in hand if h) + "."
+        )
 
     if r.fixed_lot is not None:
         size = [f"Every trade is {r.fixed_lot:g} lots (fixed)."]
@@ -269,8 +307,16 @@ def trading_plan(
     avoid += [
         f"When the spread is wider than {r.max_spread_atr:g} ATR.",
         f"When the last closed bar is more than {sched.max_bar_age_bars} bars old (market closed or data stale).",
-        f"When a file named {config.kill_switch_file} exists in the working folder: the manual off switch.",
     ]
+    if config.kill_switch_file:  # empty: there is no off switch file
+        avoid.append(
+            f"When a file named {config.kill_switch_file} exists in the working folder: the manual off switch."
+        )
+    avoid.append(
+        f"Joining a trend after its signal (allowed for {p.join_window_bars} bars) while price is at an opposite supply "
+        f"or demand zone, or within {SWEEP_RECENT_BARS} bars of a closed sweep against it: those joins did worse in "
+        "both test periods."
+    )
 
     review = [
         f"Every order, close and rejection is written to {config.journal}.",

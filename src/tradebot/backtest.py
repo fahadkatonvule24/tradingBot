@@ -1,8 +1,9 @@
 """Event-driven backtester.
 
-Bars from every symbol are merged into one timeline ordered by close time. For each closed bar
-the simulated broker first triggers any stops/targets inside it, then the *live* ``Engine``
-makes its decision exactly as it would in production. Indicators are computed once per symbol
+Bars from every symbol are merged into one timeline ordered by close time. For each moment a bar
+closes, the simulated broker first triggers the stops/targets inside every symbol's bar that
+closes then, then the *live* ``Engine`` makes its decision for each, exactly as it would in
+production. Indicators are computed once per symbol
 (vectorised, causal) and the per-bar loop only does the engine work, which keeps multi-year,
 multi-symbol tests to seconds.
 """
@@ -21,6 +22,10 @@ from tradebot.engine import Engine
 from tradebot.metrics import Metrics, compute_metrics, per_symbol
 from tradebot.strategy import compute_signals
 
+DATA_HOLE = pd.Timedelta(days=7)
+"""A longer pause between two of a symbol's bars is missing history, not a weekend or a holiday
+(the longest of those, Easter for stocks, is under five days)."""
+
 _ROW_COLUMNS = [
     "time",
     "open",
@@ -38,7 +43,7 @@ _ROW_COLUMNS = [
 ]
 
 
-_OPTIONAL_COLUMNS = ("target_price", "exit_signal")
+_OPTIONAL_COLUMNS = ("target_price", "exit_signal", "join_signal", "join_from")
 """Setup targets and the pre-quality exit signal; older supplied frames may omit them."""
 
 
@@ -107,22 +112,46 @@ def run_backtest(
     step = pd.Timedelta(minutes=config.bar_minutes)
 
     current: pd.Timestamp | None = None
+    last_bar: dict[str, pd.Timestamp] = {}
     sim.equity_curve.append((timeline["time"].iloc[0], initial))
     signals = 0
-    for row in timeline.to_dict("records"):
-        symbol = row["symbol"]
-        close_time = row["time"] + step
-        if current is not None and close_time != current:
+    rows = timeline.to_dict("records")
+    i = 0
+    while i < len(rows):
+        # Every symbol's bar that closes at this moment first: its stops and targets fill and its
+        # price is marked, so a decision on one symbol sees the others as they are at that close,
+        # not a bar behind (renaming a symbol changed results: audit of 19 Nov 2026).
+        close_time = rows[i]["time"] + step
+        group = []
+        while i < len(rows) and rows[i]["time"] + step == close_time:
+            group.append(rows[i])
+            i += 1
+        if current is not None:
             sim.record_equity(current)
         current = close_time
-        sim.start_bar(symbol, row, close_time)
-        if row["signal"] != 0:
-            signals += 1
-        elif not any(p.symbol == symbol for p in sim.positions(config.magic)):
-            continue  # nothing to decide on this bar
-        engine.on_bar(symbol, specs[symbol], params[symbol], row, sim.spread(symbol, row), close_time)
+        for row in group:
+            symbol = row["symbol"]
+            before = last_bar.get(symbol)
+            if before is not None and row["time"] - before > DATA_HOLE:
+                # No prices for weeks: what happened to an open trade is unknown. It leaves at the
+                # last price seen, not at whatever the first bar after the hole says (a META trade
+                # "held" through a 3-month hole in the stock history booked +8R that never was).
+                sim.close_symbol(symbol, "data hole")
+            last_bar[symbol] = row["time"]
+            sim.start_bar(symbol, row, close_time)
+        for row in group:  # simultaneous new entries still compete in symbol order
+            symbol = row["symbol"]
+            join = row.get("join_signal", 0)
+            if row["signal"] != 0:
+                signals += 1
+            elif not (join and pd.notna(join)) and not any(
+                p.symbol == symbol for p in sim.positions(config.magic)
+            ):
+                continue  # nothing to decide (a join is decided while flat, so it must not be skipped)
+            engine.on_bar(symbol, specs[symbol], params[symbol], row, sim.spread(symbol, row), close_time)
     sim.close_all()
-    sim.record_equity(current)
+    if current is not None:  # the timeline is not empty, so there was a bar
+        sim.record_equity(current)
 
     equity = pd.Series(dict(sim.equity_curve)).sort_index()
     equity = equity[~equity.index.duplicated(keep="last")]

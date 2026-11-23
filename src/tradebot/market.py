@@ -224,7 +224,9 @@ def key_levels(
         last_week = before[week[before.index] == week[before.index].iloc[-1]]
         levels += [("Previous week high", float(last_week["high"].max())),
                    ("Previous week low", float(last_week["low"].min()))]  # fmt: skip
-    rows = [{"name": name, "price": value, "away_atr": (value - price) / atr} for name, value in levels]
+    rows: list[dict[str, Any]] = [
+        {"name": name, "price": value, "away_atr": (value - price) / atr} for name, value in levels
+    ]
     rows.sort(key=lambda r: -r["price"])
     recent = daily.tail(ADR_DAYS)
     adr = float((recent["high"] - recent["low"]).mean())

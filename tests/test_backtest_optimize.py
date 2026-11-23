@@ -86,6 +86,8 @@ def test_split_windows_are_contiguous():
 
 def test_walk_forward_tunes_the_setup_the_symbols_trade(cfg, market):
     data, specs = market
+    # Each short training window must have trades; H4 EMA200 is not warm in the first one.
+    cfg = cfg.with_strategy(use_trend_filter=False)
     mixed = replace(cfg, overrides={"GBPUSD": {"strategy": {"name": "breakout"}}})
     with pytest.raises(ValueError, match="different setups"):
         walk_forward(mixed, data, specs, folds=2, jobs=1)
@@ -97,6 +99,7 @@ def test_walk_forward_tunes_the_setup_the_symbols_trade(cfg, market):
 
 def test_walk_forward_trades_only_out_of_sample(cfg, market):
     data, specs = market
+    cfg = cfg.with_strategy(use_trend_filter=False)
     grid = {"strategy.fast_ema": [8, 13], "strategy.slow_ema": [34, 55]}
     wf = walk_forward(cfg, data, specs, grid=grid, folds=2, min_trades=1, jobs=1)
     assert len(wf.folds) == 2 and wf.combos == 4
@@ -104,4 +107,5 @@ def test_walk_forward_trades_only_out_of_sample(cfg, market):
     assert all(t.entry_time >= first_test_start for t in wf.oos_trades)
     for fold in wf.folds:
         assert fold.train[1] <= fold.test[0]
+        assert fold.in_sample.trades >= 1
     assert wf.oos_equity.index.is_monotonic_increasing

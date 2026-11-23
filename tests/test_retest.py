@@ -182,8 +182,27 @@ def test_switching_back_to_the_configured_setup_restores_per_symbol_setups(cfg, 
     monitor = Monitor(cfg, broker, [SYMBOL])
     assert monitor._apply_strategy("pullback")["ok"]
     assert monitor.config.for_symbol(SYMBOL).strategy.name == "pullback"
-    assert monitor._apply_strategy("retest")["ok"]
+    back = monitor._apply_strategy("configured")
+    assert back["ok"] and back["message"].startswith("Back to the setups in the config")
     assert monitor.config.for_symbol(SYMBOL).strategy.name == "breakout"  # as configured again
+
+
+def test_choosing_the_main_setup_shows_it_on_a_symbol_with_its_own(cfg, broker):
+    """Regression (audit 19 Nov 2026): the EMA cross tile on GBPUSD (breakout in the config) said
+    "Now watching the ema cross setup" and changed nothing, because EMA cross was the main setup."""
+    from dataclasses import replace
+
+    cfg = replace(cfg, overrides={SYMBOL: {"strategy": {"name": "breakout"}}})  # main setup: retest
+    monitor = Monitor(cfg, broker, [SYMBOL])
+    monitor.refresh()
+    state = monitor.snapshot()
+    assert state["configured_setups"] == {SYMBOL: "breakout"} and state["as_configured"]
+    assert monitor._apply_strategy("retest")["ok"]
+    assert monitor.config.for_symbol(SYMBOL).strategy.name == "retest"
+    monitor.refresh()
+    assert not monitor.snapshot()["as_configured"]
+    assert monitor._apply_strategy("configured")["ok"]
+    assert monitor.config.for_symbol(SYMBOL).strategy.name == "breakout"
 
 
 def test_the_page_names_each_symbols_own_setup(cfg, broker):

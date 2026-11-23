@@ -101,6 +101,18 @@ def test_kill_switch_only_in_live_mode(config, eurusd, tmp_path, monkeypatch):
     assert not sim.positions(config.magic) and "kill switch" in engine.events[-1].detail
 
 
+def test_an_empty_kill_switch_setting_does_not_pause_entries(config, eurusd, tmp_path, monkeypatch):
+    """Regression: Path("") is the working folder, which always exists, so an empty
+    kill_switch_file paused every entry for good."""
+    from dataclasses import replace
+
+    monkeypatch.chdir(tmp_path)
+    config, sim, engine = setup(replace(config, kill_switch_file=""), eurusd)
+    engine.live = True
+    step(engine, sim, config, eurusd, flat(0, signal=1, raw_signal=1))
+    assert not any("kill switch" in e.detail for e in engine.events)
+
+
 def test_daily_loss_limit_pauses_entries(config, eurusd):
     config, sim, engine = setup(config, eurusd, daily_loss_limit_percent=0.2, max_consecutive_losses=0)
     step(engine, sim, config, eurusd, flat(0, signal=1, raw_signal=1))

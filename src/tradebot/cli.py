@@ -20,6 +20,7 @@ import json
 import logging
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -221,18 +222,15 @@ def _setup_logging(verbose: bool, to_file: bool) -> None:
 
 def _connect(config: BotConfig):
     from tradebot.broker.mt5 import MT5Broker
+    from tradebot.live import resolve_symbols
 
     broker = MT5Broker(config.mt5, config.server_utc_offset_hours)
-    account = broker.connect()
-    symbols = []
-    for wanted in config.symbols:
-        name = broker.resolve(wanted)
-        if name is None:
-            log.warning("symbol %s is not offered by this broker; skipping it", wanted)
-        else:
-            symbols.append(name)
-    if not symbols:
-        raise ValueError("none of the configured symbols are available on this account")
+    try:
+        account = broker.connect()
+        symbols = resolve_symbols(broker, config.symbols)
+    except Exception:
+        broker.shutdown()
+        raise
     return broker, account, symbols
 
 
@@ -253,33 +251,57 @@ def cmd_check(config: BotConfig, args: argparse.Namespace) -> int:
             title=f"tradebot {__version__}", border_style="grey50",
         ))  # fmt: skip
         table = Table(box=None, header_style="bold grey50", pad_edge=False)
-        for col in ("Symbol", "Digits", "Spread", "Min lot", "Bars", "Last closed bar (UTC)", "Signal"):
+        for col in (
+            "Symbol",
+            "Auto entry",
+            "Digits",
+            "Spread",
+            "Min lot",
+            "Bars",
+            "Last closed bar (UTC)",
+            "Signal",
+        ):
             table.add_column(col, justify="right" if col in ("Digits", "Min lot") else "left")
         from tradebot.live import latest_features
 
         for symbol in symbols:
-            spec = broker.symbol(symbol)
-            features = latest_features(broker, config, symbol)
-            row = features.iloc[-1]
-            tick = broker.tick(symbol)
-            signal = {1: "[green]BUY[/]", -1: "[red]SELL[/]"}.get(int(row["signal"]), "—")
-            table.add_row(symbol, str(spec.digits), f"{(tick.ask - tick.bid) / spec.point:.0f} pts", str(spec.volume_min),
-                          str(len(features)), f"{row['time']:%Y-%m-%d %H:%M}", signal)  # fmt: skip
+            mode = "enabled" if config.for_symbol(symbol).risk.auto_trade else "signals only"
+            try:
+                spec = broker.symbol(symbol)
+                features = latest_features(broker, config, symbol)
+                row = features.iloc[-1]
+                tick = broker.tick(symbol)
+                signal = {1: "[green]BUY[/]", -1: "[red]SELL[/]"}.get(int(row["signal"]), "—")
+                table.add_row(symbol, mode, str(spec.digits), f"{(tick.ask - tick.bid) / spec.point:.0f} pts", str(spec.volume_min),
+                              str(len(features)), f"{row['time']:%Y-%m-%d %H:%M}", signal)  # fmt: skip
+            except Exception as exc:
+                table.add_row(symbol, mode, "—", "—", "—", "—", "—", escape(f"unavailable: {exc}"))
         console.print(table)
     finally:
         broker.shutdown()
     return 0
 
 
+def _working_folder(config: BotConfig) -> Path:
+    """Where the journal is: the dashboard and the trading loop share their locks there."""
+    return Path(config.journal).resolve().parent
+
+
 def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
+    from tradebot.book import Book
+    from tradebot.duty import Duty
     from tradebot.engine import Engine
     from tradebot.journal import Journal
     from tradebot.live import LiveRunner, trading_gate
 
     broker, account, symbols = _connect(config)
-    journal = Journal(config.journal)
-    try:
+    with ExitStack() as resources:
+        resources.callback(broker.shutdown)
+        journal = Journal(config.journal)
+        resources.callback(journal.close)
         gate = trading_gate(config, account, args.live, broker.terminal_trading_allowed())
+        duty = Duty(_working_folder(config), dashboard=False, trading=gate.execute)
+        resources.callback(duty.close)
         if gate.execute:
             log.warning(
                 "LIVE TRADING on %s: orders WILL be sent. Create a file named %s to pause entries.",
@@ -288,20 +310,28 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
             )
         else:
             log.info("DRY RUN: %s. Signals are logged and journalled; no orders are sent.", gate.reason)
+        # with no dashboard running, this loop manages the trades placed by hand and sends the
+        # reversal warnings, so restarting the dashboard leaves nothing unwatched (tradebot.duty)
         engine = Engine(config, broker, execute=gate.execute, journal=journal, live=True)
+        automatic = [s for s in symbols if config.for_symbol(s).risk.auto_trade]
+        signals_only = [s for s in symbols if not config.for_symbol(s).risk.auto_trade]
+        log.info("Automatic entry symbols: %s", ", ".join(automatic) or "none")
+        if signals_only:
+            log.info("Signals-only symbols (risk.auto_trade=false): %s", ", ".join(signals_only))
         notifier = _notifier(config)
-        try:
-            feed = _news_feed(config)
-            if feed and args.once:
+        resources.callback(notifier.close)
+        book = Book(config.journal)
+        resources.callback(book.close)
+        feed = _news_feed(config)
+        if feed:
+            resources.callback(feed.stop)
+            if args.once:
                 _refresh_news(feed)  # one cycle: download now rather than in the background
-            LiveRunner(config, broker, engine, symbols, notifier=notifier).run(once=args.once)
-            if feed:
-                feed.stop()
-        finally:
-            notifier.close()
-    finally:
-        journal.close()
-        broker.shutdown()
+        runner = LiveRunner(
+            config, broker, engine, symbols, notifier=notifier, duty=duty, manage=gate.execute, book=book,
+            gate=lambda: trading_gate(config, broker.account(), args.live, broker.terminal_trading_allowed()),
+        )  # fmt: skip
+        runner.run(once=args.once)
     return 0
 
 
@@ -644,18 +674,26 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     import webbrowser
 
     from tradebot.book import Book
+    from tradebot.duty import Duty
     from tradebot.ui.monitor import Monitor
 
     broker, _, symbols = _connect(config)
     notifier = _notifier(config)
     book = Book(config.journal)
+    duty = Duty(_working_folder(config), dashboard=True)
+    if not duty.held() and not duty.primary:
+        console.print(
+            "[yellow]Another tradebot dashboard is already running: this one sends nothing to the phone "
+            "and leaves your trades to it.[/]"
+        )
     monitor = Monitor(
         config, broker, symbols, live_flag=args.live, journal_path=config.journal, notifier=notifier,
-        book=book,
+        book=book, duty=duty,
     )  # fmt: skip
-    if book.active():
+    active = book.active()
+    if active:
         console.print(
-            f"Sizes and loss limits are worked out for your account [bold]{escape(book.active())}[/]; "
+            f"Sizes and loss limits are worked out for your account [bold]{escape(active)}[/]; "
             f"orders are placed by you at your broker."
         )
     names = {broker_name: wanted for wanted in config.symbols if (broker_name := broker.resolve(wanted))}
@@ -685,11 +723,16 @@ def cmd_ui(config: BotConfig, args: argparse.Namespace) -> int:
     finally:
         server.server_close()
         monitor.stop()
-        notifier.send(
-            "STOPPED · tradebot\nThe dashboard was closed: no alerts until it is started again.", "status"
-        )
+        if duty.primary:
+            notifier.send(
+                "STOPPED · tradebot\nThe dashboard was closed: no signal alerts until it is started again. "
+                "If the trading loop (tradebot run) is running, it takes over the reversal warnings and "
+                "your trades' stops within one of its cycles.",
+                "status",
+            )
         monitor.tracks.close()  # a backtest still measuring for the record is not left behind
         worker.join(timeout=10)
+        duty.close()  # after the worker: no stop is moved once the loop may have taken over
         notifier.close()
         book.close()
         if monitor.news_feed:
@@ -751,10 +794,15 @@ def cmd_fetch(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.broker.mt5 import fetch_history
     from tradebot.data import bars_path, save_spec, trend_timeframes
 
-    broker, _, symbols = _connect(config)
+    broker, _, _ = _connect(config)
     args.out.mkdir(parents=True, exist_ok=True)
     try:
-        for configured, symbol in zip(args.symbols or config.symbols, symbols, strict=False):
+        for configured in config.symbols:
+            # Resolved one by one: pairing the names by position put the next symbol's history in
+            # this one's file whenever a configured symbol was missing at the broker.
+            symbol = broker.resolve(configured)
+            if symbol is None:
+                continue  # _connect has already warned about it
             save_spec(args.out, _rename(broker.symbol(symbol), configured))
             trend = trend_timeframes(config).get(configured, ())
             for tf in args.timeframes or [config.timeframe, *trend]:
@@ -879,7 +927,9 @@ def cmd_optimize(config: BotConfig, args: argparse.Namespace) -> int:
     )
     console.print(f"\n[grey50]Report[/]  {report}")
     if args.write_config:
-        tuned = apply_params(config, wf.final_params)
+        # written as a dry run whatever the source config says: "review before trading it" must
+        # not be a config that trades as soon as it is used
+        tuned = replace(apply_params(config, wf.final_params), dry_run=True, live_trading_confirm=False)
         args.write_config.write_text(json.dumps(tuned.to_dict(), indent=2, default=str), encoding="utf-8")
         console.print(f"[grey50]Tuned config[/]  {args.write_config}  [yellow](review before trading it)[/]")
     return 0
@@ -962,10 +1012,11 @@ def cmd_review(config: BotConfig, args: argparse.Namespace) -> int:
 
         if args.account:  # the trades you logged for one of your own accounts
             book = Book(config.journal)
-            if book.account(args.account) is None:
+            account = book.account(args.account)
+            if account is None:
                 raise ValueError(f"no account named {args.account!r}: see `tradebot account`")
             own = BookBroker(broker, book, config.magic)
-            with own.using(book.account(args.account).name):
+            with own.using(account.name):
                 trades = closed_trades(own, config.magic, since)
         else:
             scope = None if config.risk.account_trades else config.magic  # phone trades count too

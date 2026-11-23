@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import http.client
 import json
 import threading
@@ -445,8 +446,15 @@ class StubMonitor:
     def chart(self, symbol):
         return {"symbol": symbol, "bars": []} if symbol == "EURUSD" else None
 
-    def submit(self, symbol, side, manual=False):
-        self.orders.append((symbol, side, manual) if manual else (symbol, side))
+    def submit(self, symbol, side, manual=False, override=False, duplicate=None, request_id="", volume=None):
+        if duplicate is not None:
+            self.orders.append(("duplicate", duplicate))
+        elif volume is not None:
+            self.orders.append((symbol, side, manual, volume))
+        elif override:
+            self.orders.append((symbol, side, manual, "override"))
+        else:
+            self.orders.append((symbol, side, manual) if manual else (symbol, side))
         return {"ok": True, "message": "placed"}
 
 
@@ -462,15 +470,34 @@ def server():
 
 
 def call(srv, method, path, body=None, headers=None):
+    """A request as a browser makes it: gzip accepted, and undone here."""
     # Allow scheduling delays when the full Windows suite serves the larger dashboard page.
     conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=15)
     payload = json.dumps(body).encode() if body is not None else None
-    base = {"Host": f"127.0.0.1:{srv.port}", "Content-Type": "application/json"}
+    base = {"Host": f"127.0.0.1:{srv.port}", "Content-Type": "application/json", "Accept-Encoding": "gzip"}
     conn.request(method, path, body=payload, headers={**base, **(headers or {})})
     response = conn.getresponse()
     data = response.read()
     conn.close()
+    if response.getheader("Content-Encoding") == "gzip":
+        data = gzip.decompress(data)
     return response.status, data, response
+
+
+def test_the_page_is_gzipped_for_browsers_and_plain_for_others(server):
+    """Avast holds plain HTTP responses over ~130 KB on this PC for 19 s, then resets them."""
+    from types import SimpleNamespace
+
+    from tradebot.ui.server import _Handler
+
+    _, page, response = call(server, "GET", "/")
+    wire = int(response.getheader("Content-Length"))
+    assert response.getheader("Content-Encoding") == "gzip" and wire < len(page) / 2
+    assert server.token.encode() in page
+    # The plain page itself is not fetched here: over ~130 KB, that is what Avast stalls.
+    accepts = lambda value: _Handler._accepts_gzip(SimpleNamespace(headers={"Accept-Encoding": value}))  # noqa: E731
+    assert accepts("gzip, deflate, br, zstd") and accepts("br;q=1.0, GZIP;q=0.5")
+    assert not accepts("") and not accepts("identity") and not accepts("gzip;q=0") and not accepts("gzip;q=x")
 
 
 def test_page_embeds_the_session_token_and_security_headers(server):
@@ -521,6 +548,37 @@ def test_manual_flag_reaches_the_monitor_only_when_true(server):
     call(server, "POST", "/api/order", {"symbol": "EURUSD", "side": -1, "manual": True}, headers)
     call(server, "POST", "/api/order", {"symbol": "EURUSD", "side": 1, "manual": "yes"}, headers)
     assert server.monitor.orders == [("EURUSD", -1, True), ("EURUSD", 1)]
+
+
+def test_get_in_and_duplicate_reach_the_monitor_only_as_asked(server):
+    headers = {TOKEN_HEADER: server.token}
+    call(
+        server,
+        "POST",
+        "/api/order",
+        {"symbol": "EURUSD", "side": 1, "manual": True, "override": True},
+        headers,
+    )
+    call(server, "POST", "/api/order", {"symbol": "EURUSD", "side": 1, "override": "yes"}, headers)
+    call(server, "POST", "/api/order", {"duplicate": 41}, headers)
+    status, data, _ = call(server, "POST", "/api/order", {"duplicate": "41"}, headers)
+    assert status == 400 and "ticket" in json.loads(data)["message"]
+    assert server.monitor.orders == [("EURUSD", 1, True, "override"), ("EURUSD", 1), ("duplicate", 41)]
+    status, _, _ = call(server, "POST", "/api/order", {"duplicate": 41})  # no token: refused
+    assert status == 403 and len(server.monitor.orders) == 3
+
+
+def test_your_size_reaches_the_monitor_only_as_a_positive_number(server):
+    headers = {TOKEN_HEADER: server.token}
+    order = {"symbol": "XAUUSD", "side": -1, "manual": True}
+    status, _, _ = call(server, "POST", "/api/order", {**order, "volume": 0.01}, headers)
+    assert status == 200
+    for bad in ("0.01", True, 0, -0.01, [0.01]):
+        status, data, _ = call(server, "POST", "/api/order", {**order, "volume": bad}, headers)
+        assert status == 400 and "volume" in json.loads(data)["message"], bad
+    status, _, _ = call(server, "POST", "/api/order", {"duplicate": 41, "volume": 0.01}, headers)
+    assert status == 400
+    assert server.monitor.orders == [("XAUUSD", -1, True, 0.01)]
 
 
 def test_malformed_order_is_a_400(server):

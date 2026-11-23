@@ -128,6 +128,12 @@ class StrategyParams:
     breakout_min_atr: float = 0.25
     """A break only counts if the bar closes at least this many ATR beyond the level, and it has
     failed if a later bar closes back through the level by the same margin. 0 = any close through."""
+    auto_join: bool = False
+    """Also enter a running trend after its signal, as the dashboard's JOIN: within
+    ``join_window_bars`` bars of a taken signal, the trend unchanged, no opposite supply/demand zone
+    and no closed sweep against it, and only if no trade was entered on the symbol since that
+    signal. Late entries up to 5 bars did about as well as on time (``scripts/research_late_entry.py``)."""
+    join_window_bars: int = 5
     breakout_target: str = "atr"
     """"atr": the target is ``risk.tp_atr`` ATR, as for every setup. "measured": the measured move,
     the height of the range that broke projected from the broken level."""
@@ -179,6 +185,8 @@ class StrategyParams:
         """The higher timeframes the trend filter reads when trading ``timeframe``."""
         if self.trend_timeframes == "auto":
             return auto_trend_timeframes(timeframe)
+        if isinstance(self.trend_timeframes, str):  # "H4": one timeframe, not the letters H and 4
+            return (self.trend_timeframes,)
         if self.trend_timeframes:
             return tuple(self.trend_timeframes)
         return (self.trend_timeframe,)
@@ -196,6 +204,8 @@ class StrategyParams:
                 self.fib_lookback,
                 self.breakout_period,
                 self.retest_period,
+                self.volume_period + 1 if self.use_volume_filter else 0,
+                self.pullback_rsi_period if self.name == "pullback" else 0,
                 self.quality_period + 1 if self.use_signal_quality_filter else 0,
             )
             + 5
@@ -226,10 +236,16 @@ class RiskParams:
     """Skip a trade whose target is closer than this many times its stop distance. 0 = off. Only
     matters when a setup names its own target (the measured move); ATR targets are a fixed ratio."""
     allow_min_lot_overrisk: bool = False
+    auto_trade: bool = True
+    """False = signals only: the trading loop never opens a trade on this symbol by itself (no
+    signal, no join), but still manages one that is open. The dashboard shows its advice and
+    alerts as usual and you place what you want; backtests measure it like any other symbol.
+    Meant as a per-symbol override, e.g. ``"TSLA": {"risk": {"auto_trade": false}}``."""
     account_trades: bool = True
     """Live: the loss limits, losing streak, position limits, open risk and review count every
     trade on the account, the ones you place by hand (on the phone, too) as well as the bot's.
-    False = only the bot's own (its magic number). The bot only ever manages its own positions."""
+    False = only the bot's own (its magic number). The trading loop only ever manages its own
+    positions; the dashboard's ``management.auto_*`` switches act on the others."""
 
 
 @dataclass(frozen=True)
@@ -242,7 +258,28 @@ class ManagementParams:
     partial_tp_r: float = 1.5
     partial_tp_fraction: float = 0.5
     close_on_reverse: bool = True
+    reverse_exit_in_profit_only: bool = False
+    """With ``close_on_reverse``: close on an opposite signal only while the trade is in profit,
+    leaving a losing trade to its stop. Measured in ``scripts/research_trailing.py``."""
     max_hold_bars: int = 0
+    auto_breakeven: bool = False
+    """Move the stop of every open trade on the account to breakeven at ``breakeven_r``, the ones
+    placed by hand included (see ``tradebot.protect``). Changes stops only; never opens a trade."""
+    auto_trailing: bool = False
+    """From ``trail_start_r`` in profit, keep the stop of every open trade on the account
+    ``trail_atr`` ATR behind the last closed bar, the ones placed by hand included (see
+    ``tradebot.protect``). Only ever tightens a stop. Measured neutral (scripts/research_trailing.py)."""
+    auto_partial: bool = False
+    """Close ``partial_tp_fraction`` of every open trade on the account once a closed bar is
+    ``partial_tp_r`` R in profit, the ones placed by hand included. Closes part of a trade."""
+    auto_reverse_exit: bool = False
+    """Close an open trade on the account, the ones placed by hand included, when the reversal check
+    confirms a sign against it on a closed bar while the trade is in profit (at that close and at the
+    live price). Closes the whole trade. Measured in ``scripts/research_reversal_exit.py``."""
+    auto_stop: bool = False
+    """Give an open trade on the account that has had no stop for two minutes one at ``risk.sl_atr``
+    ATR from its entry (from the price, when price is already past that). Never removes or widens
+    a stop."""
 
 
 @dataclass(frozen=True)
@@ -305,6 +342,14 @@ class BacktestParams:
     slippage_points: float = 0.0
     min_spread_points: float = 10.0
     """Floor for the spread when bar data reports none (many demo feeds report 0)."""
+    swap_long: float = 0.0
+    swap_short: float = 0.0
+    """Overnight financing per lot per night in account currency, as the broker charges it
+    (negative = a cost): one night per 17:00 New York rollover crossed, three on ``swap_triple_day``.
+    0 = not simulated. MT5 shows the rates in the symbol's specification."""
+    swap_triple_day: int = 2
+    """The rollover charged three times, Monday = 0: Wednesday (2) for forex and metals, Friday (4)
+    for stocks at Exness."""
 
 
 @dataclass(frozen=True)
@@ -407,18 +452,45 @@ class BotConfig:
         errors = list(_validate(self))
         for symbol in self.symbols:
             errors += [f"{symbol}: {e}" for e in _validate_symbol(self.for_symbol(symbol))]
+        if not errors:
+            for symbol in self.symbols:
+                strategy = self.for_symbol(symbol).strategy
+                required = strategy.warmup_bars
+                if strategy.use_trend_filter and any(
+                    TIMEFRAME_MINUTES[tf] <= self.bar_minutes for tf in strategy.trend_ladder(self.timeframe)
+                ):
+                    required = max(required, strategy.trend_ema)
+                if self.history_bars < required:
+                    errors.append(
+                        f"{symbol}: history_bars must be at least {required} for its indicator periods"
+                    )
+            empty = [
+                s for s in self.symbols if _no_trend_timeframe(self.for_symbol(s).strategy, self.timeframe)
+            ]
+            if empty:
+                errors.append(
+                    f'strategy.use_trend_filter is on, but trend_timeframes "auto" has no timeframe above '
+                    f"{self.timeframe} to read the trend from, so every entry would be blocked "
+                    f"({', '.join(empty)}): set use_trend_filter to false, or trade a lower timeframe"
+                )
         if errors:
             raise ConfigError("invalid configuration:\n  - " + "\n  - ".join(errors))
+
+
+def _no_trend_timeframe(s: StrategyParams, timeframe: str) -> bool:
+    """The trend filter is on but its automatic ladder is empty (D1 has nothing above it): every
+    setup needs the trend to agree, so it would never trade."""
+    return bool(s.use_trend_filter and s.trend_timeframes == "auto" and timeframe in TIMEFRAME_MINUTES
+                and not s.trend_ladder(timeframe))  # fmt: skip
 
 
 def _base_symbol(symbol: str, overrides: dict[str, Any]) -> str:
     """Overrides are keyed by the configured name; brokers add suffixes (EURUSDm, EURUSD.r)."""
     if symbol in overrides:
         return symbol
-    for key in overrides:
-        if symbol.upper().startswith(key.upper()):
-            return key
-    return symbol
+    # The longest matching key: with "T" and "TSLA" both configured, TSLAm is TSLA, not T.
+    matches = [key for key in overrides if symbol.upper().startswith(key.upper())]
+    return max(matches, key=len) if matches else symbol
 
 
 def _validate(c: BotConfig) -> list[str]:
@@ -428,6 +500,10 @@ def _validate(c: BotConfig) -> list[str]:
         return errors
     if not c.symbols:
         errors.append("at least one symbol is required")
+    if any(s != s.strip() for s in c.symbols):
+        errors.append("symbols must not contain leading or trailing whitespace")
+    if len({s.upper() for s in c.symbols}) != len(c.symbols):
+        errors.append("symbols must be unique (ignoring case)")
     if c.timeframe not in TIMEFRAME_MINUTES:
         errors.append(f"timeframe {c.timeframe!r} is not one of {', '.join(TIMEFRAME_MINUTES)}")
     if c.schedule.session not in (*SESSIONS, "custom"):
@@ -441,6 +517,8 @@ def _validate(c: BotConfig) -> list[str]:
         errors.append("history_bars must be at least 200")
     if c.poll_seconds <= 0:
         errors.append("poll_seconds must be positive")
+    if c.server_utc_offset_hours is not None and abs(c.server_utc_offset_hours) > 14:
+        errors.append("server_utc_offset_hours must be between -14 and 14, or null for detection")
     if c.schedule.max_bar_age_bars < 1:
         errors.append("schedule.max_bar_age_bars must be >= 1")
     if c.schedule.news_before_minutes < 0 or c.schedule.news_after_minutes < 0:
@@ -503,10 +581,20 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
     for name in ("commission_per_lot", "slippage_points", "min_spread_points"):
         if getattr(p.backtest, name) < 0:
             errors.append(f"backtest.{name} must be >= 0")
+    if not 0 <= p.backtest.swap_triple_day <= 6:
+        errors.append("backtest.swap_triple_day must be 0 (Monday) to 6 (Sunday)")
     if s.name not in STRATEGIES:
         errors.append(f"strategy.name {s.name!r} is not one of {', '.join(STRATEGIES)}")
     if s.breakout_min_atr < 0:
         errors.append("strategy.breakout_min_atr must be >= 0")
+    for name in ("rsi_buy_max", "rsi_sell_min", "pullback_buy_below", "pullback_sell_above", "adx_min"):
+        if not 0 <= getattr(s, name) <= 100:
+            errors.append(f"strategy.{name} must be between 0 and 100")
+    for name in ("sr_min_atr", "fib_tolerance_atr"):
+        if getattr(s, name) < 0:
+            errors.append(f"strategy.{name} must be >= 0")
+    if not 1 <= s.join_window_bars <= 12:  # the dashboard looks 12 bars back for the signal to join
+        errors.append("strategy.join_window_bars must be from 1 to 12")
     if s.retest_period < 2 or s.retest_window < 1 or s.retest_tolerance_atr < 0:
         errors.append("strategy.retest_period must be >= 2, retest_window >= 1, retest_tolerance_atr >= 0")
     if s.fast_ema >= s.slow_ema:

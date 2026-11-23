@@ -6,13 +6,17 @@ import logging
 import signal
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from datetime import timedelta
 
 import pandas as pd
 
-from tradebot.broker.base import Account, Broker
+from tradebot import protect
+from tradebot.book import Book, BookBroker
+from tradebot.broker.base import Account, Broker, Position
 from tradebot.config import TIMEFRAME_MINUTES, BotConfig
+from tradebot.duty import Duty
 from tradebot.engine import Engine
 from tradebot.reversal import EXIT, Alerts, assess, holding_text
 from tradebot.strategy import compute_signals
@@ -76,7 +80,8 @@ class Link:
         if now >= self._next_try:
             self._next_try = now + self.DELAYS[min(self.attempts, len(self.DELAYS) - 1)]
             self.attempts += 1
-            if self.broker.reconnect():
+            reconnect = getattr(self.broker, "reconnect", None)  # MT5Broker has it; a broker without a
+            if reconnect is not None and reconnect():  # link to lose has no `connected` either
                 self._recovered()
                 return True
         return False
@@ -90,16 +95,48 @@ class Link:
 NOTIFY_KINDS = {"open", "dry_open", "close", "partial", "rejected"}
 
 
+def resolve_symbols(broker: Broker, configured: Iterable[str]) -> list[str]:
+    """Resolve the watchlist at startup and again when the terminal changes accounts."""
+    resolve = getattr(broker, "resolve", lambda name: name)
+    symbols = []
+    for wanted in configured:
+        name = resolve(wanted)
+        if name is None:
+            log.warning("symbol %s is not available for trading on this account; skipping it", wanted)
+        elif name not in symbols:
+            symbols.append(name)
+    if not symbols:
+        raise ValueError("none of the configured symbols are available on this account")
+    return symbols
+
+
 class LiveRunner:
     def __init__(
-        self, config: BotConfig, broker: Broker, engine: Engine, symbols: list[str], notifier=None
-    ) -> None:
+        self, config: BotConfig, broker: Broker, engine: Engine, symbols: list[str], notifier=None,
+        *, duty: Duty | None = None, manage: bool = False, book: Book | None = None,
+        gate: Callable[[], Gate] | None = None,
+    ) -> None:  # fmt: skip
+        """``duty``: whether this loop or a running dashboard sends the reversal warnings and
+        manages trades placed by hand (``tradebot.duty``); None = always this loop. ``manage``: do
+        that management at all (``tradebot run --live`` only: a dry run sends nothing). ``book``:
+        the first stop seen on each position, kept by the dashboard, for the 1R of a trade that
+        got its stop after it opened. ``gate``: ``trading_gate`` on the account the terminal is
+        logged in to now, asked again before every symbol while orders are allowed: the terminal
+        can be switched to another account, a real-money one included, while this runs."""
         self.config, self.broker, self.engine, self.symbols = config, broker, engine, symbols
         self.notifier = notifier
+        self.duty, self.manage = duty, manage
+        self._gate = gate
+        self._allowed = engine.execute
+        """What the start-up check allowed: a later check can stop orders, never allow more."""
+        self._account: object = None
         self._stop = threading.Event()
         self._link = Link(broker)
         self._features: dict[str, pd.DataFrame] = {}
         self._reversals = Alerts()
+        self._manager = protect.Manager()
+        self._turned: dict[int, tuple[str, str]] = {}
+        self._book = BookBroker(broker, book, config.magic) if book is not None else None
 
     def stop(self, *_: object) -> None:
         log.info("stop requested; finishing the current cycle")
@@ -108,36 +145,103 @@ class LiveRunner:
     def cycle(self) -> None:
         if not self._link.ok():
             return  # terminal unreachable: nothing can be read or managed until it is back
-        for symbol in self.symbols:
+        # Refresh the account/watchlist before iterating; an account change can replace suffixes.
+        if not self._authorize():
+            return
+        for symbol in tuple(self.symbols):
             try:
+                if not self._authorize():
+                    return
+                if symbol not in self.symbols:
+                    continue  # the account changed again during this cycle
                 self._process(symbol)
             except Exception:  # one bad symbol must not stop the others
                 if not self._link.ok():
                     return
                 log.exception("%s: cycle failed", symbol)
+        duty = self.duty is None or self.duty.held()
         try:
-            self._warn_reversals()
+            self._warn_reversals(send=duty)
         except Exception:  # a warning must never stop the trading loop
             log.debug("reversal check failed", exc_info=True)
+        if duty and self.manage:
+            try:
+                self._protect()
+            except Exception:  # protecting stops must never stop the trading loop
+                log.warning("automatic trade management failed", exc_info=True)
         if self.notifier:
             for event in self.engine.events:
                 if event.kind in NOTIFY_KINDS:
                     self.notifier.send(f"{event.symbol}: {event.detail}", "order")
+                elif event.kind == "signal" and duty:  # a signals-only symbol; a dashboard sends its own
+                    self.notifier.send(f"{event.symbol}: {event.detail}", "signal")
         self.engine.events.clear()
 
-    def _warn_reversals(self) -> None:
+    def _authorize(self) -> bool:
+        """Before each symbol: is the terminal still on the same account, and may orders still be
+        sent on it? A switch to another account re-reads the loss limits from its history; a
+        failed check stops orders (and this loop's trade management) until a check passes."""
+        checked = True
+        try:
+            identity = getattr(self.broker, "account_id", None)
+            if identity is not None:
+                now = identity()
+                if self._account is not None and now != self._account:
+                    self.engine.forget_account()
+                    self._features.clear()
+                    self._turned.clear()
+                    self._reversals = Alerts()
+                    self._manager = protect.Manager()
+                    self.symbols = resolve_symbols(self.broker, self.config.symbols)
+                self._account = now
+            if not self._allowed:
+                return True
+            gate = self._gate() if self._gate is not None else Gate(True, "authorized account")
+        except Exception as exc:  # the account cannot be read: no orders until it can
+            checked = False
+            gate = Gate(False, f"the account could not be checked ({type(exc).__name__}: {exc})")
+        if self.duty is not None:
+            if gate.execute and not self.duty.set_trading(True):
+                gate = Gate(False, "another live trading loop is running in this folder")
+            elif not gate.execute:
+                self.duty.set_trading(False)
+        if gate.execute == self.engine.execute:
+            return checked
+        self.engine.execute = self.manage = gate.execute
+        if gate.execute:
+            log.warning("LIVE TRADING resumed on %s: orders will be sent again", gate.reason)
+            text = f"Orders resumed on the {gate.reason}."
+        else:
+            log.error("orders STOPPED: %s. Signals are only logged until that changes.", gate.reason)
+            text = f"Orders stopped: {gate.reason}. Signals are only logged until that changes."
+        if self.notifier:
+            self.notifier.send(f"TRADING · {text}", "order")
+        return checked
+
+    def _positions(self) -> list[Position]:
+        """Every open position on the account, each with its first stop as 1R."""
+        if self._book is not None:
+            return self._book.terminal_positions(None)
+        return self.broker.positions(None)
+
+    def _warn_reversals(self, send: bool = True) -> None:
         """Log and send, once per sign, when the market turns against any open position on a
-        watched symbol: the bot's own or one opened by hand."""
-        held = [p for p in self.broker.positions(None) if p.symbol in self._features]
-        self._reversals.forget({p.ticket for p in held})
+        watched symbol: the bot's own or one opened by hand. With ``send`` False a running
+        dashboard says it; the signs are still noted, so taking over later repeats none."""
+        held = [p for p in self._positions() if p.symbol in self._features]
+        open_tickets = {p.ticket for p in held}
+        self._reversals.forget(open_tickets)
+        for ticket in [t for t in self._turned if t not in open_tickets]:
+            del self._turned[ticket]
         for p in held:
             spec = self.broker.symbol(p.symbol)
             strategy = self.config.for_symbol(p.symbol).strategy
             found = assess(
                 self._features[p.symbol], p.side, p.time_open, strategy, self.config.timeframe, spec
             )
+            self._turned[p.ticket] = (found.level, found.headline)
             fresh, _ = self._reversals.new(p.ticket, found)
-            if not fresh:
+            if not fresh or not send:
                 continue
             tick = self.broker.tick(p.symbol)
             text = (
@@ -148,6 +252,24 @@ class LiveRunner:
             if self.notifier:
                 title = "GET OUT" if found.level == EXIT else "REVERSAL WARNING"
                 self.notifier.send(f"{title} · {p.symbol}\n{text}", "exit")
+
+    def _protect(self) -> None:
+        """What the dashboard does for trades placed by hand while it runs (``tradebot.protect``):
+        done here while no dashboard runs, so a dashboard restart leaves no trade unmanaged."""
+        allowed = getattr(self.broker, "terminal_trading_allowed", lambda: False)()
+        if not protect.breakeven_gate(self.config, self.broker.account(), allowed).on:
+            return
+        bars = {
+            symbol: bar
+            for symbol, frame in self._features.items()
+            if (bar := protect.last_bar(frame, self.config.bar_minutes)) is not None
+        }
+        positions = self._positions()
+        for done in self._manager.run(
+            self.broker, positions, self.config, bars, self._turned, self.broker.now()
+        ):
+            if self.notifier:
+                self.notifier.send(f"{done.title} · {done.symbol}\n{done.text}", "order")
 
     def _process(self, symbol: str) -> None:
         params = self.config.for_symbol(symbol)
@@ -162,6 +284,8 @@ class LiveRunner:
             log.info("%s: last closed bar is %s old (market closed?); managing positions only", symbol, age)
             row["signal"] = 0
             row["exit_signal"] = 0
+            if "join_signal" in row:
+                row["join_signal"] = 0
         tick = self.broker.tick(symbol)
         self.engine.on_bar(symbol, spec, params, row, tick.ask - tick.bid, now)
         if row["signal"] == 0:
@@ -231,10 +355,13 @@ def preview_features(
     the same moment as the forming bar, it is included too, as it will be when the bar really closes.
     """
     forming = getattr(broker, "forming_bar", None)
-    bar = forming(symbol, config.timeframe) if forming else None
+    if forming is None:
+        return None
+    bar = forming(symbol, config.timeframe)
     if bar is None or pd.Timestamp(bar["time"]) <= closed["time"].iloc[-1]:
         return None
-    strategy = config.for_symbol(symbol).strategy
+    # the forming bar is never joined, and the join columns cost a full liquidity scan each time
+    strategy = replace(config.for_symbol(symbol).strategy, auto_join=False)
     columns = [*BAR_COLUMNS, *(c for c in ("tick_volume",) if c in closed.columns and c in bar)]
     forming_row = {**bar, "spread": closed["spread"].iloc[-1]}
     base = pd.concat([closed[columns], pd.DataFrame([forming_row])[columns]], ignore_index=True)

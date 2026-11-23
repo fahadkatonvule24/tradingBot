@@ -122,6 +122,23 @@ def test_heartbeat_started_then_running_once_each_trading_day(cfg, broker, fake)
     assert len(calls) == 2
 
 
+def test_trading_all_day_sends_the_running_message_at_the_london_open_not_midnight(cfg, broker, fake):  # noqa: F811
+    """Regression: with session "all" the day opened at 00:00 UTC, so the phone buzzed at 3 a.m."""
+    from dataclasses import replace
+
+    calls: list = []
+    alerts = Alerts([Ntfy(TOPIC, opener=recording(calls), background=False)])
+    all_day = replace(cfg, schedule=replace(cfg.schedule, session="all"))
+    monitor = primed(Monitor(all_day, broker, [SYMBOL], notifier=alerts), features())
+    monitor.heartbeat = True
+    monitor.refresh()
+    monitor._heartbeat(datetime(2026, 3, 5, 0, 30))
+    monitor._heartbeat(datetime(2026, 3, 5, 2, 0))
+    assert [c["title"] for c in calls] == ["STARTED · tradebot"]
+    monitor._heartbeat(datetime(2026, 3, 5, 8, 5))  # London opens 08:00 UTC in March (GMT)
+    assert [c["title"] for c in calls] == ["STARTED · tradebot", "RUNNING · tradebot"]
+
+
 def test_the_ntfy_level_is_checked_in_the_config():
     assert config_from_dict({"alerts": {"ntfy": "all"}}, env={}).alerts.ntfy == "all"
     with pytest.raises(ConfigError, match=r"alerts\.ntfy"):

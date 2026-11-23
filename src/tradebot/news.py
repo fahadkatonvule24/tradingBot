@@ -186,7 +186,8 @@ class NewsFeed:
         for row in rows:
             row.pop("time"), row.pop("title")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
+        # one temporary file per process: the dashboard and the trading loop both download it
+        temporary = self.path.with_name(f"{self.path.stem}.{os.getpid()}.tmp")
         temporary.write_text(json.dumps(rows, indent=1), encoding="utf-8")
         os.replace(temporary, self.path)  # the calendar never reads a half-written file
         self.error = None

@@ -153,3 +153,37 @@ def verdict(summary: Summary) -> str:
     if summary.avg_r > 0:
         return f"{result}: positive so far. Keep the size where it is until the next review confirms it."
     return f"{result}: the rules are losing. Do not raise the size; go back to testing."
+
+
+FIRST_READ, JUDGED = 50, 100
+"""The bot's own trades are read at 50 and judged at 100: before that the average is mostly luck."""
+
+
+def scorecard(bot_trades: Sequence[ReviewedTrade]) -> dict:
+    """The bot's own closed trades against the 50 / 100 trade milestones: the one number to judge
+    the automatic trading by, rather than the dollars, which follow the size."""
+    s = summarize(bot_trades)
+    n, avg = s.measured, s.avg_r
+    so_far = f"{avg:+.2f}R a trade" if avg is not None else "no R yet"
+    if n < FIRST_READ or avg is None:
+        text = (
+            f"{n} of {FIRST_READ} bot trades so far ({so_far}): too few to judge. Leave the rules and the "
+            f"size alone until {FIRST_READ}."
+        )
+    elif n < JUDGED:
+        lean = "promising" if avg > 0 else "losing so far"
+        text = (
+            f"{n} bot trades, {so_far}: a first read, {lean}. Keep the size small and judge it at {JUDGED}."
+        )
+    elif avg > 0:
+        text = (
+            f"{n} bot trades, {so_far}: positive over {JUDGED}+ trades. This is the evidence to ask for "
+            "before real money; start real money at the smallest size."
+        )
+    else:
+        text = (
+            f"{n} bot trades, {so_far}: not positive over {JUDGED} trades. Do not take these rules to "
+            "real money; go back to testing."
+        )
+    return {"trades": s.trades, "measured": n, "avg_r": avg, "win_rate": s.win_rate, "net": s.net,
+            "first_read": FIRST_READ, "judged": JUDGED, "text": text}  # fmt: skip

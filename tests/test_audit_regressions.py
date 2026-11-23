@@ -97,6 +97,7 @@ def test_unknown_portfolio_risk_blocks_entry_and_serializes_for_the_dashboard(co
     json.dumps(clean(status), allow_nan=False)
     plan = engine.plan_entry("EURUSD", eurusd, config.for_symbol("EURUSD"), flat(0), 0.0001, 1)
     assert isinstance(plan, Rejection) and plan.key == "portfolio risk"
+    assert "no stop loss (EURUSD)" in plan.message  # not "open risk would exceed 1%"
 
 
 @pytest.mark.parametrize("margin", [None, float("nan"), -1.0])

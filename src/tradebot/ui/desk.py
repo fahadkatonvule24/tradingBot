@@ -19,7 +19,7 @@ from tradebot import calculator, market
 from tradebot.advisor import WORD, trade_plan
 from tradebot.book import OWN_CALL, SIGNAL, Book, BookBroker, BookError, BookTrade
 from tradebot.engine import Engine
-from tradebot.review import closed_trades, summarize, verdict
+from tradebot.review import closed_trades, scorecard, summarize, verdict
 
 if TYPE_CHECKING:
     from tradebot.ui.monitor import Monitor
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 REVIEW_DAYS = 90
+BOT_SCORE_DAYS = 365
+"""The bot's own trades are counted over this long: reaching 100 can take more than 90 days."""
 MT5_REVIEW_SECONDS = 60.0
 NEWS_HOURS = 36
 LEVELS_SECONDS = 5.0
@@ -194,15 +196,17 @@ class Desk:
             advice = self.m.advice_now(symbol)
             spec = self.broker.symbol(symbol)
         plan = advice.plans.get("buy" if side > 0 else "sell")
-        if plan is None and (entry is None or volume is None):
-            raise BookError("the market is closed, so there is no plan to copy: give lots and entry")
-        if volume is None:
-            if not plan.volume:
-                raise BookError(f"the plan has no size ({plan.rejected}): give the lots you traded")
-            volume = plan.volume
-        if entry is None:
-            entry = plan.entry
-        if plan is not None:  # the plan's distances, from the price you actually got
+        if plan is None:
+            if entry is None or volume is None:
+                raise BookError("the market is closed, so there is no plan to copy: give lots and entry")
+        else:
+            if volume is None:
+                if not plan.volume:
+                    raise BookError(f"the plan has no size ({plan.rejected}): give the lots you traded")
+                volume = plan.volume
+            if entry is None:
+                entry = plan.entry
+            # the plan's distances, from the price you actually got
             sl = spec.round_price(entry - side * plan.stop_distance) if sl is None else sl
             tp = spec.round_price(entry + side * plan.target_distance) if tp is None else tp
         source = SIGNAL if advice.actionable and advice.side == side else OWN_CALL
@@ -341,15 +345,18 @@ class Desk:
     # --- what the page shows ----------------------------------------------------------------------
 
     def sizes(self, symbol: str, params: Any, row: pd.Series, tick: Any) -> dict[str, list[dict[str, Any]]]:
-        """The same plan sized for every account that is not the selected one, per side."""
-        key = (row["time"], self.book.version, self.broker.account_name())
+        """The same plan sized for every account that is not the selected one, per side.
+
+        Worked out again on a new bar, a book change, or when one of those accounts' equity moves
+        (its open trades float with the price): a size from an hour-old equity is the wrong size."""
+        others = [a for a in self.book.accounts() if a.name != self.broker.account_name()]
+        equities = tuple(round(a.balance + self.broker.floating_total(a.name), 2) for a in others)
+        key = (row["time"], self.book.version, self.broker.account_name(), equities)
         cached = self._sizes.get(symbol)
         if cached is None or cached[0] != key:
             out: dict[str, list[dict[str, Any]]] = {"buy": [], "sell": []}
             engine = Engine(self.m.config, self.broker, execute=False, live=True)
-            for account in self.book.accounts():
-                if account.name == self.broker.account_name():
-                    continue
+            for account in others:
                 with self.broker.using(account.name):
                     spec = self.broker.symbol(symbol)
                     equity = self.broker.account().equity
@@ -415,7 +422,7 @@ class Desk:
                     {"id": t.id, "symbol": t.symbol, "side": t.side, "volume": t.volume, "entry": t.entry,
                      "exit_price": t.exit_price, "pnl": t.pnl, "exit_reason": t.exit_reason, "closed": t.closed,
                      "assumed": t.assumed, "source": t.source,
-                     "r": (t.pnl or 0.0) / risks[t.id] if risks.get(t.id) else None}
+                     "r": (t.pnl or 0.0) / risk if (risk := risks.get(t.id)) else None}
                     for t in reversed(recent[-15:])
                 ]  # fmt: skip
                 groups = (("all", reviewed), ("signal", [t for t in reviewed if not t.manual]),
@@ -450,6 +457,14 @@ class Desk:
                    "measured": s.measured, "profit_factor": s.profit_factor}
             for name, s in ((name, summarize(group)) for name, group in groups)
         }  # fmt: skip
+        try:  # the bot's own trades, toward the 50 / 100 trade milestones
+            bots = closed_trades(
+                self.broker, config.magic, now - timedelta(days=BOT_SCORE_DAYS), config.magic
+            )
+            # its own calls only: your dashboard orders ("Get in", "Duplicate") carry its number too
+            review["bot"] = scorecard([t for t in bots if not t.manual]) | {"days": BOT_SCORE_DAYS}
+        except Exception:
+            log.debug("bot trades not read", exc_info=True)
         return {"closed": closed, "review": review}
 
     # --- commands from the phone ------------------------------------------------------------------
@@ -589,8 +604,9 @@ def calc_request(m: Monitor, body: dict[str, Any]) -> dict[str, Any]:
         values["margin_cap"] = params.risk.max_margin_percent
     spec = m.broker.symbol(symbol)
     for key in ("stop", "target"):
-        if values[key] is not None:
-            values[key] = spec.round_price(values[key])
+        value = values[key]
+        if value is not None:
+            values[key] = spec.round_price(value)
     try:
         result = calculator.calculate(m.broker, symbol, side, **values)
     except calculator.CalcError as exc:
@@ -690,8 +706,9 @@ def market_view(
 ) -> dict:
     """Strength, correlation, exposure and levels, from the bars the advisor already holds."""
     features = {s: f for s in m.symbols if (f := m.features(s)) is not None}
-    specs = {s: m.spec(s) for s in features if m.spec(s) is not None}
+    specs = {s: spec for s in features if (spec := m.spec(s)) is not None}
     key = tuple(f["time"].iloc[-1] for f in features.values())
+    slow: dict[str, Any]
     if m.market_cache is None or m.market_cache[0] != key:  # once per closed bar
         table = market.strength_table(features, specs, m.config.bar_minutes)
         slow = {

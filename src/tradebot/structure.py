@@ -26,6 +26,12 @@ Patterns, from the latest swings (prices within ``EQUAL_ATR`` ATR count as equal
                         and equal lows (descending)
 A pattern is "forming" until a bar closes through its neckline (or triangle line), "confirmed"
 after, and gives the measured target the textbooks use: the pattern's height from the break.
+
+Fixed on 2026-11-19 after a chart showed lines no trader would draw: a head and shoulders
+neckline may slope by at most ``NECKLINE_MAX_ATR`` ATR between its two points (one falling 4.7
+ATR made "breaks" out of nothing); a triangle break counts only before its lines meet, and a
+triangle whose lines met unbroken is gone; and every line stops ``LINE_AFTER_BREAK_BARS`` bars
+after the break, and a triangle's at its apex, instead of running on to the last bar.
 """
 
 from __future__ import annotations
@@ -47,22 +53,28 @@ PATTERN_RECENT_BARS = 60
 """A pattern whose last swing is older than this is history, not the current picture."""
 CONFIRMED_RECENT_BARS = 20
 """A confirmed pattern is shown for this many bars after its break."""
+NECKLINE_MAX_ATR = 1.0
+"""How far apart (in ATR) the two points of a head and shoulders neckline may be."""
+LINE_AFTER_BREAK_BARS = 3
+"""A pattern's lines are drawn this many bars past its break, then stop."""
 
 RECORD = {
-    "double_top": "As an entry, selling these neckline breaks lost 0.08R to 0.10R a trade in the stored history.",
-    "double_bottom": "As an entry, buying these neckline breaks lost 0.08R to 0.10R a trade in the stored history.",
-    "head_shoulders": "As an entry, trading these neckline breaks lost 0.06R to 0.08R a trade in the stored history.",
-    "inverse_head_shoulders": "As an entry, trading these neckline breaks lost 0.06R to 0.08R a trade in the stored history.",
+    "double_top": "As an entry, selling these neckline breaks lost about 0.10R a trade in the stored history.",
+    "double_bottom": "As an entry, buying these neckline breaks lost about 0.10R a trade in the stored history.",
+    "head_shoulders": "As an entry, trading these neckline breaks lost 0.01R to 0.03R a trade in the stored history.",
+    "inverse_head_shoulders": "As an entry, trading these neckline breaks lost 0.01R to 0.03R a trade in the stored history.",
     "triangle": "As an entry, trading triangle breaks lost 0.08R to 0.09R a trade in the stored history.",
-    "structure_break": "As an entry, trading breaks of structure lost 0.08R to 0.09R a trade in the stored history.",
+    "structure_break": "As an entry, trading breaks of structure lost about 0.10R a trade in the stored history.",
     "round_ahead": "Bot signals with a round number less than half an ATR in the way did worse (-0.2R to -0.35R "
     "a trade), but only 30 such trades were measured.",
 }
-"""Measured by ``scripts/research_structure.py`` on 2026-11-17: six symbols, H1, 2017-2022 and
-2023-2026 separately, inside the trading hours, with the bot's stops and costs. Shown next to each
-item so that a pattern on the chart is never read as an edge. With the trend filter on, results
-were no better (-0.06R to -0.30R, except head and shoulders: +0.11R on 40 trades since 2023 after
--0.21R before). A zone within 1 ATR in a signal's way changed nothing consistently."""
+"""Measured by ``scripts/research_structure.py``: six symbols, H1, 2017-2022 and 2023-2026
+separately, with the bot's stops and costs. First on 2026-11-17 inside 06-17 UTC; re-measured on
+2026-11-19 after the pattern fixes (level necklines, triangle breaks before the apex), all day.
+With the trend filter on, results were worse (-0.13R to -0.21R), except head and shoulders:
++0.03R and +0.12R, on only 38 and 44 trades, too few to rely on. A zone within 1 ATR in a signal's
+way changed nothing consistently."""
+
 
 NAMES = {
     "double_top": "Double top",
@@ -191,6 +203,23 @@ def _line(a: Swing, b: Swing, i: float) -> float:
     return a.price + (b.price - a.price) * (i - a.i) / (b.i - a.i) if b.i != a.i else a.price
 
 
+def _clip(lines: list, last: float) -> list:
+    """Each line [i0, p0, i1, p1] cut off at bar ``last`` (no line is lengthened)."""
+    out = []
+    for i0, p0, i1, p1 in lines:
+        if i1 > last and i1 != i0:
+            p1, i1 = p0 + (p1 - p0) * (last - i0) / (i1 - i0), last
+        out.append([i0, float(p0), i1, float(p1)])
+    return out
+
+
+def _apex(upper, lower, a: int, b: int) -> float:
+    """The bar where two straight lines meet (inf if they never do going forward)."""
+    gap_a, gap_b = upper(a) - lower(a), upper(b) - lower(b)
+    closing = (gap_b - gap_a) / (b - a) if b != a else 0.0
+    return a - gap_a / closing if closing < 0 else math.inf
+
+
 def _first_close_through(close: np.ndarray, start: int, end: int, level, side: int) -> int | None:
     """First bar in (start, end] that closed beyond ``level(i)`` in direction ``side``."""
     for i in range(start + 1, end + 1):
@@ -213,15 +242,18 @@ def patterns(features: pd.DataFrame, points: list[Swing], upto: int | None = Non
     known_at = points[-1].i + SWING_BARS  # the bar on which the newest swing was confirmed
 
     def add(
-        kind, side, neckline, first: Swing, last: Swing, height: float, lines: list, invalid=None
-    ) -> bool:
-        """Record the pattern unless it is old, or price closed beyond ``invalid`` before the break."""
+        kind, side, neckline, first: Swing, last: Swing, height: float, lines: list, invalid=None,
+        until: float = math.inf,
+    ) -> bool:  # fmt: skip
+        """Record the pattern unless it is old, or price closed beyond ``invalid`` before the break.
+        A break only counts before bar ``until`` (a triangle's apex)."""
         if end - last.i > PATTERN_RECENT_BARS:
             return False
         confirmed_at = last.i + SWING_BARS  # the pattern exists from the bar its last swing is known
         if confirmed_at > end:
             return False
-        broke = _first_close_through(close, confirmed_at - 1, end, neckline, side) if side else None
+        search_to = end if math.isinf(until) else min(end, math.ceil(until) - 1)
+        broke = _first_close_through(close, confirmed_at - 1, search_to, neckline, side) if side else None
         if broke is not None and end - broke > CONFIRMED_RECENT_BARS:
             return False
         if invalid is not None:  # e.g. a double top whose highs were taken out before the neckline broke
@@ -229,11 +261,12 @@ def patterns(features: pd.DataFrame, points: list[Swing], upto: int | None = Non
             if beyond is not None and (broke is None or beyond < broke):
                 return False
         level = neckline(broke if broke is not None else end)
+        stop_at = min(end, until, broke + LINE_AFTER_BREAK_BARS if broke is not None else end)
         found.append({
             "kind": kind, "name": NAMES[kind], "side": side,
             "status": "confirmed" if broke is not None else "forming",
             "neckline": float(level), "target": float(level + side * height) if side else None,
-            "start": first.i, "end": last.i, "broke": broke, "lines": lines,
+            "start": first.i, "end": last.i, "broke": broke, "lines": _clip(lines, stop_at),
             "record": RECORD["triangle" if kind.endswith("triangle") else kind],
         })  # fmt: skip
         return True
@@ -260,7 +293,8 @@ def patterns(features: pd.DataFrame, points: list[Swing], upto: int | None = Non
         head_out = (
             p2.price > max(p1.price, p3.price) + equal if up else p2.price < min(p1.price, p3.price) - equal
         )
-        if head_out and abs(p1.price - p3.price) <= 2 * equal:
+        level_neck = abs(t1.price - t2.price) <= NECKLINE_MAX_ATR * atr  # a neckline, not a trend line
+        if head_out and abs(p1.price - p3.price) <= 2 * equal and level_neck:
             neckline = lambda i, a=t1, b=t2: _line(a, b, i)  # noqa: E731
             if add("head_shoulders" if up else "inverse_head_shoulders", -1 if up else 1, neckline, p1, p3,
                    abs(p2.price - _line(t1, t2, p2.i)), [[t1.i, t1.price, end, _line(t1, t2, end)]],
@@ -281,10 +315,12 @@ def patterns(features: pd.DataFrame, points: list[Swing], upto: int | None = Non
         if kind:
             upper = lambda i, a=h1, b=h2: _line(a, b, i)  # noqa: E731
             lower = lambda i, a=l1, b=l2: _line(a, b, i)  # noqa: E731
-            up_break = _first_close_through(close, known_at - 1, end, upper, 1)
-            down_break = _first_close_through(close, known_at - 1, end, lower, -1)
+            apex = _apex(upper, lower, points[-4].i, points[-1].i)
+            last_bar = end if math.isinf(apex) else min(end, math.ceil(apex) - 1)  # after the apex: no break
+            up_break = _first_close_through(close, known_at - 1, last_bar, upper, 1)
+            down_break = _first_close_through(close, known_at - 1, last_bar, lower, -1)
             breaks = sorted((i, s) for i, s in ((up_break, 1), (down_break, -1)) if i is not None)
-            if breaks or upper(end) > lower(end):  # broken, or the lines have not met yet
+            if breaks or end < apex:  # broken before the apex, or the lines have not met yet
                 lean = {"ascending_triangle": 1, "descending_triangle": -1}.get(kind, 0)
                 side = breaks[0][1] if breaks else lean  # symmetrical: no direction until it breaks
                 lines = [[h1.i, h1.price, end, upper(end)], [l1.i, l1.price, end, lower(end)]]
@@ -297,12 +333,14 @@ def patterns(features: pd.DataFrame, points: list[Swing], upto: int | None = Non
                         points[-1],
                         h1.price - l1.price,
                         lines,
+                        until=apex,
                     )
                 elif end - points[-1].i <= PATTERN_RECENT_BARS:
                     found.append({
                         "kind": kind, "name": NAMES[kind], "side": 0, "status": "forming",
                         "neckline": float(upper(end)), "target": None, "start": points[-4].i,
-                        "end": points[-1].i, "broke": None, "lines": lines, "record": RECORD["triangle"],
+                        "end": points[-1].i, "broke": None, "lines": _clip(lines, min(end, apex)),
+                        "record": RECORD["triangle"],
                     })  # fmt: skip
     return found
 

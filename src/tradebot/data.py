@@ -110,13 +110,20 @@ def load_spec(data_dir: Path, symbol: str) -> SymbolSpec:
 def preset_spec(symbol: str) -> SymbolSpec:
     """Typical contract specs when no broker export is available. Prefer `tradebot fetch` specs."""
     s = symbol.upper()
-    if s.startswith(("XAU", "GOLD")):
+    if s.startswith(("XAUUSD", "GOLD")):
         return SymbolSpec(symbol, 2, 0.01, 0.01, 1.0, 100, 0.01, 100, 0.01, 0, "XAU", "USD")
-    if s.startswith(("XAG", "SILVER")):
+    if s.startswith(("XAGUSD", "SILVER")):
         return SymbolSpec(symbol, 3, 0.001, 0.001, 5.0, 5000, 0.01, 100, 0.01, 0, "XAG", "USD")
-    if s.startswith(("BTC", "ETH", "SOL", "LTC", "XRP", "ADA", "LINK")):
-        return SymbolSpec(symbol, 2, 0.01, 0.01, 0.01, 1, 0.01, 100, 0.01, 0, s[:3], "USD")
+    for asset in ("BTC", "ETH", "SOL", "LTC", "XRP", "ADA", "LINK"):
+        if s.startswith(f"{asset}USD"):
+            return SymbolSpec(symbol, 2, 0.01, 0.01, 0.01, 1, 0.01, 100, 0.01, 0, asset, "USD")
     base, quote = s[:3], s[3:6]
+    currencies = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "NOK", "SEK", "DKK",
+                  "SGD", "HKD", "CNH", "CNY", "ZAR", "MXN", "TRY", "PLN", "HUF", "CZK"}  # fmt: skip
+    if base not in currencies or quote not in currencies or base == quote:
+        raise ValueError(
+            f"no contract spec preset for {symbol}; run `tradebot fetch` to export its broker spec"
+        )
     if quote == "JPY":
         return SymbolSpec(symbol, 3, 0.001, 0.001, 0.67, 100_000, 0.01, 100, 0.01, 0, base, quote)
     return SymbolSpec(symbol, 5, 0.00001, 0.00001, 1.0, 100_000, 0.01, 100, 0.01, 0, base, quote)

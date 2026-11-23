@@ -27,6 +27,7 @@ import os
 import queue
 import re
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,6 +37,11 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 API = "https://api.telegram.org/bot{token}/{method}"
+BACKLOG_RETRY_SECONDS = (5, 15, 30, 60, 300)
+"""Waits between tries to reach Telegram before reading commands (the last one repeats): they are
+not read until it answers."""
+COMMAND_GRACE_SECONDS = 60
+"""A command sent this long before the listener started (clock differences) is still acted on."""
 TOKEN_ENV, CHAT_ENV = "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"
 
 WHATSAPP_API = "https://api.callmebot.com/whatsapp.php"
@@ -111,6 +117,9 @@ class Notifier:
         self._handler: Callable[[str], str] | None = None
         self._poll = 25
         self._closing = threading.Event()
+        self._since: float | None = None
+        """When listening began (epoch seconds): a command sent before it is never acted on."""
+        self._clock: Callable[[], float] = time.time
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None, **kwargs: Any) -> Notifier:
@@ -146,7 +155,10 @@ class Notifier:
                     self._opener, timeout=wait + 10) or []  # fmt: skip
 
     def _listen(self) -> None:
+        self._since = self._clock()
         offset = self._skip_backlog()
+        if offset is None:
+            return  # closed before Telegram could be reached
         while not self._closing.is_set():
             try:
                 updates = self._updates(offset, self._poll)
@@ -158,18 +170,36 @@ class Notifier:
                 offset = max(offset, int(update.get("update_id", 0)) + 1)
                 self.handle(update)
 
-    def _skip_backlog(self) -> int:
-        try:
-            waiting = self._updates(-1, 0)
-        except TelegramError:
-            return 0
-        return int(waiting[-1].get("update_id", 0)) + 1 if waiting else 0
+    def _skip_backlog(self) -> int | None:
+        """The first update id after those already waiting. Until Telegram answers, commands are
+        not read at all: reading from 0 after a failed first try replayed old commands (a stale
+        "/equity Main 10000" reset an account). None if the listener closed first."""
+        attempt = 0
+        while True:
+            try:
+                waiting = self._updates(-1, 0)
+            except TelegramError as exc:
+                log.debug("Telegram commands not started yet: %s", exc)
+                wait = BACKLOG_RETRY_SECONDS[min(attempt, len(BACKLOG_RETRY_SECONDS) - 1)]
+                attempt += 1
+                if self._closing.wait(wait):
+                    return None
+                continue
+            return int(waiting[-1].get("update_id", 0)) + 1 if waiting else 0
 
     def handle(self, update: dict[str, Any]) -> None:
         """One incoming update. Only a /command from the configured chat is acted on."""
         message = update.get("message") or {}
         text = str(message.get("text") or "")
         if str((message.get("chat") or {}).get("id")) != str(self.chat_id) or not text.startswith("/"):
+            return
+        sent = message.get("date")
+        if (
+            self._since is not None
+            and isinstance(sent, (int, float))
+            and sent < self._since - COMMAND_GRACE_SECONDS
+        ):
+            log.info("Telegram command sent before tradebot started, not acted on: %s", text.split()[0])
             return
         try:
             reply = self._handler(text) if self._handler else ""

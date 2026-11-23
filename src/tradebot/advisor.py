@@ -17,12 +17,13 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from tradebot import smc
 from tradebot.broker.base import SymbolSpec, Tick
 from tradebot.config import ScheduleParams, StrategyParams, SymbolParams
 from tradebot.engine import Engine, Rejection, stop_distances
 from tradebot.indicators import rsi
 from tradebot.signal_quality import quality_checks
-from tradebot.strategy import BLOCK_LABELS, FILTERS, _near_fib, explain, trend_columns
+from tradebot.strategy import BLOCK_LABELS, FAILED_BREAK_BARS, FILTERS, _near_fib, explain, trend_columns
 
 WORD = {1: "BUY", -1: "SELL"}
 
@@ -85,6 +86,9 @@ class Advice:
     """What the bar that is still forming would do: see ``early_warning``."""
     failed_break: dict | None = None
     """A break in the last few bars that has closed back through its level: see ``failed_break``."""
+    cautions: list[dict] = field(default_factory=list)
+    """What argues against a trade on ``side`` now: a sweep the other way, an opposite supply or
+    demand zone or fair value gap (``smc.cautions``). At an opposite zone no join is offered."""
 
 
 def next_entry_time(schedule: ScheduleParams, after: datetime, bar: timedelta) -> datetime | None:
@@ -217,6 +221,7 @@ def advise(
         "last_trigger": last_trigger(features, params, tick, config.bar_minutes),
         "early": early_warning(features, preview, params, spec, config.bar_minutes),
         "failed_break": failed_break(features, config.bar_minutes),
+        "cautions": smc.cautions(features, preview, side, spec.digits, config.bar_minutes),
     }
 
     if signal:
@@ -265,8 +270,9 @@ def advise(
     return Advice(symbol, "WAIT", "No setup yet", trigger, actionable=False, **common)
 
 
-JOIN_WINDOW_BARS = 5
-"""How many bars after a taken signal it still made sense to join it at the market.
+JOIN_WINDOW_BARS = StrategyParams.join_window_bars
+"""How many bars after a taken signal it still made sense to join it at the market: the default
+of ``strategy.join_window_bars``, which the dashboard's JOIN and the bot's ``auto_join`` both use.
 
 Measured on the stored H1 history of the six configured symbols inside the trading hours
 (``scripts/research_late_entry.py``), with a fresh stop and target from the late entry: entering
@@ -311,24 +317,45 @@ def _trend_advice(
         n, price = ours["bars_ago"], f"{ours['price']:.{spec.digits}f}"
         moved = f"{abs(ours['r_since']):.1f}R {'its way' if ours['r_since'] >= 0 else 'against it'}"
         said = f"The bot signalled {word.upper()} {_bars_ago(n)} at {price}; price has moved {moved} since."
-        if n <= JOIN_WINDOW_BARS:
-            left = JOIN_WINDOW_BARS - n
-            until = ours["time"] + bar * JOIN_WINDOW_BARS
+        window_bars = p.join_window_bars
+        if n <= window_bars:
+            # Measured in both periods (smc.RECORD): joins at an opposite zone, or within a few bars of a
+            # closed sweep against the trend, did worse. A sweep on the bar still forming is only a warning.
+            measured = {
+                "zone": "Joining a trend at an opposite zone did clearly worse in the stored history (-0.13R to "
+                "-0.15R a trade, against -0.03R to -0.06R elsewhere).",
+                "sweep": "Joining a trend just after a sweep against it did worse in the stored history (-0.08R "
+                "to -0.09R a trade, against -0.03R to -0.06R elsewhere).",
+            }
+            # the cautions were judged for common["side"]; on this path it is the trend's side too
+            judged = common["cautions"] if common["side"] == side else []
+            stop = [c for c in judged if c["key"] in measured and not c["forming"]]
+            if stop:
+                why = " ".join(c["text"] for c in stop) + " " + " ".join(measured[c["key"]] for c in stop)
+                return Advice(
+                    symbol, "TREND", f"{name}: don't join here",
+                    f"{said} {why} Wait for the next {word} entry: {common['trigger']}",
+                    actionable=False, **fields,
+                )  # fmt: skip
+            left = window_bars - n
+            until = ours["time"] + bar * window_bars
             window = (
                 f"for {left} more bar{'' if left == 1 else 's'} (until {until:%H:%M} UTC)"
                 if left
                 else "until this bar closes"
             )
             return Advice(
-                symbol, "JOIN", f"{name}: you can still join the {word}",
-                f"{said} In the stored history, joining up to {JOIN_WINDOW_BARS} bars after a signal did about as "
-                f"well as taking it on time, so the plan still applies {window}. The stop and target are measured "
-                f"from your entry, not the bot's.",
+                symbol, "JOIN",
+                f"{name}: you can still join the {word}" + (" (see caution)" if common["cautions"] else ""),
+                f"{said} In the stored history, joining up to {JOIN_WINDOW_BARS} bars after a signal did about "
+                f"as well as taking it on time, so the plan still applies {window}. The stop and target are "
+                f"measured from your entry, not the bot's.",
                 actionable=False, **fields,
             )  # fmt: skip
         return Advice(
             symbol, "TREND", f"{name}: too late to join this {word}",
-            f"{said} Joining more than {JOIN_WINDOW_BARS} bars after a signal lost money in the stored history "
+            f"{said} Joining more than {window_bars} bars after a signal is outside the join window; ten bars "
+            f"late lost money in the stored history "
             f"(about -0.1R a trade). Wait for the next {word} entry: {common['trigger']}",
             actionable=False, **fields,
         )  # fmt: skip
@@ -404,7 +431,7 @@ def failed_break(features: pd.DataFrame, bar_minutes: int) -> dict | None:
     break has replaced it. Only the breakout and retest setups track this."""
     if "failed_side" not in features.columns:
         return None
-    recent = features.tail(TRIGGER_LOOKBACK)
+    recent = features.tail(FAILED_BREAK_BARS)
     failed = recent[recent["failed_side"].fillna(0) != 0]
     if failed.empty:
         return None
@@ -504,11 +531,13 @@ def trade_plan(
     row: pd.Series,
     tick: Tick,
     side: int,
+    caps: bool = True,
 ) -> TradePlan:
-    """Entry at the live price, stop and target at the engine's distances, sized by the engine."""
+    """Entry at the live price, stop and target at the engine's distances, sized by the engine.
+    ``caps`` False: without the open-risk and margin caps (``Engine.plan_entry``)."""
     spread = tick.ask - tick.bid
     entry = tick.ask if side > 0 else tick.bid
-    sized = engine.plan_entry(symbol, spec, params, row, spread, side)
+    sized = engine.plan_entry(symbol, spec, params, row, spread, side, caps=caps)
     if isinstance(sized, Rejection):
         sl, tp = stop_distances(spec, params.risk, float(row["atr"]), spread)
         volume = risk = reward = percent = 0.0

@@ -32,6 +32,8 @@ from tradebot.strategy import explain
 
 log = logging.getLogger(__name__)
 
+SIGNALS_ONLY = "signals only (risk.auto_trade is off for this symbol): place it yourself if you want it"
+
 
 @dataclass(frozen=True)
 class Event:
@@ -128,6 +130,12 @@ class Engine:
     def news(self) -> NewsCalendar | None:
         return self._news
 
+    def forget_account(self) -> None:
+        """The terminal switched accounts: the loss limits are read again from the new account's
+        history (the days before today were kept from the old one)."""
+        self._older_deals = None
+        self._acted_bar.clear()
+
     def _specs(self, positions: list[Position]) -> dict[str, SymbolSpec]:
         """Specs of the instruments held. With every trade on the account counted, that can be one
         the bot does not watch; an unavailable spec makes portfolio risk unmeasurable."""
@@ -164,12 +172,19 @@ class Engine:
             ):
                 row = row.copy()
                 row["signal"] = row["exit_signal"] = 0
+                if "join_signal" in row:
+                    row["join_signal"] = 0  # a stale bar is joined no more than it is traded
         self._manage(symbol, spec, params, row, spread, now)
         bar_time = row["time"]
         if self._acted_bar.get(symbol) == bar_time:
             return  # each bar's signal is acted on once, however often we poll
         self._acted_bar[symbol] = bar_time
+        if self.live and not params.risk.auto_trade:  # signals only: the loop never enters it
+            if row["signal"] != 0:
+                self._signal_only(symbol, spec, params, row, spread, now)
+            return
         if row["signal"] == 0:
+            self._join(symbol, spec, params, row, spread, now)
             return
         reason = self.entry_blocker(symbol, spec, params, row, spread, now)
         if reason:
@@ -179,6 +194,75 @@ class Engine:
             )
             return
         self._enter(symbol, spec, params, row, spread, now)
+
+    def _signal_only(
+        self,
+        symbol: str,
+        spec: SymbolSpec,
+        params: SymbolParams,
+        row: pd.Series,
+        spread: float,
+        now: datetime,
+    ) -> None:
+        """A signal on a signals-only symbol (``risk.auto_trade`` off): its priced plan as a
+        "signal" event for your phone, never an order. One the entry guards would have skipped
+        (hours, news, loss limits, positions, spread) is logged as a skip, as for the bot's own."""
+        side = 1 if row["signal"] > 0 else -1
+        word = "BUY" if side > 0 else "SELL"
+        reason = self.entry_blocker(symbol, spec, params, row, spread, now)
+        if reason:
+            self._emit(now, "skip", symbol, f"{word.lower()} signal skipped: {reason} ({SIGNALS_ONLY})")
+            return
+        tick = self.broker.tick(symbol)
+        entry = tick.ask if side > 0 else tick.bid
+        plan = self.plan_entry(symbol, spec, params, row, spread, side)
+        if isinstance(plan, Rejection):
+            sl, tp = stop_distances(spec, params.risk, float(row["atr"]), spread)
+            size = f"no size at your risk per trade: {plan.message}"
+        else:
+            sl, tp = plan.sl_distance, plan.tp_distance
+            size = f"{plan.volume:g} lots, {plan.risk_amount:,.2f} at the stop ({params.risk.risk_percent:g}% risk)"
+        digits = spec.digits
+        detail = (
+            f"{word} signal · signals only: the bot does not trade {symbol}; place it yourself if you want it\n"
+            f"{explain(row, params.strategy)}\n"
+            f"Entry ~{entry:.{digits}f} · SL {entry - side * sl:.{digits}f} · TP {entry + side * tp:.{digits}f} · {size}"
+        )
+        self._emit(now, "signal", symbol, detail, side=side, price=entry)
+
+    def _join(
+        self,
+        symbol: str,
+        spec: SymbolSpec,
+        params: SymbolParams,
+        row: pd.Series,
+        spread: float,
+        now: datetime,
+    ) -> None:
+        """Join a running trend after its signal (``strategy.auto_join``): once per signal, and
+        never after a trade was already entered on the symbol since that signal (the signal's own
+        trade, a stopped-out one, or one placed by hand)."""
+        value = row.get("join_signal", 0) if params.strategy.auto_join else 0
+        side = int(value) if value is not None and pd.notna(value) else 0  # NaN: a frame without joins
+        signal_at = row.get("join_from")
+        if not side or signal_at is None or pd.isna(signal_at):
+            return
+        signal_close = (
+            pd.Timestamp(signal_at) + pd.Timedelta(minutes=self.config.bar_minutes)
+        ).to_pydatetime()
+        if any(d.entry == "in" and d.symbol == symbol and d.time >= signal_close
+               for d in self.broker.deals(signal_close, self.scope)):  # fmt: skip
+            return  # that signal already had its trade
+        if any(p.symbol == symbol for p in self.broker.positions(self.scope)):
+            return  # in the market already
+        word = "buy" if side > 0 else "sell"
+        reason = self.entry_blocker(symbol, spec, params, row, spread, now)
+        if reason:
+            self.skips[reason.split(":")[0]] += 1
+            self._emit(now, "skip", symbol, f"join of the {word} signal skipped: {reason}")
+            return
+        self._enter(symbol, spec, params, row, spread, now, side=side,
+                    why=f"joining the {word} signal of {pd.Timestamp(signal_at):%d %b %H:%M} UTC")  # fmt: skip
 
     # --- position management ------------------------------------------------------------------
 
@@ -199,10 +283,12 @@ class Engine:
             exit_signal = row["signal"]  # legacy or mixed supplied backtest frames
         for position in [p for p in self.broker.positions(self.config.magic) if p.symbol == symbol]:
             price = bid if position.side == BUY else bid + spread
+            in_profit = (price - position.price_open) * position.side > 0
             if (
                 m.close_on_reverse
                 and exit_signal == -position.side
                 and _bar_close(row, self.config) > position.time_open
+                and (in_profit or not m.reverse_exit_in_profit_only)
             ):
                 self._close(position, None, now, "opposite signal")
                 continue
@@ -256,7 +342,9 @@ class Engine:
         """The first account/schedule guard that forbids a new entry right now, or None."""
         r, sched = params.risk, self.config.schedule
 
-        if self.live and Path(self.config.kill_switch_file).exists():
+        # An empty setting means no kill-switch file: Path("") is the working folder, which always
+        # exists, so it paused every entry for good.
+        if self.live and self.config.kill_switch_file and Path(self.config.kill_switch_file).exists():
             return f"kill switch: {self.config.kill_switch_file} exists"
         if self.live:
             quote_problem = self.broker.tick(symbol).problem(now)
@@ -420,10 +508,13 @@ class Engine:
         row: pd.Series,
         spread: float,
         side: int,
+        caps: bool = True,
     ) -> EntryPlan | Rejection:
         """Stop/target distances, volume and portfolio checks for a new position on ``side``.
 
         Shared by the engine and the advisor dashboard, so the advice is the trade the bot takes.
+        ``caps`` False leaves out the open-risk and margin caps (the size per trade still holds):
+        for a trade you take over the bot's limits from the dashboard ("Get in").
         """
         r = params.risk
         atr_ = float(row["atr"])
@@ -454,8 +545,28 @@ class Engine:
         size = position_size(spec, account.equity, sl_distance, r, tick_value)
         if not size.ok:
             return Rejection("size", size.reason)
+        planned = EntryPlan(
+            symbol=symbol,
+            side=side,
+            volume=size.volume,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            risk_amount=exact[0] * size.volume if exact else size.risk_amount,
+            reward_amount=(exact[1] if exact else loss_per_lot(spec, tp_distance)) * size.volume,
+            equity=account.equity,
+            reason=explain(row, params.strategy) if row.get("raw_signal", 0) else "",
+        )
+        if not caps:
+            return planned
         positions = self.broker.positions(self.scope)
         committed = open_risk(positions, self._specs(positions))
+        if not math.isfinite(committed):  # said as it is: "would exceed 3%" hid the real reason
+            stopless = [p.symbol for p in positions if not p.sl]
+            return Rejection(
+                "portfolio risk",
+                f"an open trade has no stop loss ({', '.join(stopless) or 'unknown'}), so the open risk "
+                "cannot be measured",
+            )
         if (committed + size.risk_amount) / account.equity * 100 > r.max_total_risk_percent + 1e-9:
             return Rejection("portfolio risk", f"open risk would exceed {r.max_total_risk_percent}%")
         margin = self.broker.margin_required(symbol, side, size.volume)
@@ -469,17 +580,7 @@ class Engine:
             projected = (account.margin + margin) / account.equity * 100
             if projected > r.max_margin_percent:
                 return Rejection("margin", f"margin would reach {projected:.0f}%")
-        return EntryPlan(
-            symbol=symbol,
-            side=side,
-            volume=size.volume,
-            sl_distance=sl_distance,
-            tp_distance=tp_distance,
-            risk_amount=exact[0] * size.volume if exact else size.risk_amount,
-            reward_amount=(exact[1] if exact else loss_per_lot(spec, tp_distance)) * size.volume,
-            equity=account.equity,
-            reason=explain(row, params.strategy) if row.get("raw_signal", 0) else "",
-        )
+        return planned
 
     def _exact_pnl(
         self, symbol: str, spec: SymbolSpec, side: int, sl_distance: float, tp_distance: float
@@ -516,15 +617,17 @@ class Engine:
         row: pd.Series,
         spread: float,
         now: datetime,
+        side: int | None = None,
+        why: str = "",
     ) -> None:
-        side = int(row["signal"])
+        side = int(row["signal"]) if side is None else side
         plan = self.plan_entry(symbol, spec, params, row, spread, side)
         if isinstance(plan, Rejection):
             self.skips[plan.key] += 1
             self._emit(now, "skip", symbol, f"signal skipped: {plan.message}")
             return
 
-        reason, volume = plan.reason, plan.volume
+        reason, volume = (why or plan.reason), plan.volume
         word = "BUY" if side > 0 else "SELL"
         if not self.execute:
             self._emit(
@@ -546,11 +649,14 @@ class Engine:
             self._emit(now, "rejected", symbol, f"{word} rejected: {result.message}", side, volume)
             self._journal(now, "REJECTED", symbol, side, volume, None, None, result.message)
             return
+        if result.partial and result.volume:
+            volume = result.volume  # the rest was cancelled: the position is what was filled
+            reason = f"{reason} · {result.message}"
         self._emit(
             now, "open", symbol, f"{word} {volume} @ {result.price} · {reason}", side, volume, result.price
         )
-        levels = self._levels(spec, plan, result.price) if result.price else (None, None)
-        self._journal(now, "OPEN", symbol, side, volume, result.price, result.ticket, reason, *levels)
+        sl, tp = self._levels(spec, plan, result.price) if result.price else (None, None)
+        self._journal(now, "OPEN", symbol, side, volume, result.price, result.ticket, reason, sl, tp)
 
     @staticmethod
     def _levels(spec: SymbolSpec, plan: EntryPlan, entry: float) -> tuple[float, float]:
@@ -567,6 +673,9 @@ class Engine:
             return
         result = self.broker.close(position, volume, self.config.magic, why)
         detail = f"{kind} #{position.ticket} ({why})" + ("" if result.ok else f" failed: {result.message}")
+        if result.partial and result.volume:
+            kind, volume = "partial", result.volume  # only part of it closed: the rest is still open
+            detail = f"{detail} · {result.message}"
         self._emit(
             now,
             kind if result.ok else "rejected",

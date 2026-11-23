@@ -11,9 +11,11 @@ Security, because one endpoint places orders:
 
 from __future__ import annotations
 
+import gzip
 import hmac
 import json
 import logging
+import math
 import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +29,10 @@ log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-Tradebot-Token"
 MAX_BODY = 4096
+GZIP_MIN_BYTES = 1024
+"""Larger responses are gzipped for clients that accept it (every browser does). Not for speed:
+on this PC Avast's web scanning holds plain HTTP responses over about 130 KB for 19 s and then
+resets the connection, which left the 187 KB dashboard page half loaded. Gzipped, it is ~50 KB."""
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
@@ -141,17 +147,56 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST, result)
         try:
             body = json.loads(raw or b"{}")
-            symbol, side = str(body["symbol"]), int(body["side"])
-            manual = body.get("manual") is True
+            if not isinstance(body, dict):
+                raise ValueError("expected an object")
+            duplicate = body.get("duplicate")
+            request_id = body.get("request_id") or ""
+            if not isinstance(request_id, str) or len(request_id) > 64:
+                raise ValueError("request_id must be a short string")
+            volume = body.get("volume")  # "Your size": the lots you typed (a manual order only)
+            if volume is not None:
+                if type(volume) not in (int, float) or not math.isfinite(volume) or volume <= 0:
+                    raise ValueError("volume must be a positive number of lots")
+                volume = float(volume)
+            if duplicate is not None:  # copy the bot's open trade with this ticket, as your own call
+                if type(duplicate) is not int:
+                    raise ValueError("duplicate must be a trade's ticket number")
+                if volume is not None:
+                    raise ValueError("a duplicate copies the trade's own lots")
+                symbol, side, manual, override = "", 0, True, False
+            else:
+                symbol, side = str(body["symbol"]), int(body["side"])
+                manual = body.get("manual") is True
+                override = body.get("override") is True  # "Get in": over the bot's limits
         except (ValueError, KeyError, TypeError) as exc:
             return self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": f"bad request: {exc}"})
-        result = self.server.monitor.submit(symbol, side, manual)
-        self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT, result)
+        result = self.server.monitor.submit(
+            symbol, side, manual, override=override, duplicate=duplicate, request_id=request_id, volume=volume
+        )
+        status = (
+            HTTPStatus.OK
+            if result.get("ok")
+            else HTTPStatus.ACCEPTED
+            if result.get("pending")
+            else HTTPStatus.CONFLICT
+        )
+        self._json(status, result)
 
     def _host_ok(self) -> bool:
         if (self.headers.get("Host") or "").lower() in self.server.allowed_hosts():
             return True
         self._json(HTTPStatus.FORBIDDEN, {"error": "unexpected Host header"})
+        return False
+
+    def _accepts_gzip(self) -> bool:
+        for part in (self.headers.get("Accept-Encoding") or "").split(","):
+            name, _, params = part.strip().partition(";")
+            if name.strip().lower() == "gzip":
+                q = params.strip().lower().removeprefix("q=").strip()
+                try:
+                    return not q or float(q) > 0  # "q=0" turns it off
+                except ValueError:
+                    return False
         return False
 
     def _json(self, status: HTTPStatus, payload: Any) -> None:
@@ -161,6 +206,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        self.send_header("Vary", "Accept-Encoding")
+        if len(body) >= GZIP_MIN_BYTES and self._accepts_gzip():
+            body = gzip.compress(body, compresslevel=6)
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
         for name, value in SECURITY_HEADERS.items():
             self.send_header(name, value)

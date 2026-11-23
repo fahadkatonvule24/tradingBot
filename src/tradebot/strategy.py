@@ -38,6 +38,11 @@ BLOCK_LABELS = {
 }
 
 
+FAILED_BREAK_BARS = 12
+"""A failed break stays news for this many bars: the dashboard says so instead of offering a join,
+and the bot does not join (``advisor.failed_break``, ``join_signals``)."""
+
+
 FX_DAY_START_NEW_YORK = pd.Timedelta(hours=17)
 """The FX trading day starts at 17:00 New York, which is 00:00 on most brokers' server clocks."""
 
@@ -322,7 +327,65 @@ def compute_signals(
             passed &= ok
     df["signal"] = raw.where(passed, 0).astype("int8")
     df["block"] = block
+    if p.auto_join:
+        df[["join_signal", "join_from"]] = join_signals(df, p)
     return df
+
+
+def join_signals(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
+    """Where the trend can still be joined, bar by bar, from closed bars only: the dashboard's
+    JOIN (``advisor._trend_advice``), so the bot joins exactly where a person is told they can.
+
+    ``join_signal`` is the side of the newest entry trigger when that trigger was a taken signal
+    1 to ``join_window_bars`` bars earlier (a newer trigger, even a filtered one, replaces it), the
+    trend still runs that way (the higher timeframes and the averages agree), the break it rode has
+    not failed (``failed_side``, breakout and retest), and neither measured caution stands against
+    it: an opposite supply/demand zone, or a closed sweep against it in the last few bars
+    (``smc.against``). ``join_from`` is that signal's bar time, so a signal is joined at most once.
+    No join without the trend filter."""
+    from tradebot import smc
+
+    n = len(df)
+    side_out = np.zeros(n, dtype=np.int8)
+    from_out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    if not (p.use_trend_filter and "trend" in FILTERS[p.name]) or n == 0:
+        return pd.DataFrame({"join_signal": side_out, "join_from": from_out}, index=df.index)
+    trend = df["trend"].to_numpy()
+    averages = np.sign((df["ema_fast"] - df["ema_slow"]).to_numpy())
+    signal, raw = df["signal"].to_numpy(), df["raw_signal"].to_numpy()
+    close = df["close"].to_numpy(dtype=float)
+    zeros = np.zeros(n)
+    failed_side = df["failed_side"].fillna(0).to_numpy() if "failed_side" in df else zeros
+    failed_level = df["failed_level"].to_numpy(dtype=float) if "failed_level" in df else zeros
+    pending = df["retest_side"].fillna(0).to_numpy() if "retest_side" in df else zeros
+    times = pd.to_datetime(df["time"]).to_numpy()
+    found = smc.scan(df)
+    last_i, last_side, failed_at = -1, 0, -1
+    for i in range(n):
+        # the newest failed break, until a newer break replaces it (advisor.failed_break)
+        if raw[i] != 0 or pending[i] != 0:
+            failed_at = -1
+        if failed_side[i] != 0:
+            failed_at = i
+        if raw[i] != 0:
+            # the newest trigger: a taken one opens a join window, a filtered one closes it
+            last_i, last_side = i, int(signal[i])
+            continue  # a bar with its own trigger is an entry, not a join
+        if last_side == 0 or not 1 <= i - last_i <= p.join_window_bars:
+            continue
+        if trend[i] != last_side or averages[i] != last_side:
+            continue  # the trend the signal belonged to has stopped
+        if (
+            failed_at >= 0
+            and i - failed_at < FAILED_BREAK_BARS
+            and failed_side[failed_at] == last_side
+            and (close[i] - failed_level[failed_at]) * last_side <= 0
+        ):
+            continue  # the break it rode has failed and price is still back through the level
+        if {"zone", "sweep"} & set(smc.against(found, i, last_side)):
+            continue  # measured: joins there did worse in both test periods
+        side_out[i], from_out.iat[i] = last_side, times[last_i]
+    return pd.DataFrame({"join_signal": side_out, "join_from": from_out}, index=df.index)
 
 
 def _near_fib(df: pd.DataFrame, p: StrategyParams, long: pd.Series) -> pd.Series:

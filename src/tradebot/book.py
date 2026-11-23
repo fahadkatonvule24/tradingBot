@@ -13,6 +13,7 @@ calculator answers in. Keep the terminal on an account in the same currency as y
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -55,6 +56,10 @@ CREATE TABLE IF NOT EXISTS book_trades (
 CREATE INDEX IF NOT EXISTS book_trades_account ON book_trades(account, closed_utc);
 CREATE TABLE IF NOT EXISTS book_settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS seen_stops (ticket INTEGER PRIMARY KEY, sl REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS account_seen_stops (
+    login INTEGER NOT NULL, server TEXT NOT NULL, ticket INTEGER NOT NULL, sl REAL NOT NULL,
+    PRIMARY KEY (login, server, ticket)
+);
 """
 
 SIGNAL, OWN_CALL = "signal", "own call"
@@ -155,7 +160,6 @@ class Book:
         if "levels_utc" not in trade_columns:  # a book made before amended stops were dated
             self._db.execute("ALTER TABLE book_trades ADD COLUMN levels_utc TEXT")
             self._db.commit()
-        self._stops: dict[int, float] | None = None
         self.version = 0
         """Goes up on every change, so anything computed from the book knows when to recompute."""
 
@@ -218,21 +222,34 @@ class Book:
                 )
         return self.account(name)  # type: ignore[return-value]
 
-    def seen_stop(self, ticket: int) -> float | None:
-        """The first stop seen on a terminal position, for one that opened without a stop."""
+    def seen_stop(self, ticket: int, account: tuple[int, str] | None = None) -> float | None:
+        """First stop for this account and ticket. Legacy unscoped stops are kept separately:
+        their account is unknown, so they cannot safely be assigned to a connected terminal.
+        Read through to SQLite so the dashboard and trading loop see each other's first stop.
+        """
         with self._lock:
-            if self._stops is None:
-                self._stops = dict(self._db.execute("SELECT ticket, sl FROM seen_stops").fetchall())
-            return self._stops.get(ticket)
+            if account is None:
+                row = self._db.execute("SELECT sl FROM seen_stops WHERE ticket = ?", (ticket,)).fetchone()
+            else:
+                row = self._db.execute(
+                    "SELECT sl FROM account_seen_stops WHERE login = ? AND server = ? AND ticket = ?",
+                    (*account, ticket),
+                ).fetchone()
+            return row[0] if row else None
 
-    def remember_stop(self, ticket: int, sl: float) -> None:
+    def remember_stop(self, ticket: int, sl: float, account: tuple[int, str] | None = None) -> None:
         """Keep the first stop a position was seen with. Not a change to the book: no new version."""
-        if not sl or self.seen_stop(ticket) is not None:
+        if not math.isfinite(sl) or sl <= 0 or self.seen_stop(ticket, account) is not None:
             return
         with self._lock:
-            self._db.execute("INSERT OR IGNORE INTO seen_stops (ticket, sl) VALUES (?, ?)", (ticket, sl))
+            if account is None:
+                self._db.execute("INSERT OR IGNORE INTO seen_stops (ticket, sl) VALUES (?, ?)", (ticket, sl))
+            else:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO account_seen_stops (login, server, ticket, sl) VALUES (?, ?, ?, ?)",
+                    (*account, ticket, sl),
+                )
             self._db.commit()
-            self._stops[ticket] = sl  # type: ignore[index]
 
     def remove_account(self, name: str) -> None:
         account = self._need_account(name)
@@ -320,7 +337,9 @@ class Book:
                 (owner.name, symbol, side, volume, entry, sl, tp, sl, now.isoformat(timespec="seconds"),
                  source, str(note)[:200]),
             )  # fmt: skip
-            return self.trade(int(cursor.lastrowid))
+            if cursor.lastrowid is None:  # sqlite gives the new row's id; None only if nothing was written
+                raise BookError("the trade was not saved")
+            return self.trade(cursor.lastrowid)
 
     def amend(
         self, trade_id: int, sl: float | None, tp: float | None, now: datetime | None = None
@@ -500,17 +519,23 @@ class BookBroker:
             spec, volume_min=own.min_lot or spec.volume_min, volume_step=own.lot_step or spec.volume_step
         )
 
+    def terminal_positions(self, magic: int | None) -> list[Position]:
+        """The terminal's open positions, whichever account is selected here, each with its first
+        stop as 1R: a phone trade often gets its stop after it opened."""
+        account = getattr(self.inner, "account_id", lambda: None)()
+        held = self.inner.positions(magic)
+        opening = getattr(self.inner, "opening", None)
+        for p in held:
+            self.book.remember_stop(p.ticket, p.sl, account)
+            first = self.book.seen_stop(p.ticket, account)
+            if first and opening is not None and not opening(p.ticket)[1]:
+                p.initial_sl = first
+        return held
+
     def positions(self, magic: int | None) -> list[Position]:
         name = self.account_name()
         if name is None:
-            held = self.inner.positions(magic)
-            opening = getattr(self.inner, "opening", None)
-            for p in held:  # a phone trade often gets its stop after it opened: its 1R is that stop
-                self.book.remember_stop(p.ticket, p.sl)
-                first = self.book.seen_stop(p.ticket)
-                if first and opening is not None and not opening(p.ticket)[1]:
-                    p.initial_sl = first
-            return held
+            return self.terminal_positions(magic)
         return [
             Position(
                 ticket=t.id, symbol=t.symbol, side=t.side, volume=t.volume, price_open=t.entry,
@@ -539,9 +564,10 @@ class BookBroker:
     def opening(self, ticket: int) -> tuple[float | None, float | None]:
         """(volume, stop) a position opened with: its 1R, for the review."""
         if self.account_name() is None:
+            account = getattr(self.inner, "account_id", lambda: None)()
             inner = getattr(self.inner, "opening", None)
             volume, stop = inner(ticket) if inner else (None, None)
-            return volume, stop or self.book.seen_stop(ticket)
+            return volume, stop or self.book.seen_stop(ticket, account)
         try:
             trade = self.book.trade(ticket)
         except BookError:

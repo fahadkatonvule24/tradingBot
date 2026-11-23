@@ -97,7 +97,7 @@ class Watch:
 
         for key in ("structure", "failed"):  # a close back beyond the level takes the sign back
             held = signs.get(key)
-            if held is not None and (close - held.level) * side > 0:
+            if held is not None and held.level is not None and (close - held.level) * side > 0:
                 del signs[key]
         if "structure" not in signs:
             edge = _number(row, "range_low" if side > 0 else "range_high")

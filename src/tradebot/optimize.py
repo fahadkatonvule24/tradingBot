@@ -94,7 +94,15 @@ def apply_params(config: BotConfig, params: dict[str, Any]) -> BotConfig:
         section, name = key.split(".", 1)
         sections.setdefault(section, {})[name] = value
     changes = {section: replace(getattr(config, section), **values) for section, values in sections.items()}
-    return replace(config, **changes)
+    # An explicit grid value must actually be tested, even when a symbol overrides the same field.
+    overrides = {
+        symbol: {
+            section: {name: value for name, value in values.items() if name not in sections.get(section, {})}
+            for section, values in parts.items()
+        }
+        for symbol, parts in config.overrides.items()
+    }
+    return replace(config, **changes, overrides=overrides)
 
 
 def expand_grid(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
@@ -166,6 +174,14 @@ def walk_forward(
     jobs: int | None = None,
     htf: dict[tuple[str, str], pd.DataFrame] | None = None,
 ) -> WalkForwardResult:
+    if type(folds) is not int or folds < 1:
+        raise ValueError("folds must be a positive integer")
+    if jobs is not None and (type(jobs) is not int or jobs < 1):
+        raise ValueError("jobs must be a positive integer or omitted")
+    if type(min_trades) is not int or min_trades < 0:
+        raise ValueError("min_trades must be a nonnegative integer")
+    if not data or any(df.empty for df in data.values()):
+        raise ValueError("walk-forward requires nonempty history for every symbol")
     if objective not in OBJECTIVES:
         raise ValueError(f"objective must be one of {', '.join(OBJECTIVES)}")
     setups = set(config.setups().values())  # per-symbol overrides can name another setup
@@ -177,6 +193,8 @@ def walk_forward(
             )
         grid = DEFAULT_GRIDS[next(iter(setups))]
     combos = expand_grid(grid)
+    if not combos:
+        raise ValueError("grid has no parameter combinations to evaluate")
     start = min(df["time"].iloc[0] for df in data.values()).to_pydatetime()
     end = max(df["time"].iloc[-1] for df in data.values()).to_pydatetime()
     windows = split_windows(start, end, folds)
@@ -184,17 +202,27 @@ def walk_forward(
 
     table = _evaluate_all(config, data, specs, windows, combos, jobs, htf)  # [combo][window] -> Metrics
 
+    def best_for(window: int) -> int:
+        scores = [score(row[window], objective, min_trades) for row in table]
+        best = max(range(len(combos)), key=scores.__getitem__)
+        if scores[best] == -math.inf:
+            raise ValueError(
+                f"no qualifying parameter set in training window {window + 1}: "
+                f"min_trades={min_trades} and a valid {objective} score are required"
+            )
+        return best
+
     fold_results: list[Fold] = []
     oos_runs: list[BacktestResult] = []
     for k in range(folds):
-        best = max(range(len(combos)), key=lambda i: score(table[i][k], objective, min_trades))
+        best = best_for(k)
         tuned = apply_params(config, combos[best])
         test_start, test_end = windows[k + 1]
         run = run_backtest(tuned, data, specs, start=test_start, end=test_end, htf=htf)
         oos_runs.append(run)
         fold_results.append(Fold(windows[k], windows[k + 1], combos[best], table[best][k], run.metrics))
 
-    final = max(range(len(combos)), key=lambda i: score(table[i][folds], objective, min_trades))
+    final = best_for(folds)
     equity, trades = _stitch(oos_runs, config.backtest.initial_balance)
     return WalkForwardResult(
         strategy=" + ".join(sorted(setups)),

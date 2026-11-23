@@ -78,8 +78,8 @@ def assess(
     timeframe: str,
     bar_minutes: int,
     now: datetime,
-    quote_time: datetime,
-    price: float,
+    quote_time: datetime | None,
+    price: float | None,
     digits: int,
     max_bar_age_bars: int = 2,
 ) -> dict[str, Any]:
@@ -120,10 +120,13 @@ def assess(
         last = _time(column.iloc[-1])
     else:
         times = [_time(value) for value in column]
-        if any(value is None for value in times):
+        stamps = [value for value in times if value is not None]
+        if len(stamps) != len(times):
             return _unavailable(out, "incomplete", "A bar timestamp is missing or invalid.")
-        ordered = not any(a >= b for a, b in pairwise(times))
-        last = times[-1]
+        ordered = not any(a >= b for a, b in pairwise(stamps))
+        last = stamps[-1]
+    if last is None:
+        return _unavailable(out, "incomplete", "A bar timestamp is missing or invalid.")
     if not ordered:
         return _unavailable(out, "incomplete", "Bar timestamps are duplicated or out of order.")
     bar = timedelta(minutes=bar_minutes)
@@ -144,8 +147,9 @@ def assess(
 
     row = features.iloc[-1]
     required = ("close", "high", "low", "atr", "ema_fast", "ema_slow", "adx", "macd_hist")
-    values = {key: _number(row.get(key)) for key in required}
-    if any(value is None for value in values.values()):
+    numbers = {key: _number(row.get(key)) for key in required}
+    values = {key: value for key, value in numbers.items() if value is not None}
+    if len(values) != len(numbers):
         return _unavailable(out, "incomplete", "Required price or indicator values are still unavailable.")
     close, high, low, atr = (values[key] for key in ("close", "high", "low", "atr"))
     if low <= 0 or atr <= 0 or not low <= close <= high or not 0 <= values["adx"] <= 100:
@@ -281,12 +285,19 @@ def _scenarios(
     if len(features) < 2 or not {"high", "low"}.issubset(features.columns):
         return []
     recent = features.tail(STRUCTURE_BARS)
-    highs, lows = [_number(v) for v in recent["high"]], [_number(v) for v in recent["low"]]
-    if any(value is None for value in [*highs, *lows]) or any(
-        low <= 0 or low > high for low, high in zip(lows, highs)
+    raw_highs, raw_lows = [_number(v) for v in recent["high"]], [_number(v) for v in recent["low"]]
+    highs = [value for value in raw_highs if value is not None]
+    lows = [value for value in raw_lows if value is not None]
+    if (
+        len(highs) != len(raw_highs)
+        or len(lows) != len(raw_lows)
+        or any(low <= 0 or low > high for low, high in zip(lows, highs))
     ):
         return []
-    candidates = [(f"{len(recent)}-bar high", max(highs)), (f"{len(recent)}-bar low", min(lows))]
+    candidates: list[tuple[str, float]] = [
+        (f"{len(recent)}-bar high", max(highs)),
+        (f"{len(recent)}-bar low", min(lows)),
+    ]
     historical = {
         "Previous day high",
         "Previous day low",

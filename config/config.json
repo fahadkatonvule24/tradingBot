@@ -1,5 +1,6 @@
 {
-  "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "XAUUSD"],
+  "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "XAUUSD",
+              "AAPL", "AMD", "META", "NVDA", "MSFT", "AMZN", "GOOGL", "TSLA", "ANT"],
   "timeframe": "H1",
   "history_bars": 1500,
   "poll_seconds": 15,
@@ -15,6 +16,7 @@
 
   "strategy": {
     "name": "ema_cross",
+    "auto_join": false,
     "fast_ema": 10,
     "slow_ema": 50,
     "rsi_period": 14,
@@ -43,13 +45,13 @@
   },
 
   "risk": {
-    "risk_percent": 0.25,
+    "risk_percent": 1.5,
     "sl_atr": 1.5,
     "tp_atr": 3.0,
     "max_spread_atr": 0.25,
     "max_positions_per_symbol": 1,
     "max_total_positions": 3,
-    "max_total_risk_percent": 1.0,
+    "max_total_risk_percent": 3.0,
     "max_margin_percent": 30,
     "daily_loss_limit_percent": 2.0,
     "weekly_loss_limit_percent": 5.0,
@@ -68,11 +70,16 @@
     "partial_tp": true,
     "partial_tp_r": 1.5,
     "partial_tp_fraction": 0.5,
-    "close_on_reverse": true
+    "close_on_reverse": true,
+    "auto_breakeven": true,
+    "auto_trailing": true,
+    "auto_partial": true,
+    "auto_stop": true,
+    "auto_reverse_exit": true
   },
 
   "schedule": {
-    "session": "custom",
+    "session": "all",
     "start_hour_utc": 6,
     "end_hour_utc": 17,
     "news_file": "config/news_blackouts.json",
@@ -89,14 +96,53 @@
 
   "backtest": {
     "initial_balance": 10000,
-    "commission_per_lot": 7.0,
+    "commission_per_lot": 0.0,
     "slippage_points": 0,
     "min_spread_points": 10
   },
 
   "overrides": {
-    "GBPUSD": { "strategy": { "name": "breakout" } },
-    "XAUUSD": { "strategy": { "name": "breakout" }, "backtest": { "min_spread_points": 25 } },
-    "USDJPY": { "backtest": { "min_spread_points": 12 } }
+    "AAPL": { "strategy": { "name": "retest" },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -6.2, "swap_short": -5.1, "swap_triple_day": 4 } },
+    "AMD": { "strategy": { "name": "breakout" },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -7.9, "swap_short": -6.5, "swap_triple_day": 4 } },
+    "AMZN": { "strategy": { "name": "pullback" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -4.5, "swap_short": -3.7, "swap_triple_day": 4 } },
+    "AUDUSD": { "strategy": { "name": "retest" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": 0.0, "swap_short": -2.4, "swap_triple_day": 2, "min_spread_points": 9 } },
+    "EURUSD": { "strategy": { "name": "breakout" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -5.5, "swap_short": 0.0, "swap_triple_day": 2, "min_spread_points": 8 } },
+    "GBPUSD": { "strategy": { "name": "breakout" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -1.4, "swap_short": -1.4, "swap_triple_day": 2, "min_spread_points": 10 } },
+    "GOOGL": { "strategy": { "name": "breakout" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -4.9, "swap_short": -4.1, "swap_triple_day": 4 } },
+    "META": { "strategy": { "name": "pullback" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -10.3, "swap_short": -8.5, "swap_triple_day": 4 } },
+    "MSFT": { "strategy": { "name": "pullback" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -8.8, "swap_short": -7.3, "swap_triple_day": 4 } },
+    "NVDA": { "strategy": { "name": "breakout" },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -2.5, "swap_short": -3.1, "swap_triple_day": 4 } },
+    "TSLA": { "strategy": { "name": "breakout" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -6.4, "swap_short": -5.2, "swap_triple_day": 4 } },
+    "USDCAD": { "strategy": { "name": "breakout" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": 0.0, "swap_short": -5.44, "swap_triple_day": 2, "min_spread_points": 14 } },
+    "USDJPY": { "strategy": { "name": "breakout" },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": 0.0, "swap_short": 0.0, "swap_triple_day": 2, "min_spread_points": 10 } },
+    "XAUUSD": { "strategy": { "name": "breakout" },
+             "risk": { "allow_min_lot_overrisk": true, "max_total_risk_percent": 6.0, "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -43.16, "swap_short": 0.0, "swap_triple_day": 2, "min_spread_points": 24 } },
+    "ANT": { "strategy": { "name": "breakout", "use_trend_filter": false },
+             "risk": { "auto_trade": true },
+             "backtest": { "commission_per_lot": 0.0, "swap_long": -1.6, "swap_short": -1.4, "swap_triple_day": 4 } }
   }
 }

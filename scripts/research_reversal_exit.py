@@ -12,6 +12,16 @@ default settings otherwise, nothing tuned:
   exit   close at the close of the first bar on which the check reaches the "get out" level: the
          opposite signal, or two signs standing together
   warn   close at the close of the first bar on which the check shows any sign at all
+  exit_profit, warn_profit  the same, but only while the trade is in profit at that close (added
+         2026-11-19 for trades placed by hand: "close when the setup turns, if I am ahead")
+
+Result of warn_profit on 2026-11-19, average R per trade, as it is -> closing in profit:
+  H1   ema -0.038 -> -0.034  breakout -0.069 -> -0.066  pullback -0.092 -> -0.059  retest -0.112 -> -0.102
+  M15  ema -0.134 -> -0.129  breakout -0.201 -> -0.194  pullback -0.094 -> -0.102  retest -0.195 -> -0.174
+  M30  ema -0.167 -> -0.143  breakout -0.119 -> -0.130  pullback -0.135 -> -0.150  retest -0.179 -> -0.154
+  M5   ema -0.160 -> -0.097  breakout -0.173 -> -0.168  pullback -0.199 -> -0.172  retest -0.193 -> -0.137
+Better on 13 of 16, win rate up on all 16. EMA cross and retest pass the rule on all four
+timeframes; breakout and pullback do not. exit_profit fired on 0 to 3 trades: no effect.
 
 The check is a warning for a person, and it ships as one whatever these numbers say. They are
 here so the warning comes with what it has been worth. An exit rule would be adopted for the bot
@@ -45,7 +55,9 @@ def manage(self, symbol, spec, params, row, spread, now):
             if watch is None:  # first bar after the entry: the bar before it is the reference
                 watch = WATCHES[position.ticket] = Watch(position.side, PREVIOUS.get(symbol))
             watch.update(row)
-            if watch.level == EXIT or (MODE == "warn" and watch.level):
+            turned = watch.level == EXIT or (MODE.startswith("warn") and watch.level)
+            ahead = (float(row["close"]) - position.price_open) * position.side > 0
+            if turned and (ahead or not MODE.endswith("_profit")):
                 COUNTS["closed"] += 1
                 self._close(position, None, now, "reversal check")
     PREVIOUS[symbol] = row
@@ -61,7 +73,7 @@ for tf in sys.argv[1].split(",") if len(sys.argv) > 1 else ["H1", "M15"]:
     data, specs = load_dataset("data", list(cfg_tf.symbols), tf)
     htf = load_trend_bars("data", cfg_tf)
     for name in ("ema_cross", "breakout", "pullback", "retest"):
-        for mode in ("base", "exit", "warn"):
+        for mode in ("base", "exit", "warn", "exit_profit", "warn_profit"):
             MODE = mode
             WATCHES.clear()
             PREVIOUS.clear()

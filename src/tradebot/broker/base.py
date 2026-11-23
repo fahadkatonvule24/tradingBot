@@ -146,6 +146,10 @@ class OrderResult:
     price: float | None = None
     message: str = ""
     retcode: int | None = None
+    volume: float | None = None
+    """Lots actually filled, when the broker says (less than asked for on a partial fill)."""
+    partial: bool = False
+    """Only part of the order was filled; the rest was cancelled. The filled part is a real position."""
 
 
 @dataclass

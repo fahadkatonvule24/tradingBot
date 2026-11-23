@@ -117,7 +117,8 @@ def test_trading_gate(changes, live_flag, account, terminal, execute):
 def test_shipped_config_is_safe_and_valid():
     config = load_config(ROOT / "config" / "config.json", env={})
     assert config.dry_run and not config.live_trading_confirm and not config.allow_real_account
-    assert config.for_symbol("XAUUSD").backtest.min_spread_points == 25
+    gold = config.for_symbol("XAUUSD").backtest  # Exness Standard's costs (research_setups.py)
+    assert (gold.commission_per_lot, gold.min_spread_points, gold.swap_long) == (0.0, 24, -43.16)
 
 
 def test_unknown_keys_are_rejected():
@@ -185,6 +186,11 @@ def test_backtest_command(workspace, capsys):
 def test_optimize_command(workspace, monkeypatch):
     from tradebot import optimize
 
+    # The 5,000-bar fixture cannot warm EMA200 on H4 within its first training window.
+    path = workspace / "config.json"
+    raw = json.loads(path.read_text())
+    raw["strategy"]["use_trend_filter"] = False
+    path.write_text(json.dumps(raw))
     monkeypatch.setitem(optimize.DEFAULT_GRIDS, "breakout", {"strategy.breakout_period": [20, 40]})
     out = workspace / "out"
     code = main(["-c", str(workspace / "config.json"), "optimize", "--data", str(workspace / "data"), "--strategy", "breakout",

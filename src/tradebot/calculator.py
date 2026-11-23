@@ -63,6 +63,22 @@ def _floor_lots(spec: SymbolSpec, lots: float) -> float:
     return spec.normalize_volume(max(lots, 0.0))
 
 
+def _most_lots(spec: SymbolSpec, room: float, per_lot: float, margin_for: Any = None) -> float:
+    """The most lots whose margin fits in ``room``: from the margin per lot, then checked with the
+    terminal (``margin_for``) and stepped down while its figure is higher (tiered margin)."""
+    if not per_lot or per_lot <= 0 or not math.isfinite(per_lot):
+        return 0.0
+    lots = _floor_lots(spec, room / per_lot)
+    if margin_for is None:
+        return lots
+    for _ in range(50):
+        needed = margin_for(lots) if lots >= spec.volume_min else None
+        if needed is None or needed <= room + 1e-9:
+            break
+        lots = _floor_lots(spec, lots - spec.volume_step)
+    return lots
+
+
 def calculate(
     broker: Broker,
     symbol: str,
@@ -140,15 +156,33 @@ def calculate(
     notional = lots * per_lot_notional
     margin_per_lot = per_lot_notional / leverage
     terminal = broker.margin_required(symbol, side, lots) if lots else None
-    exact = bool(terminal) and int(leverage) == int(account.leverage) and used_margin is None
-    margin = float(terminal) if exact else lots * margin_per_lot
+    same = int(leverage) == int(account.leverage) and used_margin is None  # this account, not a what-if
+    exact = bool(terminal) and same
+    margin = float(terminal) if terminal and exact else lots * margin_per_lot
+
+    # The most lots use the same margin as the trade: the terminal's own (an instrument's own
+    # leverage or a fixed margin per lot) on this account; notional / leverage for a what-if.
+    def margin_for(n: float) -> float | None:
+        if not same or n <= 0:
+            return None
+        value = broker.margin_required(symbol, side, n)
+        return float(value) if value and math.isfinite(value) and value > 0 else None
+
+    unit = margin_for(lots or spec.volume_min)
+    per_lot_margin = unit / (lots or spec.volume_min) if unit else margin_per_lot
     total_margin = used + margin
     free_after = equity - total_margin
     level_after = equity / total_margin * 100 if total_margin > 0 else None
     cap = margin_cap or 0.0
     room = equity * cap / 100 - used
-    max_by_cap = _floor_lots(spec, room / margin_per_lot) if cap and room > 0 else 0.0
-    max_by_free = _floor_lots(spec, (equity - used) / margin_per_lot) if equity > used else 0.0
+    max_by_cap = (
+        _most_lots(spec, room, per_lot_margin, margin_for if unit else None) if cap and room > 0 else 0.0
+    )
+    max_by_free = (
+        _most_lots(spec, equity - used, per_lot_margin, margin_for if unit else None)
+        if equity > used
+        else 0.0
+    )
     if cap and lots and total_margin / equity * 100 > cap + 1e-9:
         warnings.append(
             f"Margin would reach {total_margin / equity * 100:.0f}% of equity, above your cap of {cap:g}%: "
@@ -203,6 +237,7 @@ def calculate(
         "notional": notional,
         "margin": margin,
         "margin_method": "the terminal's own figure" if exact else f"notional / {leverage_text(leverage)}",
+        "max_lots_method": "the terminal's margin" if unit else f"notional / {leverage_text(leverage)}",
         "leverage_label": leverage_text(leverage),
         "account_leverage_label": leverage_text(account.leverage),
         "terminal_margin": float(terminal) if terminal else None,

@@ -59,7 +59,15 @@ and HTML reports. It has been run end to end against a real MT5 terminal.
   `tradebot review` then reports closed trades in R and compares the bot's signals with trades
   placed by hand.
 - **Manages open trades:** partial take-profit, breakeven, ATR trailing stop, exit on an opposite
-  signal, and an optional time stop. Stops only ever tighten.
+  signal, and an optional time stop. Stops only ever tighten. While the dashboard runs, trades
+  placed by hand get breakeven at +1R (`management.auto_breakeven`) and the 2 ATR trail from +1.5R
+  (`management.auto_trailing`) too, if they have a stop and algo trading is on in the terminal.
+  On the bot's signals the trail made no difference with the 2R target and tighter trails did
+  worse (`scripts/research_trailing.py`); it locks in more only when a trade runs well past 1.5R.
+  Also for hand-placed trades, each with its switch: a stop at 1.5 ATR for a trade still without
+  one after two minutes (`auto_stop`), half closed at +1.5R (`auto_partial`), and the whole trade
+  closed when a reversal sign is confirmed while it is in profit (`auto_reverse_exit`: better on
+  13 of 16 setup/timeframe runs, all four setups on H1; `scripts/research_reversal_exit.py`).
 - **Backtests realistically:** bid/ask spread, slippage, commission on actual lot size, gaps
   through stops, conservative intrabar fills, and multi-symbol portfolios.
 - **Walk-forward optimisation** in parallel, reporting out-of-sample results only.
@@ -101,7 +109,50 @@ No MetaTrader terminal? `python scripts/make_demo_data.py --out demo-data`, then
 `tradebot backtest --data demo-data --timeframe M15 --symbols EURUSD GBPUSD` to try the research tools on
 synthetic data.
 
+Automatic entries are enabled for all 15 configured instruments: the five forex pairs, gold,
+and the nine stock symbols in `config/config.json`. Each still needs a valid signal and must pass
+the spread, session, news, position, margin and risk limits. An instrument your account does not
+offer is skipped. Set `overrides.<symbol>.risk.auto_trade` to `false` to keep an instrument on the
+watchlist for signals only. `tradebot check` shows each instrument's **Auto entry** mode, and the
+trading loop logs its automatic-entry and signals-only lists at startup. The default config
+remains a dry run; a separate local config is used only when passed with `-c`.
+
+Broker symbol names are resolved again after an account switch, and cached prices and trade
+state are cleared. Disabled contracts and failed Market Watch selections no longer hide an
+available broker suffix. A second live trading loop using the same journal folder is refused,
+including when a paused loop tries to resume while another loop is active.
+
 ## Advisor dashboard
+
+The dashboard fits one laptop screen: the account summary, a searchable watchlist, the chart and
+the signal summary, with strength, news and positions below. **Signal & plan** puts the advice and
+the chart beside the trade plan, with the trend, structure and zones, filters and backtest record
+in tabs underneath (a dot on a tab means something there needs a look). The chart's overlays
+(signals, join windows, support/resistance zones, day levels, trend strip, swings, patterns,
+liquidity sweeps, supply/demand zones, fair value gaps) are switched on and off from its legend;
+swings, patterns and fair value gaps start off. The browser remembers the tab and the overlays.
+
+**Sweeps, zones and gaps** (`tradebot/smc.py`) are context, measured before they were trusted
+(`scripts/research_smc.py`). Each of them lost money as an entry of its own on the stored history.
+Two held up as warnings in both test periods, so they change the advice: no join is offered while
+price is at an opposite supply or demand zone, or within three bars of a closed sweep against the
+trend (joins there averaged -0.08R to -0.15R, against -0.03R to -0.06R elsewhere). The other
+cautions (a sweep on the bar still forming, an opposite fair value gap) are shown with their
+record, without changing the advice. `scripts/research_concepts.py` measured five more the same
+way (time of day, premium/discount, change of character, engulfing and pin-bar confirmation, equal
+highs and lows ahead); none separated good entries from bad in both periods, so the bot uses none
+of them. Time of day included: trading all day was not measurably worse than set hours. The sidebar exposes every section and tool; **Ctrl+K** (or **Cmd+K**) finds pages,
+tools and instruments. Use the instrument selector above any section to change symbols. Light,
+dark and system themes are available from the header.
+
+To preview the interface without MetaTrader or a trading account:
+
+```powershell
+python scripts/preview_dashboard.py
+```
+
+Open `http://127.0.0.1:8766/`. The preview uses synthetic prices and an in-memory account book;
+orders are disabled and account changes disappear when the preview stops.
 
 **Experimental entry-quality checks (off).** `strategy.use_signal_quality_filter` is `false` in
 the supplied config: it was switched on for a day and then measured, below. When on, before an
@@ -205,7 +256,7 @@ symbol, once a second:
 | Timeframe switch | trade on M5, M15, M30, H1 or H4; the two higher timeframes that set the direction are chosen automatically (M5/M15/M30 → H1 + H4, H1 → H4 + D1, H4 → D1) and each gets its own row in the checklist |
 | All four setups at once | EMA cross, Breakout, Pullback and Break & retest are all watched on every instrument, from the same bars, with no extra requests to the terminal. Each has a tile with its verdict on the last closed bar; a signal from any of them is announced with its priced plan and named in the watchlist and the tab title |
 | Trend | for each instrument: uptrend, downtrend or none on the trading timeframe, how old and how strong it is, and whether it is intact, weakening or likely ending, with the higher timeframes beside it. Alerts when a trend starts, weakens and is likely ending |
-| Setup switch | which setup the detail view (plan, checklist, chart levels, track record) shows: EMA cross, Breakout, Pullback or Break & retest. Each says what it is waiting for, with the price level where it has one ("price broke above 1.0995; a buy triggers when a bar comes back to that level and closes above it again") |
+| Setup switch | which setup the detail view (plan, checklist, chart levels, track record) shows on every instrument: EMA cross, Breakout, Pullback or Break & retest, or **As configured** when the config gives some instruments their own setup. Each says what it is waiting for, with the price level where it has one ("price broke above 1.0995; a buy triggers when a bar comes back to that level and closes above it again") |
 | Buy / Sell switch on the plan | the same priced plan for either side, so a trade you choose yourself gets the bot's sizing, stop and target |
 | Latest trigger | the most recent entry trigger in the last 12 bars, the filter that blocked it if one did, and how far price has moved since |
 | Recent signals | the last triggers across all symbols, taken or blocked, and which came first afterwards, the stop or the target, plus how often signals occur (about two a week, each live for one bar, so WAIT is the normal state) |
@@ -370,6 +421,31 @@ recomputes the advice and every guard, and sends only the engine's size for that
 stop and target attached. A bot trade is refused unless it still matches the current advice. Breakeven, partial profit and trailing apply while `tradebot run` manages
 the position.
 
+Two more buttons appear while orders are on, both your own call (tagged `tradebot manual`,
+counted in the loss limits and with your trades in the review, never in the bot's scorecard):
+
+- **Get in**, on the plan card, when the bot skipped its own signal or join because a limit held
+  it back (a loss limit, positions, open risk, margin, hours, news, the spread). It sends the trade
+  anyway at the configured risk per trade; the confirm dialog names the limit it sets aside. It
+  never trades through stale data, and a trade that cannot be sized at your risk per trade is
+  refused.
+- **Duplicate**, on each of the bot's open trades: a second trade with the same lots, stop and
+  target, at the live price, instead of placing the same trade again by hand on the phone. The
+  dialog shows what the copy risks; a stop or target too close to the price to copy is refused.
+
+Neither sets aside the `STOP` file: while it exists, no order leaves the dashboard. An order that
+waits more than 20 seconds for the terminal is cancelled if it has not been sent yet, or reported as
+"not confirmed yet" if it is being sent; the same confirmation sent twice places one order. A
+partial fill is reported as a fill of the lots that were filled.
+
+**Who manages trades placed by hand, and sends reversal warnings.** Exactly one process at a time,
+decided by operating-system file locks next to the journal (`tradebot.*.lock`): the dashboard while
+it runs; otherwise the trading loop (`tradebot run --live`), which takes over within one of its
+cycles. Restarting the dashboard therefore leaves no trade unmanaged, and running both no longer
+sends every reversal warning twice. A second dashboard sends nothing to the phone. The bot's own
+trades (and Get in and Duplicate orders) are the live trading loop's; with no loop running, the
+dashboard protects them the same way.
+
 **The local server is hardened, because one endpoint can place orders.** It binds to `127.0.0.1`
 only, rejects foreign `Host` headers (DNS rebinding), requires a per-session token sent in a
 custom header (other sites can neither read it nor send it cross-origin), refuses cross-origin
@@ -391,7 +467,8 @@ trade on the account counts, not only the bot's:
 | Positions per symbol and in total, open risk | yes |
 | Reversal warning, exposure per currency, correlation warnings | yes |
 | Closed trades and the review in R, on the dashboard and in `tradebot review` | yes, labelled your own calls against the bot's (the bot's carry its magic number) |
-| Breakeven, partial profit, trailing stop, closing on an opposite signal | **no**: the bot only ever manages its own positions |
+| Stop added, breakeven, partial profit, trailing stop, closing in profit on a confirmed reversal sign | yes, by the dashboard while `tradebot ui` runs, each with its `management.auto_*` switch and algo trading allowed in the terminal (`tradebot/protect.py`). The trading loop (`tradebot run`) manages only the bot's own positions |
+| Closing on an opposite signal | **no**: only the bot's own positions |
 
 R needs the stop a trade opened with. The phone usually sends it with the order; when a stop is
 added after the trade opened, the first stop the dashboard sees is kept as the trade's 1R (in the
@@ -568,7 +645,10 @@ Real orders are sent only when **every** gate is open. `tradebot check` tells yo
 | `allow_real_account` (only for real-money accounts) | `false` | `config/config.json` |
 
 While running live, creating a file named `STOP` in the working directory pauses new entries
-immediately; open positions keep being managed. Credentials come from environment variables or a
+immediately, the dashboard's Get in and Duplicate included; open positions keep being managed. The
+trading loop checks the account before every instrument: if the terminal is switched to another
+account (a real-money one without `allow_real_account`), its orders stop until the check passes
+again, and the loss limits are read from the new account's history. Credentials come from environment variables or a
 `.env` file, never from the committed config.
 
 ![tradebot check against a MetaQuotes demo terminal](docs/screenshots/terminal-check.png)
@@ -667,6 +747,15 @@ exactly the same rows as computing on the full history.
   instrument and say when the market turns against it (see
   [Reversal warning](#reversal-warning-for-an-open-position-v311)). It is a warning to a person.
   The bot's own exits are unchanged: the stop, the target, the trail and an opposite signal.
+- **Joining a missed signal** (`strategy.auto_join`, off by default): the bot enters a signal it
+  did not take (a guard or limit stopped it) up to `join_window_bars` (5) bars late, once, exactly
+  where the dashboard shows JOIN: the newest trigger was that taken signal, the trend still runs
+  its way, the break it rode has not failed, and price is not at an opposite supply/demand zone or
+  just after a closed sweep against it. Measured through the engine on the stored H1 history
+  (configured setups, 2017-2022 / 2023-2026): 111 / 64 joins averaged +0.02R / -0.03R a trade, at
+  0.25% risk 88 / 47 joins -0.01R / -0.12R, and the account totals were worse in three of the four
+  runs and flat in one. Not consistent in both periods, so it is not an edge. (Before 2026-11-19
+  the backtester skipped the bars a join happens on, so a backtest showed no joins at all.)
 
 ## Trading principles
 
@@ -1078,12 +1167,37 @@ A sweep of the rest of the system after that trade, with today's activity log as
 | The analysis card only counted triggers that disagreed with each other | a pullback buy firing in a strong downtrend showed "No directional conflict" | a trigger against the card's direction is listed as a conflict |
 | Every setup or timeframe click ran the record's 10-year backtest inside the dashboard | the page lagged: one backtest is 11.6 s of work, and competing with the page for the interpreter it took 96 s; with it running, page work was up to 0.75 s late (0.15 s now) | it runs in a separate low-priority process, a result is kept per setup and timeframe (switching back is instant), and a newer click stops a run nobody is waiting for, including the interpreter a virtual environment's launcher starts |
 
+### Found by an audit (v3.14, 19 November 2026)
+
+Sixteen findings in [docs/bug-audit-2026-11-19.md](docs/bug-audit-2026-11-19.md), each with its
+adverse case as a test in `tests/test_audit_2026_11_19.py`:
+
+| Found | Impact | Now |
+|---|---|---|
+| The trading loop checked the account once, at start | a terminal switched from demo to a real-money account kept receiving orders | the gate is checked before every instrument; orders stop (and resume) with it, and another account's loss history is read afresh |
+| A dashboard order that timed out stayed queued | the page said it failed, then it was sent; a retry sent a second one | a queued order is cancelled at the timeout, one being sent is reported as pending, and a repeated request is answered, not re-sent |
+| Half off and the trail read the last closed bar with no time | a trade opened at −0.2R was "half closed at +2R" from the bar before it | management waits for a bar that closed after the entry, and half off also needs the live price at the target R |
+| Netting reversal deals were dropped | the loss realised by a reversal was missing from the loss limits | the deal is a close with its result plus an opening |
+| A stale quote at start-up set the server clock | a 12-hour-old tick read as UTC−10, after which every fresh quote was "in the future" until a restart | the freshest of all quotes is used; a clock from a quote that is not live is measured again, and a quote from the future corrects it |
+| A partial fill was reported as rejected | an open position labelled REJECTED, its volume lost | reported as a fill of the lots filled |
+| The backtest decided each symbol before the next was moved to the same close | renaming a symbol changed the results: a stop at that close had not yet freed the slot | every symbol's bar is processed before any decision at that moment |
+| Backtest sizing used a fixed tick value, its results a converted one | USDJPY risked $30 on a $25 budget | sizing, the recorded 1R and the result use one conversion |
+| The automatic trend ladder is empty on D1 | with the trend filter on, every entry was blocked, silently | refused at start with the reason |
+| `"trend_timeframes": "H4"` passed validation | the trend filter read timeframes "H" and "4" and crashed | a single timeframe name is one timeframe |
+| The calculator's most lots used notional / leverage beside the terminal's margin | 2.72 lots "fit" a 30% cap that 0.30 lots fill | the most lots use the margin the trade does, and say which |
+| Other accounts' sizes were kept for the whole bar | a size from an equity the open trades had since lost | worked out again when those accounts' equity moves |
+| The EMA cross tile could not show EMA cross on a symbol with its own setup | "Now watching the ema cross setup", and nothing changed | a setup button shows that setup everywhere; **As configured** goes back to the config's own |
+| A failed first contact with Telegram read commands from the start | an old `/equity` command could run again | commands are read only once Telegram has said where the backlog ends, and older ones are ignored |
+| The plan described the main setup when every symbol overrode it | the written rules were not the ones traded | the plan names the setup the symbols trade |
+| Get in and Duplicate ignored the `STOP` file | an order sent while entries were paused | the STOP file pauses every order from the dashboard |
+
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-pytest --cov=tradebot      # 563 tests
-ruff check . && ruff format --check .
+pytest --cov=tradebot      # 730 tests
+ruff check src tests scripts && ruff format --check src tests scripts   # as CI runs it
+mypy                       # settings in pyproject.toml; no issues
 ```
 
 Tests cover indicators against textbook references, strategy causality, every engine guard and

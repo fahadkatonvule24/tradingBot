@@ -110,3 +110,46 @@ def test_describe_is_json_safe_and_names_the_structure():
     assert out["state"] == "up" and out["text"].startswith("Uptrend: higher highs and higher lows")
     json.dumps(out, allow_nan=False)
     assert describe(path(1.1, 1.1001, leg=2), digits=5)["state"] == "unknown"
+
+
+def test_a_steep_neckline_is_not_a_head_and_shoulders():
+    """Regression (EURUSD, 19 Nov 2026): a "neckline" falling 4.7 ATR between its two highs made an
+    inverse head and shoulders "confirmed" without price breaking anything."""
+    steep = _kinds(path(1.1100, 1.1060, 1.1100, 1.1030, 1.1070, 1.1059, 1.1072))  # highs 1.1100 / 1.1070
+    assert "inverse_head_shoulders" not in steep
+    level = _kinds(path(1.1100, 1.1060, 1.1080, 1.1030, 1.1079, 1.1059, 1.1095))
+    assert level["inverse_head_shoulders"]["status"] == "confirmed"
+
+
+def test_a_triangle_break_only_counts_before_its_lines_meet():
+    """Regression (EURUSD, 19 Nov 2026): the triangle's rising lower line was run on past the
+    apex, and price "broke" it once it had crossed above the upper line."""
+    from tradebot.structure import Swing
+
+    atr = 0.00088
+    points = [Swing(10, "low", 1.09527, "LL"), Swing(12, "high", 1.09815, "LH"),
+              Swing(14, "low", 1.09599, "HL"), Swing(16, "high", 1.09806, "EH")]  # fmt: skip
+    upper = lambda i: 1.09815 + (1.09806 - 1.09815) * (i - 12) / 4  # noqa: E731
+    lower = lambda i: 1.09527 + (1.09599 - 1.09527) * (i - 10) / 4  # noqa: E731
+    apex = 12 + (upper(12) - lower(12)) / ((upper(12) - lower(12)) - (upper(16) - lower(16))) * 4
+
+    def bars(n: int) -> pd.DataFrame:  # closes on the middle of the two lines: never through either
+        c = np.array([(upper(i) + lower(i)) / 2 for i in range(n)])
+        return pd.DataFrame({"time": pd.date_range("2026-11-18", periods=n, freq="h"), "open": c,
+                             "high": c + 0.00001, "low": c - 0.00001, "close": c, "atr": atr})  # fmt: skip
+
+    before = {p["kind"]: p for p in patterns(bars(int(apex) - 2), points)}
+    tri = before["ascending_triangle"]
+    assert tri["status"] == "forming" and all(line[2] <= int(apex) - 3 for line in tri["lines"])
+    after = {p["kind"]: p for p in patterns(bars(int(apex) + 6), points)}  # past the apex, still unbroken
+    assert "ascending_triangle" not in after  # gone, not "broken" by lines that crossed
+
+
+def test_lines_stop_a_few_bars_after_the_break():
+    from tradebot.structure import LINE_AFTER_BREAK_BARS
+
+    broken = path(1.1000, 1.1050, 1.1020, 1.1052, 1.1010, 1.0990, 1.0980, leg=6)
+    top = _kinds(broken)["double_top"]
+    assert top["status"] == "confirmed"
+    (line,) = top["lines"]
+    assert line[2] == top["broke"] + LINE_AFTER_BREAK_BARS < len(broken) - 1

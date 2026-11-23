@@ -300,6 +300,17 @@ def test_closing_the_position_clears_what_was_remembered(cfg, broker, fake, no_p
     assert len(inbox.sent) == 2
 
 
+def test_the_reversal_exit_reads_the_same_check_as_the_page(cfg, broker, no_preview):
+    """The exit reads the terminal's positions itself (for when one of your own accounts is
+    selected): its level must be the one the page shows for the same trade."""
+    monitor = primed(Monitor(cfg, broker, [SYMBOL]), frame(range_low=1.1000))
+    monitor.refresh()
+    (p,) = broker.positions(None)
+    level, headline = monitor._confirmed_reversal(p)
+    shown = monitor.snapshot()["positions"][0]["reversal"]
+    assert level == shown["level"] == "warn" and headline == shown["headline"]
+
+
 def test_trading_loop_warns_once_per_sign(cfg, broker, monkeypatch):
     inbox = Inbox()
     monkeypatch.setattr("tradebot.live.latest_features", lambda *a, **k: frame(range_low=1.1000, trend=-1))

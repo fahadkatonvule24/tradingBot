@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -39,6 +40,14 @@ from tradebot.config import TIMEFRAME_MINUTES, MT5Login
 log = logging.getLogger(__name__)
 
 RETCODE_INVALID_FILL = 10030
+RETCODE_DONE_PARTIAL = 10010
+"""Only part of the order was filled: the rest was cancelled (IOC) and the fill is real."""
+FRESH_MINUTES = 2.0
+"""A quote this close to a quarter-hour offset is live; an older one may be a closed market."""
+CLOCK_RETRY_SECONDS = 60.0
+"""How often a server clock guessed from a stale quote is measured again."""
+CLOCK_HISTORY_SYMBOLS = 8
+"""At most this many symbols' H1 history is read to find the daylight-saving rule."""
 
 
 class MT5Error(RuntimeError):
@@ -64,10 +73,17 @@ class MT5Broker:
                 ) from exc
         self.mt5 = module
         self.login = login
+        self._fixed_clock = offset_hours is not None
         self._clock_rule: ServerClock | None = ServerClock(offset_hours) if offset_hours is not None else None
+        self._clock_settled = True
+        """False while the server clock is a guess (no fresh quote yet): it is measured again."""
+        self._clock_retry = 0.0
+        self._clock_checked = float("-inf")
+        self._monotonic = time.monotonic
         self._clock = clock
         self._origin: dict[int, tuple[float | None, float | None]] = {}
         self._warned: set[str] = set()
+        self._identity: tuple[int, str] | None = None
         self._sleep = time.sleep
 
     # --- connection ---------------------------------------------------------------------------
@@ -82,8 +98,15 @@ class MT5Broker:
                                     ("password", self.login.password), ("server", self.login.server)) if v}  # fmt: skip
         for attempt in range(1, attempts + 1):
             if self.mt5.initialize(**kwargs):
-                return self.account()
-            code, message = self.mt5.last_error()
+                if self.connected():
+                    try:
+                        return self.account()
+                    except MT5Error:
+                        code, message = self.mt5.last_error()
+                else:
+                    code, message = -1, "terminal is not connected to the trade server"
+            else:
+                code, message = self.mt5.last_error()
             if attempt < attempts:
                 log.info("MT5 is not ready (%s: %s); trying again in %.0f s", code, message, wait_seconds)
                 self._sleep(wait_seconds)
@@ -95,9 +118,10 @@ class MT5Broker:
         self.mt5.shutdown()
 
     def connected(self) -> bool:
-        """True while the link to the terminal answers (it drops if the terminal closes or restarts)."""
+        """True while the terminal answers and is connected to its broker's trade server."""
         try:
-            return self.mt5.terminal_info() is not None
+            info = self.mt5.terminal_info()
+            return bool(info and info.connected)
         except Exception:
             return False
 
@@ -111,7 +135,7 @@ class MT5Broker:
             self.connect(attempts=1)  # the caller (Link) does the waiting between tries
         except MT5Error:
             return False
-        return True
+        return self.connected()
 
     def last_error_text(self) -> str:
         try:
@@ -122,34 +146,51 @@ class MT5Broker:
 
     def terminal_trading_allowed(self) -> bool:
         info = self.mt5.terminal_info()
-        return bool(info and info.trade_allowed)
+        return bool(info and info.connected and info.trade_allowed)
 
     def server_name(self) -> str:
         info = self.mt5.account_info()
         return info.server if info else "?"
 
     def resolve(self, symbol: str) -> str | None:
-        """Map a configured name to the broker's (EURUSD -> EURUSDm). Exact match wins."""
-        if self.mt5.symbol_info(symbol) is not None:
-            name = symbol
-        else:
-            candidates = [
-                s.name
-                for s in (self.mt5.symbols_get(f"*{symbol}*") or [])
-                if s.name.upper().startswith(symbol.upper())
-            ]
-            if not candidates:
-                return None
-            name = min(candidates, key=len)
-        info = self.mt5.symbol_info(name)
-        if info is not None and not info.visible:
-            self.mt5.symbol_select(name, True)
-        return name
+        """Map a configured name to an available contract (EURUSD -> EURUSDm).
+
+        An exact usable name wins. Brokers can also list disabled contracts or suffixes for
+        other account types; neither those nor a failed Market Watch selection should hide a
+        usable alternative. Prefer already-visible suffixes, then the shortest name.
+        """
+        exact = self.mt5.symbol_info(symbol)
+        candidates = {s.name: s for s in (self.mt5.symbols_get(f"*{symbol}*") or [])
+                      if s.name.upper().startswith(symbol.upper())}  # fmt: skip
+        if exact is not None:
+            candidates[symbol] = exact
+        for name in sorted(
+            candidates,
+            key=lambda n: (n != symbol, not candidates[n].visible, len(n), n),
+        ):
+            info = candidates[name]
+            mode = getattr(info, "trade_mode", getattr(self.mt5, "SYMBOL_TRADE_MODE_FULL", 4))
+            if mode in (
+                getattr(self.mt5, "SYMBOL_TRADE_MODE_DISABLED", 0),
+                getattr(self.mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", 3),
+            ):
+                continue
+            if not info.visible and not self.mt5.symbol_select(name, True):
+                log.warning("cannot select %s in Market Watch: %s", name, self.mt5.last_error())
+                continue
+            return name
+        return None
 
     @property
     def server_clock(self) -> ServerClock:
         if self._clock_rule is None:
-            self._clock_rule = self._detect_clock()
+            self._clock_rule, self._clock_settled = self._detect_clock()
+            self._clock_retry = self._monotonic() + CLOCK_RETRY_SECONDS
+        elif not self._clock_settled and self._monotonic() >= self._clock_retry:
+            self._clock_retry = self._monotonic() + CLOCK_RETRY_SECONDS
+            measured = self._measure_offset(self._clock())
+            if measured is not None and measured[2]:  # a fresh quote at last: measure properly
+                self._clock_rule, self._clock_settled = self._detect_clock()
         return self._clock_rule
 
     @property
@@ -157,44 +198,85 @@ class MT5Broker:
         """Server time minus UTC right now."""
         return self.server_clock.offset_at(self.now())
 
-    def _detect_clock(self) -> ServerClock:
-        """Measure today's offset from the freshest tick, then check the week-open pattern in the
-        broker's own H1 history to see whether the server follows New York daylight saving."""
-        now = self._clock()
+    def _measure_offset(self, now: datetime) -> tuple[timedelta, str, bool] | None:
+        """(server time minus UTC, from which symbol, fresh) from the freshest visible quote.
+
+        A quote's age reads as a smaller offset (a 12-hour-old tick on a UTC+2 server reads as
+        UTC-10), so of all visible symbols the one with the largest difference is the freshest.
+        It is "fresh" when that difference is within ``FRESH_MINUTES`` of a quarter hour: a live
+        quote is seconds old, a market that closed hours ago is rarely that close."""
         now_epoch = now.replace(tzinfo=timezone.utc).timestamp()
-        fallback: tuple[ServerClock, str] | None = None
+        best: tuple[float, str] | None = None
         for symbol in self.mt5.symbols_get() or []:
             if not getattr(symbol, "visible", True):
                 continue
             tick = self.mt5.symbol_info_tick(symbol.name)
-            if tick is None:
+            if tick is None or not getattr(tick, "time", 0):
                 continue
             diff_hours = (tick.time - now_epoch) / 3600
             if abs(diff_hours) > 14:
                 continue
-            offset = timedelta(hours=round(diff_hours * 4) / 4)
-            rates = self.mt5.copy_rates_from_pos(symbol.name, self.mt5.TIMEFRAME_H1, 0, 12_000)
+            if best is None or diff_hours > best[0]:
+                best = (diff_hours, symbol.name)
+        if best is None:
+            return None
+        diff_hours, name = best
+        hours = round(diff_hours * 4) / 4
+        return timedelta(hours=hours), name, abs(diff_hours - hours) * 60 <= FRESH_MINUTES
+
+    def _detect_clock(self) -> tuple[ServerClock, bool]:
+        """Measure today's offset from the freshest quote, then check the week-open pattern in a
+        weekday instrument's H1 history to see whether the server follows New York daylight saving.
+
+        Returns the clock and whether it is settled. Without a fresh quote (market closed) it is a
+        guess: measured again every ``CLOCK_RETRY_SECONDS`` until a fresh quote arrives, and a
+        quote that then looks more than a minute in the future corrects it too (``tick``)."""
+        now = self._clock()
+        measured = self._measure_offset(now)
+        if measured is None:
+            log.warning(
+                "no fresh tick (market closed?); assuming server time = UTC until one arrives. "
+                "Set server_utc_offset_hours to override."
+            )
+            return ServerClock(0.0), False
+        offset, source, fresh = measured
+        if not fresh:
+            log.warning(
+                "the newest quote (%s) is not live (market closed?): server time taken as UTC%+.2fh for now, "
+                "measured again when quotes resume. Set server_utc_offset_hours to override.",
+                source, offset.total_seconds() / 3600,
+            )  # fmt: skip
+        symbols = [s.name for s in self.mt5.symbols_get() or [] if getattr(s, "visible", True)]
+        for name in sorted(symbols, key=lambda n: n != source)[:CLOCK_HISTORY_SYMBOLS]:
+            rates = self.mt5.copy_rates_from_pos(name, self.mt5.TIMEFRAME_H1, 0, 12_000)
             times = [] if rates is None else rates["time"]
-            clock = detect_convention(times, offset, now)
             # A symbol that trades through weekends (crypto) has no week opens to read the
             # daylight-saving rule from: its answer is only the measured offset. Prefer a
-            # weekday instrument; keep the first answer in case there is none.
-            if len(week_opens(times)) < 20 and fallback is None:
-                fallback = (clock, symbol.name)
-                continue
+            # weekday instrument.
             if len(week_opens(times)) < 20:
                 continue
-            log.info("server time is %s (from %s)", clock.describe(now), symbol.name)
-            return clock
-        if fallback is not None:
-            clock, name = fallback
-            log.info("server time is %s (from %s; no weekday instrument to check daylight saving)",
-                     clock.describe(now), name)  # fmt: skip
-            return clock
-        log.warning(
-            "no fresh tick (market closed?); assuming server time = UTC. Set server_utc_offset_hours to override."
-        )
-        return ServerClock(0.0)
+            clock = detect_convention(times, offset, now)
+            log.info("server time is %s (from %s, rule from %s)", clock.describe(now), source, name)
+            return clock, fresh
+        fallback = ServerClock(offset.total_seconds() / 3600)
+        log.info("server time is %s (from %s; no weekday instrument to check daylight saving)",
+                 fallback.describe(now), source)  # fmt: skip
+        return fallback, fresh
+
+    def _recheck_clock(self) -> None:
+        """A quote stamped more than a minute in the future: the clock was measured from a stale
+        quote. Measure again (at most once per ``CLOCK_RETRY_SECONDS``) unless it was configured."""
+        if self._fixed_clock or self._monotonic() - self._clock_checked < CLOCK_RETRY_SECONDS:
+            return
+        self._clock_checked = self._monotonic()
+        measured = self._measure_offset(self._clock())
+        if measured is None or not measured[2]:
+            return
+        current = self.server_clock.offset_at(self._clock())
+        if measured[0] != current:
+            log.warning("server clock corrected: UTC%+.2fh, not UTC%+.2fh (it was read from a stale quote)",
+                        measured[0].total_seconds() / 3600, current.total_seconds() / 3600)  # fmt: skip
+            self._clock_rule, self._clock_settled = self._detect_clock()
 
     def _to_utc(self, server_epoch: float) -> datetime:
         return self.server_clock.epoch_to_utc(server_epoch)
@@ -211,8 +293,30 @@ class MT5Broker:
         a = self.mt5.account_info()
         if a is None:
             raise MT5Error(f"account_info failed: {self.mt5.last_error()}")
+        self._note_identity(a)
         is_real = a.trade_mode == getattr(self.mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
         return Account(a.balance, a.equity, a.margin, a.currency, is_real, a.leverage)
+
+    def account_id(self) -> tuple[int, str]:
+        """(login, server) of the account the terminal is logged in to right now. The terminal can
+        be switched to another account, a real one included, while tradebot runs."""
+        a = self.mt5.account_info()
+        if a is None:
+            raise MT5Error(f"account_info failed: {self.mt5.last_error()}")
+        return self._note_identity(a)
+
+    def _note_identity(self, info: Any) -> tuple[int, str]:
+        """Forget what belonged to the previous account when the terminal switches: the opening
+        stops of its tickets, and the server clock when the new account is on another server."""
+        identity = (int(getattr(info, "login", 0) or 0), str(getattr(info, "server", "") or ""))
+        if self._identity is not None and identity != self._identity:
+            log.warning("the terminal is now logged in to another account (server %s)", identity[1] or "?")
+            self._origin.clear()
+            self._warned.clear()
+            if identity[1] != self._identity[1] and not self._fixed_clock:
+                self._clock_rule, self._clock_settled = None, False  # another broker's clock
+        self._identity = identity
+        return identity
 
     def symbol(self, name: str) -> SymbolSpec:
         i = self.mt5.symbol_info(name)
@@ -285,7 +389,11 @@ class MT5Broker:
         t = self.mt5.symbol_info_tick(name)
         if t is None:
             raise MT5Error(f"no tick for {name}")
-        return Tick(self._to_utc(t.time), t.bid, t.ask)
+        when = self._to_utc(t.time)
+        if when - self.now() > timedelta(seconds=60) and not self._fixed_clock:
+            self._recheck_clock()  # "from the future": the clock came from a stale quote
+            when = self._to_utc(t.time)
+        return Tick(when, t.bid, t.ask)
 
     def bars(self, name: str, timeframe: str, count: int) -> pd.DataFrame:
         tf = getattr(self.mt5, f"TIMEFRAME_{timeframe}")
@@ -362,41 +470,63 @@ class MT5Broker:
     def deals(self, since: datetime, magic: int | None) -> list[Deal]:
         """Trade deals since ``since``: this magic number's, or with ``None`` every trade on the
         account, including those placed by hand on the phone. Deposits, withdrawals and other
-        balance operations are never trades and are always left out."""
+        balance operations are never trades and are always left out.
+
+        A reversal on a netting account (one deal that closes the position and opens the other
+        way, ``DEAL_ENTRY_INOUT``) comes back as two: the "out" that closed it, with the realised
+        result, then the "in" of what is left. Dropping it lost that loss from the loss limits."""
         # Query a padded server-time range and filter in UTC: avoids missing deals when the
         # server clock runs ahead of the local one (a v23 loss-limit blind spot).
         start = self._to_server_epoch(since) - 86_400
         end = self._to_server_epoch(self.now()) + 86_400
         trades = (self.mt5.DEAL_TYPE_BUY, self.mt5.DEAL_TYPE_SELL)
+        opening = self.mt5.DEAL_ENTRY_IN
+        reversal = getattr(self.mt5, "DEAL_ENTRY_INOUT", 2)
         closing = (self.mt5.DEAL_ENTRY_OUT, getattr(self.mt5, "DEAL_ENTRY_OUT_BY", 3))  # close-by counts too
         out = []
         history = self.mt5.history_deals_get(start, end)
         if history is None:
             raise MT5Error(f"could not read deal history: {self.mt5.last_error()}")
-        for d in history:
-            if magic is not None and d.magic != magic:
+        held: dict[int, float] = {}  # each position's open volume so far: what a reversal closes
+        for d in sorted(history, key=lambda d: (d.time, d.ticket)):
+            if d.type not in trades or d.entry not in (opening, reversal, *closing):
                 continue
-            if d.type not in trades or (d.entry != self.mt5.DEAL_ENTRY_IN and d.entry not in closing):
+            before = held.get(d.position_id)
+            if d.entry == opening:
+                held[d.position_id] = (before or 0.0) + d.volume
+            elif d.entry == reversal:
+                held[d.position_id] = d.volume - before if before is not None else d.volume
+            else:
+                held[d.position_id] = max((before or 0.0) - d.volume, 0.0)
+            if magic is not None and d.magic != magic:
                 continue
             when = self._to_utc(d.time)
             if when < since:
                 continue
             net = d.profit + d.commission + d.swap + getattr(d, "fee", 0.0)
-            out.append(
-                Deal(
-                    ticket=d.ticket,
-                    position=d.position_id,
-                    symbol=d.symbol,
-                    time=when,
-                    side=BUY if d.type == self.mt5.DEAL_TYPE_BUY else SELL,
-                    volume=d.volume,
-                    price=d.price,
-                    profit=net,
-                    entry="in" if d.entry == self.mt5.DEAL_ENTRY_IN else "out",
-                    comment=d.comment,
-                    magic=d.magic,
-                )
+            side = BUY if d.type == self.mt5.DEAL_TYPE_BUY else SELL
+            deal = Deal(
+                ticket=d.ticket,
+                position=d.position_id,
+                symbol=d.symbol,
+                time=when,
+                side=side,
+                volume=d.volume,
+                price=d.price,
+                profit=net,
+                entry="in" if d.entry == opening else "out",
+                comment=d.comment,
+                magic=d.magic,
             )
+            if d.entry == reversal:
+                # the volume it closed is the position's open volume, when its opening is in range
+                shut = min(before, d.volume) if before else d.volume
+                out.append(replace(deal, volume=shut))
+                out.append(
+                    replace(deal, volume=max(d.volume - shut, 0.0) or d.volume, profit=0.0, entry="in")
+                )
+            else:
+                out.append(deal)
         return sorted(out, key=lambda d: d.time)
 
     def open(self, request: OrderRequest, magic: int) -> OrderResult:
@@ -489,14 +619,23 @@ class MT5Broker:
             if result is None or result.retcode != RETCODE_INVALID_FILL:
                 break
             log.info("%s: filling mode %s rejected, trying the next one", symbol, mode)
-        return self._result(result)
+        return self._result(result, order.get("volume"))
 
-    def _result(self, result: Any) -> OrderResult:
+    def _result(self, result: Any, asked: float | None = None) -> OrderResult:
         if result is None:
             code, message = self.mt5.last_error()
             return OrderResult(False, message=f"order_send failed ({code}): {message}")
-        ok = result.retcode == self.mt5.TRADE_RETCODE_DONE
-        return OrderResult(ok, result.order or None, result.price or None, result.comment, result.retcode)
+        partial = result.retcode == getattr(self.mt5, "TRADE_RETCODE_DONE_PARTIAL", RETCODE_DONE_PARTIAL)
+        ok = result.retcode == self.mt5.TRADE_RETCODE_DONE or partial
+        filled = float(getattr(result, "volume", 0.0) or 0.0) or None
+        message = result.comment
+        if partial:  # executed, in part: a position exists and must not be reported as refused
+            message = (
+                f"partially filled: {filled:g} of {asked:g} lots" if filled and asked else "partially filled"
+            )
+        return OrderResult(
+            ok, result.order or None, result.price or None, message, result.retcode, filled, partial
+        )
 
 
 def fetch_history(broker: MT5Broker, symbol: str, timeframe: str, count: int) -> pd.DataFrame:

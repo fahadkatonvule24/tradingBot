@@ -77,17 +77,26 @@ class TrackRecords:
         self, command: Callable[[Path, str | Path, dict[str, str]], Sequence[str]] | None = None
     ) -> None:
         self._command = command or _child_command
-        self._cache: dict[tuple[str, tuple[tuple[str, str], ...], str], dict[str, Any]] = {}
+        self._cache: dict[str, dict[str, Any]] = {}
+        self._contexts: dict[str, tuple[str | Path, dict[str, str]]] = {}
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
 
-    def cached(self, config: BotConfig) -> dict[str, Any] | None:
-        return self._cache.get(_key(config))
+    def cached(
+        self, config: BotConfig, data_dir: str | Path | None = None, names: dict[str, str] | None = None
+    ) -> dict[str, Any] | None:
+        if data_dir is None:
+            context = self._contexts.get(_key(config))
+            if context is None:
+                return None
+            data_dir, names = context
+        return self._cache.get(_record_key(config, data_dir, names or {}))
 
     def get(self, config: BotConfig, data_dir: str | Path, names: dict[str, str]) -> dict[str, Any]:
         """The record for ``config``: from the cache, or measured now in a child process (blocks
         the calling thread, not the interpreter). Raises NoRecord."""
-        key = _key(config)
+        key = _record_key(config, data_dir, names)
+        self._contexts[_key(config)] = (data_dir, dict(names))
         if key in self._cache:
             return self._cache[key]
         with tempfile.TemporaryDirectory(prefix="tradebot-track-") as folder:
@@ -130,10 +139,34 @@ class TrackRecords:
             _kill_tree(self._process)
 
 
-def _key(config: BotConfig) -> tuple[str, tuple[tuple[str, str], ...], str]:
-    """Per setup and timeframe, with each symbol's own setup: two configs with the same main setup
-    can trade different setups on some symbols."""
-    return config.strategy.name, tuple(sorted(config.setups().items())), config.timeframe
+def _key(config: BotConfig) -> str:
+    """Every setting that can affect the measured result; credentials are never part of the key."""
+    return json.dumps(config.to_dict(), sort_keys=True)
+
+
+def _record_key(config: BotConfig, data_dir: str | Path, names: dict[str, str]) -> str:
+    folder = Path(data_dir).resolve()
+    paths = set()
+    for symbol in config.symbols:
+        strategy = config.for_symbol(symbol).strategy
+        timeframes = {config.timeframe, *strategy.trend_ladder(config.timeframe)}
+        paths.add(folder / f"{symbol}.spec.json")
+        paths.update(folder / f"{symbol}_{timeframe}.csv" for timeframe in timeframes)
+    for name in (
+        config.schedule.news_file,
+        config.schedule.news_feed_file if config.schedule.news_feed else "",
+    ):
+        if name:
+            paths.add(Path(name).resolve())
+    stamps = []
+    for path in sorted(paths):
+        try:
+            info = path.stat()
+            stamp = (info.st_mtime_ns, info.st_size, info.st_ino)
+        except OSError:
+            stamp = None
+        stamps.append((str(path), stamp))
+    return json.dumps([_key(config), str(folder), sorted(names.items()), stamps])
 
 
 def _child_command(config_path: Path, data_dir: str | Path, names: dict[str, str]) -> list[str]:

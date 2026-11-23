@@ -13,7 +13,7 @@ import math
 import queue
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,24 +22,33 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from tradebot import __version__, analysis, market, structure
+from tradebot import __version__, analysis, market, protect, smc, structure
 from tradebot.advisor import (
-    JOIN_WINDOW_BARS,
     WORD,
     Advice,
     advise,
     next_trigger,
     pip_size,
     recent_signals,
+    trade_plan,
     trend_side,
     watch_side,
 )
 from tradebot.book import REFUSAL, Book, BookBroker, BookError
-from tradebot.broker.base import Broker, OrderRequest, SymbolSpec
-from tradebot.config import STRATEGIES, BotConfig
-from tradebot.engine import Engine
+from tradebot.broker.base import Broker, OrderRequest, SymbolSpec, Tick
+from tradebot.config import STRATEGIES, BotConfig, SymbolParams, session_hours
+from tradebot.duty import Duty
+from tradebot.engine import Engine, Rejection
 from tradebot.journal import Journal, JournalEvent
-from tradebot.live import BAR_COLUMNS, Gate, Link, fetch_frames, preview_features, trading_gate
+from tradebot.live import (
+    BAR_COLUMNS,
+    Gate,
+    Link,
+    fetch_frames,
+    preview_features,
+    resolve_symbols,
+    trading_gate,
+)
 from tradebot.plan import SETUP_LABELS, setup_text
 from tradebot.reversal import EXIT, Alerts, Reversal, Watch, assess, holding_text, watch_position
 from tradebot.strategy import BLOCK_LABELS, compute_signals, explain
@@ -58,6 +67,13 @@ LOST_LINK = "Lost the connection to MetaTrader 5. Is the terminal open? Prices a
 
 
 SWITCHABLE = ("M5", "M15", "M30", "H1", "H4")
+CONFIGURED = "configured"
+"""The setup switch's "back to the setups in the config", each symbol's own included."""
+
+
+QUEUED, RUNNING, CANCELLED = "queued", "running", "cancelled"
+"""Where a request to the MT5 thread is: one that timed out while still queued is cancelled and
+never runs; one already running is reported as pending, never as a failure."""
 
 
 @dataclass
@@ -66,6 +82,7 @@ class _Switch:
     strategy: str = ""
     done: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] = field(default_factory=dict)
+    state: str = QUEUED
 
 
 @dataclass
@@ -73,8 +90,23 @@ class _Order:
     symbol: str
     side: int
     manual: bool = False
+    override: bool = False
+    """"Get in": over the bot's limits, as your own call."""
+    duplicate: int | None = None
+    """"Duplicate": the ticket of the bot's trade to copy (``symbol`` and ``side`` unused)."""
+    request_id: str = ""
+    """The page's id for this confirmation: the same id sent again never places a second order."""
+    volume: float | None = None
+    """"Your size": the lots you typed, instead of the bot's size (manual only)."""
     done: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] = field(default_factory=dict)
+    state: str = QUEUED
+
+
+OWN_SIZE_MAX_RISK = 20.0
+"""The most of equity, in percent, that one "Your size" order may lose at its stop. The bot's own
+limit per trade is set aside for it (that is the point), but a slip of the finger (0.2 lots for
+0.02) must not send ten times the trade meant."""
 
 
 @dataclass
@@ -84,6 +116,7 @@ class _Task:
     fn: Any
     done: threading.Event = field(default_factory=threading.Event)
     result: Any = None
+    state: str = QUEUED
 
 
 class Monitor:
@@ -98,12 +131,14 @@ class Monitor:
         interval: float = 1.0,
         notifier: Any = None,
         book: Book | None = None,
+        duty: Duty | None = None,
     ) -> None:
         if book is not None and not isinstance(broker, BookBroker):
             broker = BookBroker(broker, book, config.magic)  # your own accounts, when one is selected
         self.config, self.broker, self.symbols = config, broker, symbols
         # the setups as configured, restored when the dashboard switches back to the config's own
         self._configured_setup, self._configured_overrides = config.strategy.name, config.overrides
+        self._configured_mixed = any(n != config.strategy.name for n in config.setups().values())
         self.currency = "USD"
         self.market_cache: tuple[Any, dict[str, Any]] | None = None
         self.levels_cache: dict[str, tuple[float, Any]] = {}
@@ -125,28 +160,41 @@ class Monitor:
         self._recent: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._link = Link(broker)
         self._last_error: str | None = None
+        self._symbol_errors: dict[str, str] = {}
         self.notifier = notifier
         self._previews: dict[str, tuple[float, pd.DataFrame | None]] = {}
         self._track_args: tuple[Any, Any] | None = None
         self.tracks = TrackRecords()
         self._heartbeat_day: Any = None
+        self._manual_seen: set[int] | None = None
+        self._weekly_sent: tuple | None = None
         self.heartbeat = False  # `tradebot ui` turns it on: STARTED, then RUNNING each trading day
         self._track_pending = False
         self._htf: dict[str, dict[str, pd.DataFrame]] = {}
-        self._forming_seen: set[tuple[str, Any, Any]] = set()
+        self._forming_seen: set[tuple[Any, ...]] = set()
         self._watches: dict[int, tuple[Any, Watch]] = {}
         self._reversal_alerts = Alerts()
         self._others: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._engines: dict[str, Engine] = {}
         self._signal_seen: set[tuple[Any, ...]] = set()
+        self._breakeven = protect.Manager()
+        self.duty = duty
+        """With ``tradebot ui``: whether this dashboard manages trades placed by hand and sends the
+        reversal warnings, or leaves both to the trading loop (``tradebot.duty``). None: always."""
+        self._turned: dict[int, tuple[Any, tuple[str, str]]] = {}
+        self._breakeven_state: dict[str, Any] = {"on": False, "reason": "not checked yet", "moved": 0}
         self._trends: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._structures: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._trend_alerts = TrendAlerts()
         self._specs: dict[str, tuple[SymbolSpec, datetime]] = {}
+        self._account_id: Any = None
         self._last_action: dict[str, str] = {}
         self._analysis_seen: dict[str, tuple[Any, ...]] = {}
         self._analysis_changes: dict[str, dict[str, Any]] = {}
-        self._orders: queue.Queue[_Order] = queue.Queue()
+        self._orders: queue.Queue[_Order | _Switch | _Task] = queue.Queue()
+        self._queue_lock = threading.Lock()
+        self._requests: OrderedDict[str, _Order] = OrderedDict()
+        """Recent orders by the page's request id, so a repeated request is answered, not re-sent."""
         self._stop = threading.Event()
         self.activity: deque[dict[str, Any]] = deque(maxlen=50)
         self.desk = Desk(self, book) if book is not None else None
@@ -161,9 +209,40 @@ class Monitor:
         """Run ``fn`` on the MT5 thread, between refreshes, and hand back what it returns."""
         task = _Task(fn)
         self._orders.put(task)
-        if not task.done.wait(timeout):
-            return {"ok": False, "message": "timed out waiting for the MT5 thread"}
+        if not self._wait(task, timeout):
+            return self._late(task, "")
         return task.result
+
+    def _wait(self, item: _Order | _Switch | _Task, timeout: float) -> bool:
+        """Wait for the MT5 thread to finish ``item``. On a timeout, an item it has not started is
+        cancelled, so it never runs after its caller was told it failed. False on a timeout."""
+        if item.done.wait(timeout):
+            return True
+        with self._queue_lock:
+            if item.state == QUEUED:
+                item.state = CANCELLED
+        return item.done.is_set()
+
+    @staticmethod
+    def _late(item: _Order | _Switch | _Task, what: str) -> dict[str, Any]:
+        """The answer for an item the MT5 thread did not finish in time."""
+        if item.state == CANCELLED:
+            done = f"{what} was not sent" if what else "nothing was done"
+            return {"ok": False, "message": f"timed out waiting for the MT5 thread: {done}"}
+        return {
+            "ok": False,
+            "pending": True,
+            "message": f"still in progress on the MT5 thread{': ' + what + ' may yet be sent' if what else ''}. "
+            "Check again before trying it a second time.",
+        }
+
+    def _claim(self, item: _Order | _Switch | _Task) -> bool:
+        """The worker takes ``item``: False if its caller already gave up on it (cancelled)."""
+        with self._queue_lock:
+            if item.state == CANCELLED:
+                return False
+            item.state = RUNNING
+            return True
 
     def calc(self, body: dict[str, Any]) -> dict[str, Any]:
         """The position-size, margin and leverage calculator, on the MT5 thread."""
@@ -254,13 +333,15 @@ class Monitor:
     def status_text(self) -> str:
         r, a = self.engine.risk_status(self.broker.now()), self.broker.account()
         name = (self.desk.broker.account_name() if self.desk else None) or "MetaTrader 5 account"
+        stop = lambda limit: f"stop at -{limit:g}%" if limit > 0 else "no limit"  # noqa: E731
+        entries = f"{r.entries_today}/{r.entries_limit}" if r.entries_limit else str(r.entries_today)
         return "\n".join([
             f"{name}: equity {a.equity:,.2f} {a.currency}",
-            f"Today {r.day_percent:+.2f}% (stop at -{r.daily_limit:g}%) · this week {r.week_percent:+.2f}% "
-            f"(stop at -{r.weekly_limit:g}%)",
+            f"Today {r.day_percent:+.2f}% ({stop(r.daily_limit)}) · this week {r.week_percent:+.2f}% "
+            f"({stop(r.weekly_limit)})",
             f"Open risk {f'{r.open_risk_percent:.2f}%' if r.open_risk_percent is not None else 'unknown'} "
             f"of {r.open_risk_limit:g}% · {r.positions}/{r.positions_limit} "
-            f"positions · {r.losing_streak} losses in a row · {r.entries_today}/{r.entries_limit} entries today",
+            f"positions · {r.losing_streak} losses in a row · {entries} entries today",
             f"New entries are stopped: {r.blocked}" if r.blocked else "No limit is hit.",
         ])  # fmt: skip
 
@@ -343,16 +424,16 @@ class Monitor:
         """Switch the trading timeframe (handled on the MT5 thread, between refreshes)."""
         switch = _Switch(str(timeframe).upper())
         self._orders.put(switch)
-        if not switch.done.wait(timeout):
-            return {"ok": False, "message": "timed out waiting for the MT5 thread"}
+        if not self._wait(switch, timeout):
+            return self._late(switch, "")
         return switch.result
 
     def set_strategy(self, name: str, timeout: float = 30.0) -> dict[str, Any]:
         """Switch the setup the advisor watches (handled on the MT5 thread, between refreshes)."""
         switch = _Switch(strategy=str(name).lower())
         self._orders.put(switch)
-        if not switch.done.wait(timeout):
-            return {"ok": False, "message": "timed out waiting for the MT5 thread"}
+        if not self._wait(switch, timeout):
+            return self._late(switch, "")
         return switch.result
 
     def _reconfigure(self, config: BotConfig) -> str | None:
@@ -385,7 +466,9 @@ class Monitor:
         self.market_cache = None
         self.levels_cache.clear()
         self.daily_cache.clear()
-        cached = self.tracks.cached(config)  # a setup seen before shows its record at once
+        cached = (
+            self.tracks.cached(config, *self._track_args) if self._track_args else self.tracks.cached(config)
+        )
         self.track_record = cached or {}
         if self._track_args and cached is None:
             self._track_pending = True
@@ -394,18 +477,29 @@ class Monitor:
             ).start()
         return None
 
+    def _configured(self) -> BotConfig:
+        """The current config with the setups as configured: the main one and each symbol's own."""
+        return replace(self.config.with_setup(self._configured_setup), overrides=self._configured_overrides)
+
     def _apply_strategy(self, name: str) -> dict[str, Any]:
-        if name not in STRATEGIES:
-            return {"ok": False, "message": f"strategy must be one of {', '.join(STRATEGIES)}"}
-        if name != self.config.strategy.name:
+        """``name``: one setup for every symbol, those with their own setup in the config included
+        (a tile's "show this setup" must show it even when it is the config's main setup), or
+        ``CONFIGURED``: back to the config's own setups, per symbol."""
+        if name == CONFIGURED:
+            config = self._configured()
+            message = f"Back to the setups in the config: {setup_text(config)}."
+        elif name in STRATEGIES:
             config = self.config.with_setup(name)
-            if name == self._configured_setup:  # back to the config's own: its per-symbol setups too
-                config = replace(config, overrides=self._configured_overrides)
+            message = f"Now watching the {name.replace('_', ' ')} setup."
+        else:
+            return {"ok": False, "message": f"strategy must be one of {', '.join((*STRATEGIES, CONFIGURED))}"}
+        same = config.strategy.name == self.config.strategy.name and config.setups() == self.config.setups()
+        if not same or config.overrides != self.config.overrides:
             error = self._reconfigure(config)
             if error:
                 return {"ok": False, "message": error}
-            log.info("setup switched to %s", name)
-        return {"ok": True, "message": f"Now watching the {name.replace('_', ' ')} setup.", "strategy": name}
+            log.info("setup switched to %s", setup_text(config))
+        return {"ok": True, "message": message, "strategy": config.strategy.name}
 
     def _apply_timeframe(self, timeframe: str) -> dict[str, Any]:
         if timeframe not in SWITCHABLE:
@@ -465,16 +559,36 @@ class Monitor:
                     for x in shape["patterns"]
                 ],
             }  # fmt: skip
+        liquidity = smc.describe(features, offset, shown_from=offset)
         return clean({"symbol": symbol, "fast": p.fast_ema, "slow": p.slow_ema, "bars": bars, "trend": trend,
-                      "marks": marks, "join_bars": JOIN_WINDOW_BARS, "structure": drawn})  # fmt: skip
+                      "marks": marks, "join_bars": p.join_window_bars, "structure": drawn,
+                      "smc": liquidity})  # fmt: skip
 
-    def submit(self, symbol: str, side: int, manual: bool = False, timeout: float = 20.0) -> dict[str, Any]:
-        """Queue an order for the worker thread and wait for its outcome."""
-        order = _Order(symbol, side, manual)
-        self._orders.put(order)
-        if not order.done.wait(timeout):
-            return {"ok": False, "message": "timed out waiting for the MT5 thread"}
-        return order.result
+    def submit(
+        self, symbol: str, side: int, manual: bool = False, timeout: float = 20.0, *, override: bool = False,
+        duplicate: int | None = None, request_id: str = "", volume: float | None = None,
+    ) -> dict[str, Any]:  # fmt: skip
+        """Queue an order for the worker thread and wait for its outcome.
+
+        An order still queued when the wait runs out is cancelled: it is never sent after the page
+        was told it failed. One already being sent is reported as pending. ``request_id`` (the
+        page's, per confirmation) makes a repeat of the same request wait for the first one's
+        outcome instead of sending a second order."""
+        with self._queue_lock:
+            order = self._requests.get(request_id) if request_id else None
+            if order is not None and order.state == CANCELLED:
+                order = None  # it was never sent: this repeat may send it
+            repeat = order is not None
+            if order is None:
+                order = _Order(symbol, side, manual, override, duplicate, request_id, volume)
+                if request_id:
+                    self._requests[request_id] = order
+                    while len(self._requests) > 50:
+                        self._requests.popitem(last=False)
+                self._orders.put(order)
+        if not self._wait(order, timeout):
+            return self._late(order, "the order")
+        return {**order.result, "repeat": True} if repeat else order.result
 
     # --- worker thread -------------------------------------------------------------------------
 
@@ -500,6 +614,8 @@ class Monitor:
                         )
                     except queue.Empty:
                         break
+                    if not self._claim(order):
+                        continue  # its caller timed out and was told so: it must not run now
                     if isinstance(order, _Task):
                         try:
                             order.result = order.fn()
@@ -534,6 +650,93 @@ class Monitor:
             self._report(message)
         else:
             self._last_error = None
+        # Stops are protected even when the analysis failed this second: a bad bar on one
+        # symbol must not leave every open trade without its breakeven.
+        try:
+            self._keep_breakeven()
+        except Exception:  # protecting stops must never stop the dashboard
+            log.warning("automatic breakeven check failed", exc_info=True)
+
+    def _keep_breakeven(self) -> None:
+        """Protect the terminal's open trades, the phone's included (``tradebot.protect``): stops
+        added, breakeven, the trail, half off and the reversal exit, each with its switch. Only
+        while this process holds the duty (``tradebot.duty``): otherwise the trading loop does it."""
+        inner = getattr(self.broker, "inner", self.broker)
+        allowed = getattr(inner, "terminal_trading_allowed", lambda: False)()  # as refresh() reads it
+        gate = protect.breakeven_gate(self.config, inner.account(), allowed)
+        duty = self.duty is None or self.duty.held()
+        m = self.config.management
+        reason = gate.reason
+        if gate.on and not duty and self.duty is not None:
+            reason = f"managed by {self.duty.holder_text()}"
+        self._breakeven_state = {"on": gate.on and duty, "reason": reason, "moved": self._breakeven.moved,
+                                 "at_r": m.breakeven_r, "buffer_r": m.breakeven_buffer_r,
+                                 "breakeven": m.auto_breakeven, "trailing": m.auto_trailing,
+                                 "partial": m.auto_partial, "reverse_exit": m.auto_reverse_exit, "stop": m.auto_stop,
+                                 "trail_start_r": m.trail_start_r, "trail_atr": m.trail_atr,
+                                 "stop_atr": self.config.risk.sl_atr, "partial_r": m.partial_tp_r,
+                                 "partial_fraction": m.partial_tp_fraction,
+                                 "elsewhere": gate.on and not duty}  # fmt: skip
+        try:
+            if gate.on and duty:
+                self._move_stops(inner)
+        finally:
+            self._breakeven_state["moved"] = self._breakeven.moved
+            with self._lock:  # the page shows it at once, not a refresh later
+                if self._state.get("ready"):
+                    self._state["breakeven"] = dict(self._breakeven_state)
+
+    def _move_stops(self, inner: Any) -> None:
+        # The terminal's positions whichever account is selected: with one of your own accounts
+        # chosen, the page shows that account's trades, but the stops to protect are the terminal's.
+        terminal = getattr(self.broker, "terminal_positions", None)
+        held = terminal(None) if terminal else inner.positions(None)
+        bars = {}  # the last closed bar of each instrument on the dashboard, for the trailing stop
+        with self._lock:
+            for name, frame in self._features.items():
+                bar = protect.last_bar(frame, self.config.bar_minutes)
+                if bar is not None:
+                    bars[name] = bar
+        turned = {}  # each position's confirmed reversal level on the last closed bar, and why
+        for p in held:
+            found = self._confirmed_reversal(p)
+            if found is not None:
+                turned[p.ticket] = found
+        open_tickets = {p.ticket for p in held}
+        for ticket in [t for t in self._turned if t not in open_tickets]:
+            del self._turned[ticket]
+        # the bot's own trades, and your Get in and Duplicate orders, are the live trading loop's
+        # to manage; with none running (or none known of), they get the same protection here
+        bots = self.duty is not None and not self.duty.trading_loop_running()
+        for done in self._breakeven.run(inner, held, self.config, bars, turned, self.broker.now(), bots):
+            self.activity.append({"time": self.broker.now(), "symbol": done.symbol,
+                                  "action": ("CLOSE" if done.closing else "STOP") if done.ok else "REJECTED",
+                                  "text": done.text})  # fmt: skip
+            self._send(f"{done.title} · {done.symbol}\n{done.text}", "order")
+
+    def _confirmed_reversal(self, p: Any) -> tuple[str, str] | None:
+        """(level, headline) of the reversal check on closed bars for a terminal position, once per
+        bar, with no alerts: the page's own check (``_reversal``) reads the selected account."""
+        features = self._features.get(p.symbol)
+        spec = self._specs.get(p.symbol)
+        if features is None or spec is None or not len(features):
+            return None
+        key = (features["time"].iloc[-1], p.side, p.time_open)
+        cached = self._turned.get(p.ticket)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            watch = watch_position(features, p.side, p.time_open, self.config.bar_minutes)
+            strategy = self.config.for_symbol(p.symbol).strategy
+            found = assess(
+                features, p.side, p.time_open, strategy, self.config.timeframe, spec[0], None, watch
+            )
+        except Exception:
+            log.debug("%s: reversal check failed", p.symbol, exc_info=True)
+            return None
+        value = (found.level, found.headline)
+        self._turned[p.ticket] = (key, value)
+        return value
 
     def _report(self, error: str) -> None:
         with self._lock:
@@ -556,6 +759,42 @@ class Monitor:
 
     def refresh(self) -> None:
         now = self.broker.now()
+        identity = getattr(getattr(self.broker, "inner", self.broker), "account_id", None)
+        if identity is not None:
+            current = identity()
+            if self._account_id is not None and current != self._account_id:
+                self.book_changed()  # the terminal switched accounts: limits from the new one's history
+                # Invalidate in-flight results too: load_track_record compares the config's identity.
+                # Clear old prices even if resolving the new watchlist fails temporarily.
+                with self._lock:
+                    self._features.clear()
+                self.symbols = resolve_symbols(self.broker, self.config.symbols)
+                if self._track_args:
+                    data_dir, old_names = self._track_args
+                    names = {
+                        symbol: old_names.get(symbol)
+                        or max(
+                            (name for name in self.config.symbols if symbol.upper().startswith(name.upper())),
+                            key=len,
+                            default=symbol,
+                        )
+                        for symbol in self.symbols
+                    }
+                    self._track_args = (data_dir, names)
+                self._reconfigure(replace(self.config))
+                for cache in (
+                    self._swaps,
+                    self._symbol_errors,
+                    self._turned,
+                    self._signal_seen,
+                    self._forming_seen,
+                ):
+                    cache.clear()
+                self._manual_seen = None
+                self._breakeven = protect.Manager()
+                self._reversal_alerts = Alerts()
+                self._trend_alerts = TrendAlerts()
+            self._account_id = current
         account = self.broker.account()
         self.currency = account.currency
         manual = bool(self.desk and self.desk.manual)
@@ -570,10 +809,18 @@ class Monitor:
             try:
                 rows.append(self._symbol_state(symbol, now))
             except Exception as exc:
-                log.warning("%s: %s", symbol, exc)
-                rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+                message = f"{type(exc).__name__}: {exc}"
+                # once per symbol and failure, not every second: when the terminal switched to an
+                # account whose names differ (EURUSD -> EURUSDm), this wrote 2,250 lines in 6 minutes
+                if self._symbol_errors.get(symbol) != message:
+                    log.warning("%s: %s", symbol, exc)
+                self._symbol_errors[symbol] = message
+                rows.append({"symbol": symbol, "error": message})
+            else:
+                self._symbol_errors.pop(symbol, None)
         if self.heartbeat:
             self._heartbeat(now)
+            self._weekly(now)
         if self.desk:  # a stop or target your broker filled while nobody told the book
             self.desk.sweep({r["symbol"]: (r["bid"], r["ask"]) for r in rows if "bid" in r})
             account = self.broker.account()
@@ -585,11 +832,21 @@ class Monitor:
             r = None
             if p.initial_risk and price is not None:  # yours from the phone too, once it has a stop
                 r = (price - p.price_open) * p.side / p.initial_risk
+            duplicate = None  # what the Duplicate button would send, while orders are on
+            if gate.execute and p.magic == self.config.magic and p.symbol in self.symbols:
+                try:
+                    duplicate = self.duplicate_plan(p)
+                except Exception as exc:
+                    duplicate = {"refused": f"{type(exc).__name__}: {exc}"}
+                stop = self.config.kill_switch_file
+                if stop and Path(stop).exists():
+                    duplicate = {"refused": f"new entries are paused: {stop} exists"}
             positions.append(
                 asdict(p)
                 | {"bot": p.magic == self.config.magic, "r": r, "reversal": self._reversal(p, price, now),
-                   "book": manual}
+                   "book": manual, "duplicate": duplicate}
             )  # fmt: skip
+        self._heads_up(held, rows, now)
         open_tickets = {p.ticket for p in held}
         self._reversal_alerts.forget(open_tickets)
         for ticket in [t for t in self._watches if t not in open_tickets]:
@@ -609,6 +866,10 @@ class Monitor:
             "now": now,
             "strategy": self.config.strategy.name,
             "setups": self.config.setups(),
+            # the config's own per-symbol setups (None when every symbol has the main one), and
+            # whether they are the ones on screen: the setup bar's "As configured"
+            "configured_setups": self._configured().setups() if self._configured_mixed else None,
+            "as_configured": self.config.setups() == self._configured().setups(),
             "setup_text": setup_text(self.config),
             "strategies": list(STRATEGIES),
             "timeframe": self.config.timeframe,
@@ -617,6 +878,7 @@ class Monitor:
             "session": "{:02d}-{:02d} UTC".format(*self.config.schedule.hours(now)),
             "account": asdict(account) | {"server": server, "floating": account.equity - account.balance},
             "gate": {"execute": gate.execute, "reason": gate.reason, "live_flag": self.live_flag},
+            "breakeven": dict(self._breakeven_state),
             "symbols": rows,
             "positions": positions,
             "book": self.desk.state(now) if self.desk else None,
@@ -691,6 +953,14 @@ class Monitor:
             self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now, preview
         )
         sizes = self._sizes(symbol, advice, features, tick)  # before the alerts, which quote them
+        get_in = None
+        rule = get_in_rule(advice)
+        if rule is not None and not (self.desk and self.desk.manual):  # the bot's entry, held back by a limit
+            params = self.config.for_symbol(symbol)
+            free = trade_plan(
+                self.engine, symbol, spec, params, features.iloc[-1], tick, advice.side, caps=False
+            )
+            get_in = {"side": advice.side, "over": rule, "plan": free}
         self._note(symbol, advice, now, spec)
         self._note_forming(symbol, advice, now, spec)
         self._note_failed(symbol, advice, now, spec)
@@ -703,6 +973,9 @@ class Monitor:
             "digits": spec.digits,
             "pip": pip_size(spec),
             "pip_label": "pips" if spec.digits in (3, 5) else "points",
+            "volume_min": spec.volume_min,
+            "volume_step": spec.volume_step,
+            "auto_trade": self.config.for_symbol(symbol).risk.auto_trade,
             "bid": tick.bid,
             "ask": tick.ask,
             "spread": tick.ask - tick.bid,
@@ -713,6 +986,7 @@ class Monitor:
             "forming": forming(symbol, self.config.timeframe) if forming else None,
             "advice": advice,
             "sizes": sizes,
+            "get_in": get_in,
             "setups": setups,
             "trend": trend,
             "structure": self._structure_for(symbol, features, spec),
@@ -1011,9 +1285,10 @@ class Monitor:
             action = "EXIT" if found.level == EXIT else "REVERSAL"
             self.activity.append({"time": now, "symbol": p.symbol, "action": action, "text": text})
             log.warning("%s %s", p.symbol, text)
-            self._send(
-                f"{'GET OUT' if found.level == EXIT else 'REVERSAL WARNING'} · {p.symbol}\n{text}", "exit"
-            )
+            if self._warns():
+                self._send(
+                    f"{'GET OUT' if found.level == EXIT else 'REVERSAL WARNING'} · {p.symbol}\n{text}", "exit"
+                )
         elif forming:
             signs = " ".join(s["text"] for s in forming)
             text = (
@@ -1022,7 +1297,13 @@ class Monitor:
                 f"It can still disappear. You hold {holding}"
             )
             self.activity.append({"time": now, "symbol": p.symbol, "action": "REVERSAL", "text": text})
-            self._send(f"REVERSAL FORMING (unconfirmed) · {p.symbol}\n{text}", "forming")
+            if self._warns():
+                self._send(f"REVERSAL FORMING (unconfirmed) · {p.symbol}\n{text}", "forming")
+
+    def _warns(self) -> bool:
+        """Reversal warnings reach the phone from one process only: while the trading loop holds
+        the duty (this dashboard has only just started), it sends them."""
+        return self.duty is None or self.duty.held()
 
     def _heartbeat(self, now: datetime) -> None:
         """STARTED on the first refresh, then RUNNING once each trading day when the session
@@ -1037,7 +1318,9 @@ class Monitor:
                 "status",
             )
             return
-        start, _ = self.config.schedule.hours(now)
+        start, end = self.config.schedule.hours(now)
+        if end - start >= 24:  # trading all day: the session opens at midnight UTC, a phone at 3 a.m.
+            start = session_hours("london", now)[0]  # so the day's message comes at the London open
         if now.weekday() >= 5 or now.hour < start or self._heartbeat_day == now.date():
             return
         self._heartbeat_day = now.date()
@@ -1047,12 +1330,80 @@ class Monitor:
             "status",
         )
 
+    def _heads_up(self, held: list, rows: list[dict], now: datetime) -> None:
+        """Once per trade placed by hand on an instrument the bot trades, opened without a BUY, SELL
+        or JOIN on screen for it: say so, and that it takes the bot's place on that instrument.
+        Trades already open when the dashboard starts are not news. Always the MT5 account's trades,
+        where the bot trades: with one of your own accounts selected, ``held`` is that account's."""
+        if self.desk and self.desk.manual:
+            terminal = getattr(self.broker, "terminal_positions", None)
+            held = terminal(None) if terminal else held
+        manual = [p for p in held if p.magic != self.config.magic]
+        if self._manual_seen is None:
+            self._manual_seen = {p.ticket for p in manual}
+            return
+        for p in manual:
+            if p.ticket in self._manual_seen:
+                continue
+            self._manual_seen.add(p.ticket)
+            row = next((r for r in rows if r.get("symbol") == p.symbol), None)
+            advice = row.get("advice") if row else None
+            if advice is None:
+                continue  # not an instrument the bot trades, or no advice to compare with
+            action = advice.get("action") if isinstance(advice, dict) else getattr(advice, "action", "")
+            side = advice.get("side") if isinstance(advice, dict) else getattr(advice, "side", 0)
+            headline = advice.get("headline") if isinstance(advice, dict) else getattr(advice, "headline", "")
+            if action in ("BUY", "SELL", "JOIN") and side == p.side:
+                continue  # backed by the dashboard
+            word = "BUY" if p.side > 0 else "SELL"
+            risk = self.config.for_symbol(p.symbol).risk
+            effects = []  # what the bot does about it, as configured
+            if risk.account_trades:
+                if risk.max_positions_per_symbol <= 1:
+                    effects.append(f"While it is open the bot takes no trade on {p.symbol}")
+                effects.append("it counts toward the bot's loss and risk limits")
+            sentence = ", and ".join(effects)
+            after = f" {sentence[0].upper()}{sentence[1:]}." if sentence else ""
+            text = (
+                f"Your {word} {p.volume:g} {p.symbol} was opened without a bot entry on screen (it showed: "
+                f"{headline}). Entries without a signal or join lost money in the stored history.{after}"
+            )
+            log.info("%s: %s", p.symbol, text)
+            self.activity.append({"time": now, "symbol": p.symbol, "action": "NOTE", "text": text})
+            self._send(f"NO SIGNAL · {p.symbol}\n{text}", "position")
+
+    def _weekly(self, now: datetime) -> None:
+        """Saturday from 08:00 UTC, once a week: the bot's scorecard (its own trades against the 50 /
+        100 trade milestones), and your own trades beside it."""
+        if not self.desk or now.weekday() != 5 or now.hour < 8:
+            return
+        week = tuple(now.isocalendar())[:2]
+        if self._weekly_sent == week:
+            return
+        review = (self.desk.state(now) or {}).get("review") or {}
+        bot = review.get("bot")
+        if not bot:
+            return
+        self._weekly_sent = week
+        lines = ["WEEKLY · tradebot", f"Bot scorecard: {bot['text']}"]
+        own = review.get("own") or {}
+        if own.get("trades") and own.get("avg_r") is not None:
+            lines.append(
+                f"Your own trades, last {review.get('days')} days: {own['trades']}, {own['avg_r']:+.2f}R each."
+            )
+        lines.append("Judge by the R per trade, not the dollars: the dollars follow the size.")
+        self._send("\n".join(lines), "status")
+
     def _setup_key(self, symbol: str) -> tuple[str, str]:
         """The setup and timeframe on screen for ``symbol``: part of every once-only alert key."""
         return self.config.for_symbol(symbol).strategy.name, self.config.timeframe
 
     def _send(self, text: str, kind: str = "info") -> None:
-        """To the phone. ``kind`` lets a channel pick what it sends: see ``notify.IMPORTANT``."""
+        """To the phone. ``kind`` lets a channel pick what it sends: see ``notify.IMPORTANT``.
+        A second dashboard sends nothing: the first one already says it all."""
+        if self.duty is not None and not self.duty.primary:
+            log.debug("not sent (another dashboard is running): %s", text.split("\n", 1)[0])
+            return
         if self.notifier:
             self.notifier.send(text, kind)
 
@@ -1141,54 +1492,229 @@ class Monitor:
 
     def _safe_execute(self, order: _Order) -> dict[str, Any]:
         try:
-            return self.execute(order.symbol, order.side, order.manual)
+            if order.duplicate is not None:
+                return self.duplicate(order.duplicate)
+            return self.execute(
+                order.symbol, order.side, order.manual, override=order.override, volume=order.volume
+            )
         except Exception as exc:
             log.exception("order failed")
             return {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
 
-    def execute(self, symbol: str, side: int, manual: bool = False) -> dict[str, Any]:
+    def _order_gate(self) -> str | None:
+        """Why the dashboard may not send an order right now, or None. The STOP file pauses every
+        new entry from here too: Get in and Duplicate set aside the bot's limits, never that."""
+        if self.desk and self.desk.manual:
+            return f"orders are disabled: {REFUSAL}"
+        stop = self.config.kill_switch_file
+        if stop and Path(stop).exists():
+            return f"new entries are paused: {stop} exists (delete it to resume)"
+        account = self.broker.account()
+        allowed = getattr(self.broker, "terminal_trading_allowed", lambda: False)()
+        gate = trading_gate(self.config, account, self.live_flag, allowed)
+        return None if gate.execute else f"orders are disabled: {gate.reason}"
+
+    def execute(
+        self,
+        symbol: str,
+        side: int,
+        manual: bool = False,
+        override: bool = False,
+        volume: float | None = None,
+    ) -> dict[str, Any]:
         """Place a trade if, right now, the gate is open and the engine's risk rules allow it.
 
         A bot trade must match the current advice. A manual trade is the user's own call on
         direction: no strategy signal is required, but the trading gate, every entry guard
         (session, news, loss limits, positions, spread) and the engine's sizing still apply.
+
+        ``override`` ("Get in", manual only): a bot signal or join the limits held back is taken
+        anyway, as the user's own call. Only the limits are set aside (loss limits, positions, open
+        risk, margin, hours, news, spread): never a stale quote or bar, and the size is still the
+        configured risk per trade.
+
+        ``volume`` ("Your size", manual only): the lots you chose instead of the bot's size; see
+        ``_own_size``.
         """
         if symbol not in self.symbols or side not in WORD:
             return {"ok": False, "message": "unknown symbol or side"}
-        if self.desk and self.desk.manual:
-            return {"ok": False, "message": f"orders are disabled: {REFUSAL}"}
+        if override and not manual:
+            return {"ok": False, "message": "Get in is your own call: send it as a manual order"}
+        if volume is not None and (not manual or override):
+            return {
+                "ok": False,
+                "message": "your size is your own call: send it as a manual order, without Get in",
+            }
+        closed = self._order_gate()
+        if closed:
+            return {"ok": False, "message": closed}
         now = self.broker.now()
-        account = self.broker.account()
-        gate = trading_gate(self.config, account, self.live_flag, self.broker.terminal_trading_allowed())
-        if not gate.execute:
-            return {"ok": False, "message": f"orders are disabled: {gate.reason}"}
         spec = self.broker.symbol(symbol)
         tick = self.broker.tick(symbol)
+        params = self.config.for_symbol(symbol)
         features = self._features_for(symbol, now)
-        advice = advise(self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now)
+        advice = advise(self.engine, symbol, spec, params, features, tick, now)
+        if volume is not None:
+            return self._own_size(symbol, side, volume, spec, tick, params, features, advice, now)
+        over = ""
         if manual:
             plan = advice.plans.get("buy" if side > 0 else "sell")
             if plan is None:
                 return {"ok": False, "message": f"no plan available: {advice.headline}"}
-            if advice.blocker or plan.rejected:
-                return {"ok": False, "message": f"blocked by a risk rule: {advice.blocker or plan.rejected}"}
+            held = advice.blocker or plan.rejected
+            if held and override:
+                rule = get_in_rule(advice)
+                if rule is None or advice.side != side:
+                    return {
+                        "ok": False,
+                        "message": f"nothing to get in on: {advice.headline}. {advice.detail}",
+                    }
+                plan = trade_plan(
+                    self.engine, symbol, spec, params, features.iloc[-1], tick, side, caps=False
+                )
+                if plan.rejected:
+                    return {"ok": False, "message": f"cannot size it: {plan.rejected}"}
+                over = rule
+            elif held:
+                return {"ok": False, "message": f"blocked by a risk rule: {held}"}
         else:
             plan = advice.plan
             if not advice.actionable or advice.side != side or plan is None or plan.rejected:
                 return {"ok": False, "message": f"not advised any more: {advice.headline}. {advice.detail}"}
 
+        if over:
+            reason = f"manual (Get in): the bot's {advice.action.lower()} taken over its limit: {over}"
+        else:
+            reason = "manual: the user's call from the dashboard" if manual else "advisor: " + advice.detail
+        label = f"over the bot's limit ({over})" if over else ""
+        return self._place(symbol, side, plan.volume, plan.stop_distance, plan.target_distance, plan.stop,
+                           plan.target, manual, reason, label, now)  # fmt: skip
+
+    def _own_size(
+        self, symbol: str, side: int, volume: float, spec: SymbolSpec, tick: Tick, params: SymbolParams,
+        features: pd.DataFrame, advice: Advice, now: datetime,
+    ) -> dict[str, Any]:  # fmt: skip
+        """ "Your size": the bot's stop and target for ``side`` at the live price, with the lots you
+        typed. Set aside: the size per trade (including the smallest lot being over it, as on gold
+        in a small account) and the open-risk and margin caps, as for Get in. Still held: the
+        trading gate, a fresh quote and bar, every entry guard (hours, news, loss limits,
+        positions, spread), the broker's lot limits, and ``OWN_SIZE_MAX_RISK``."""
+        if advice.plans.get("buy" if side > 0 else "sell") is None:
+            return {"ok": False, "message": f"no plan available: {advice.headline}"}
+        if advice.blocker:
+            return {"ok": False, "message": f"blocked by a risk rule: {advice.blocker}"}
+        if not math.isfinite(volume) or not spec.volume_min - 1e-9 <= volume <= spec.volume_max + 1e-9:
+            return {
+                "ok": False,
+                "message": f"{volume:g} lots is outside the broker's {spec.volume_min:g} to {spec.volume_max:g}",
+            }
+        if abs(spec.normalize_volume(volume) - volume) > 1e-9:
+            return {
+                "ok": False,
+                "message": f"{volume:g} lots is not a multiple of the lot step {spec.volume_step:g}",
+            }
+        row = features.iloc[-1]
+        sized = self.engine.plan_entry(symbol, spec, params, row, tick.ask - tick.bid, side, caps=False)
+        if isinstance(sized, Rejection) and sized.key != "size":  # the size is yours; nothing else is
+            return {"ok": False, "message": f"cannot plan it: {sized.message}"}
+        plan = trade_plan(self.engine, symbol, spec, params, row, tick, side, caps=False)
+        equity = self.broker.account().equity
+        loss = -self._money_at(symbol, side, volume, plan.entry, plan.stop)
+        percent = loss / equity * 100 if equity > 0 else math.inf
+        if not math.isfinite(percent) or percent > OWN_SIZE_MAX_RISK + 1e-9:
+            return {
+                "ok": False,
+                "message": f"{volume:g} lots would lose {loss:,.2f} at the stop ({percent:.1f}% of equity): "
+                f"more than the {OWN_SIZE_MAX_RISK:g}% one dashboard order may risk",
+            }
+        limit = params.risk.risk_percent
+        over = f", over the bot's {limit:g}%" if percent > limit + 1e-9 else ""
+        label = f"your size: {percent:.1f}% risk{over}"
+        reason = (
+            f"manual (your size): {volume:g} lots, {loss:,.2f} at the stop ({percent:.2f}% of equity{over})"
+        )
+        return self._place(symbol, side, volume, plan.stop_distance, plan.target_distance, plan.stop,
+                           plan.target, True, reason, label, now)  # fmt: skip
+
+    def duplicate_plan(self, p: Any) -> dict[str, Any]:
+        """What "Duplicate" sends for the bot's open trade ``p``: the same side, lots, stop and
+        target, at the live price; or ``refused`` and why. It is your own call (logged as manual),
+        so the bot's position limits do not stop it."""
+        if p.magic != self.config.magic:
+            return {"refused": "only the bot's trades are duplicated here"}
+        spec, tick, now = self.broker.symbol(p.symbol), self.broker.tick(p.symbol), self.broker.now()
+        problem = tick.problem(now)
+        if problem:
+            return {"refused": problem}
+        side, gap = p.side, spec.stops_level * spec.point
+        entry = tick.ask if side > 0 else tick.bid
+        if not p.sl:
+            return {"refused": "the trade has no stop to copy"}
+        if (side > 0 and not p.sl < tick.bid - gap) or (side < 0 and not p.sl > tick.ask + gap):
+            return {"refused": "price is too close to the trade's stop to copy it"}
+        if p.tp and ((side > 0 and not p.tp > tick.ask + gap) or (side < 0 and not p.tp < tick.bid - gap)):
+            return {"refused": "price is too close to the trade's target to copy it"}
+        volume = spec.normalize_volume(p.volume)
+        if volume < spec.volume_min:
+            return {"refused": f"{p.volume:g} lots is below the broker's minimum"}
+        risk = -self._money_at(p.symbol, side, volume, entry, p.sl)
+        reward = self._money_at(p.symbol, side, volume, entry, p.tp) if p.tp else None
+        equity = self.broker.account().equity
+        return {
+            "ticket": p.ticket, "symbol": p.symbol, "side": side, "volume": volume, "entry": entry,
+            "stop": p.sl, "target": p.tp or None, "sl_distance": (entry - p.sl) * side,
+            "tp_distance": (p.tp - entry) * side if p.tp else 0.0, "risk_amount": risk, "reward_amount": reward,
+            "risk_percent": risk / equity * 100 if equity > 0 else None,
+        }  # fmt: skip
+
+    def duplicate(self, ticket: int) -> dict[str, Any]:
+        """Open a copy of the bot's trade ``ticket`` (see ``duplicate_plan``), as your own call."""
+        closed = self._order_gate()
+        if closed:
+            return {"ok": False, "message": closed}
+        p = next((x for x in self.broker.positions(None) if x.ticket == ticket), None)
+        if p is None:
+            return {"ok": False, "message": f"trade #{ticket} is not open any more"}
+        if p.symbol not in self.symbols:
+            return {"ok": False, "message": f"{p.symbol} is not on the watchlist"}
+        plan = self.duplicate_plan(p)
+        if "refused" in plan:
+            return {"ok": False, "message": f"not duplicated: {plan['refused']}"}
+        return self._place(p.symbol, p.side, plan["volume"], plan["sl_distance"], plan["tp_distance"], plan["stop"],
+                           plan["target"], True, f"manual: duplicate of the bot's trade #{ticket}",
+                           f"duplicate of #{ticket}", self.broker.now())  # fmt: skip
+
+    def _money_at(self, symbol: str, side: int, volume: float, entry: float, price: float) -> float:
+        """Account-currency result of ``volume`` lots from ``entry`` to ``price``."""
+        calc = getattr(self.broker, "calc_profit", None)
+        value = calc(symbol, side, volume, entry, price) if calc else None
+        if value is not None and math.isfinite(value):
+            return float(value)
+        spec = self.broker.symbol(symbol)
+        return (price - entry) * side / spec.tick_size * spec.tick_value * volume
+
+    def _place(
+        self, symbol: str, side: int, volume: float, sl_distance: float, tp_distance: float, stop: float | None,
+        target: float | None, manual: bool, reason: str, label: str, now: datetime,
+    ) -> dict[str, Any]:  # fmt: skip
+        """Send the order, then journal it, put it in the activity feed and on the phone. A manual
+        order carries "manual" in its comment: the review counts it as your call, not the bot's."""
         word = WORD[side]
         comment = f"{self.config.comment} manual" if manual else self.config.comment
-        request = OrderRequest(symbol, side, plan.volume, plan.stop_distance, plan.target_distance, comment)
-        result = self.broker.open(request, self.config.magic)
-        reason = "manual: the user's call from the dashboard" if manual else "advisor: " + advice.detail
+        result = self.broker.open(
+            OrderRequest(symbol, side, volume, sl_distance, tp_distance, comment), self.config.magic
+        )
+        if result.partial and result.volume:
+            volume = result.volume  # only part was filled; the rest was cancelled by the broker
+            label = f"{label} · {result.message}" if label else result.message
         if self._journal:
             self._journal.record(JournalEvent(
-                now, "OPEN" if result.ok else "REJECTED", symbol, word, plan.volume, result.price,
-                plan.stop, plan.target, result.ticket, None, reason if result.ok else result.message, False,
+                now, "OPEN" if result.ok else "REJECTED", symbol, word, volume, result.price,
+                stop, target, result.ticket, None, reason if result.ok else result.message, False,
             ))  # fmt: skip
+        about = f" · {label}" if label else ""
         text = (
-            f"{'Manual ' if manual else ''}{word} {plan.volume} @ {result.price} · SL {plan.stop} · TP {plan.target}"
+            f"{'Manual ' if manual else ''}{word} {volume:g} @ {result.price} · SL {stop} · TP {target or 'none'}{about}"
             if result.ok
             else f"{word} rejected by the broker: {result.message}"
         )
@@ -1226,6 +1752,19 @@ class Monitor:
             return  # switched while this ran: the newer run owns the screen
         self.track_record = record
         self._track_pending = False
+
+
+def get_in_rule(advice: Advice) -> str | None:
+    """The limit that holds back the bot's own entry on ``advice.side`` (a signal it skipped, or a
+    join), which "Get in" may set aside as your own call; None when there is nothing to get in on
+    or the hold-up is the data (a stale quote or bar) or the STOP file (your own pause on every
+    new entry), which nobody should trade through."""
+    if advice.action not in ("SKIP", "JOIN") or advice.side not in WORD or advice.plan is None:
+        return None
+    held = advice.blocker or advice.plan.rejected
+    if not held or held.startswith(("data:", "kill switch")):
+        return None  # a stale quote or bar, or the STOP file: not limits to trade through
+    return held
 
 
 def _clip_line(line: list[float], offset: int) -> list[float]:
