@@ -36,7 +36,7 @@ from tradebot.advisor import (
 )
 from tradebot.book import REFUSAL, Book, BookBroker, BookError
 from tradebot.broker.base import Broker, OrderRequest, SymbolSpec, Tick
-from tradebot.config import STRATEGIES, BotConfig, SymbolParams, session_hours
+from tradebot.config import MARKET_HOURS, STRATEGIES, BotConfig, SymbolParams, market_closed, session_hours
 from tradebot.duty import Duty
 from tradebot.engine import Engine, Rejection
 from tradebot.journal import Journal, JournalEvent
@@ -157,6 +157,8 @@ class Monitor:
         self._state: dict[str, Any] = {"ready": False, "version": __version__}
         self._features: dict[str, pd.DataFrame] = {}
         self._fetched: dict[str, float] = {}
+        self._raw_last: dict[str, pd.Timestamp] = {}
+        self._fetched_at: dict[str, pd.Timestamp] = {}
         self._recent: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._link = Link(broker)
         self._last_error: str | None = None
@@ -948,6 +950,8 @@ class Monitor:
         spec = self._spec(symbol, now)
         tick = self.broker.tick(symbol)
         features = self._features_for(symbol, now)
+        if features.empty:
+            raise ValueError("no bar of the exchange's regular session yet")
         preview = self._preview_for(symbol, features)
         advice = advise(
             self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now, preview
@@ -976,6 +980,7 @@ class Monitor:
             "volume_min": spec.volume_min,
             "volume_step": spec.volume_step,
             "auto_trade": self.config.for_symbol(symbol).risk.auto_trade,
+            **self._stock_facts(symbol, spec, now),
             "bid": tick.bid,
             "ask": tick.ask,
             "spread": tick.ask - tick.bid,
@@ -991,6 +996,22 @@ class Monitor:
             "trend": trend,
             "structure": self._structure_for(symbol, features, spec),
             "history": self._history(symbol, features),
+        }
+
+    def _stock_facts(self, symbol: str, spec: SymbolSpec, now: datetime) -> dict[str, Any]:
+        """For an instrument with exchange hours (a stock): the hours, whether they are on now, the
+        contract size (one lot is so many shares) and the next earnings report, if the file has it."""
+        hours = self.config.for_symbol(symbol).risk.market_hours
+        if not hours:
+            return {"market_hours": ""}
+        calendar = self.engine.earnings
+        return {
+            "market_hours": MARKET_HOURS[hours][3],
+            "market_open": market_closed(hours, now) is None,
+            "contract_size": spec.contract_size,
+            "earnings_known": bool(calendar and calendar.known(symbol)),
+            "earnings_next": calendar.next_report(symbol, now) if calendar else None,
+            "earnings_error": calendar.error if calendar else None,
         }
 
     # --- every setup at once -------------------------------------------------------------------
@@ -1020,7 +1041,8 @@ class Monitor:
                 params = self._setup_config(name).for_symbol(symbol)
                 try:
                     frames[name] = (params, compute_signals(
-                        bars, params.strategy, self.config.timeframe, self._htf.get(symbol) or {}
+                        bars, params.strategy, self.config.timeframe, self._htf.get(symbol) or {},
+                        params.risk.market_hours,
                     ))  # fmt: skip
                 except Exception:
                     log.debug("%s: %s setup not computed", symbol, name, exc_info=True)
@@ -1044,6 +1066,8 @@ class Monitor:
     def _setup_summary(
         self, frame: pd.DataFrame, p: Any, advice: Advice, tick: Any, spec: SymbolSpec
     ) -> dict[str, Any]:
+        if frame.empty:  # a stock with no regular-session bar yet (a new listing, pre-market)
+            return {"action": "WAIT", "side": 0, "text": "No bar of the exchange's regular session yet."}
         row = frame.iloc[-1]
         if advice.action == "CLOSED":
             return {"action": "CLOSED", "side": 0, "text": advice.headline}
@@ -1177,12 +1201,23 @@ class Monitor:
         fetched = self._fetched.get(symbol, 0.0)
         if features is not None:
             bar = pd.Timedelta(minutes=self.config.bar_minutes)
-            next_close = features["time"].iloc[-1] + 2 * bar
-            due = pd.Timestamp(now) >= next_close and time.monotonic() - fetched >= 5
-            if not due and time.monotonic() - fetched < 300:
+            # the broker's own last bar: a stock's signals skip the pre-market ones, and its last
+            # signal bar alone would make every refresh look overdue until the open
+            next_close = self._raw_last.get(symbol, features["time"].iloc[-1]) + 2 * bar
+            # fetched since that bar was due and still none: a closed market, asked once a minute
+            quiet = self._fetched_at.get(symbol, pd.Timestamp.min) >= next_close
+            since = time.monotonic() - fetched
+            due = pd.Timestamp(now) >= next_close and since >= (60 if quiet else 5)
+            if not due and since < 300:
                 return features
         bars, htf = fetch_frames(self.broker, self.config, symbol)
-        features = compute_signals(bars, self.config.for_symbol(symbol).strategy, self.config.timeframe, htf)
+        params = self.config.for_symbol(symbol)
+        features = compute_signals(
+            bars, params.strategy, self.config.timeframe, htf, params.risk.market_hours
+        )
+        if not bars.empty:
+            self._raw_last[symbol] = pd.Timestamp(bars["time"].iloc[-1])
+        self._fetched_at[symbol] = pd.Timestamp(now)
         self._htf[symbol] = htf
         self._fetched[symbol] = time.monotonic()
         with self._lock:

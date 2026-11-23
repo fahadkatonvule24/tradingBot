@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from tradebot.broker.clock import NEW_YORK
-from tradebot.config import TIMEFRAME_MINUTES, StrategyParams
+from tradebot.config import MARKET_HOURS, TIMEFRAME_MINUTES, StrategyParams
 from tradebot.indicators import adx, atr, ema, macd, rsi
 from tradebot.signal_quality import QUALITY_LABELS, add_quality_features, quality_checks
 
@@ -227,19 +227,38 @@ def trend_columns(frame: pd.DataFrame | pd.Series) -> list[str]:
     return [c for c in frame.keys() if isinstance(c, str) and c.startswith("trend_")]  # noqa: SIM118
 
 
+def regular_session(bars: pd.DataFrame, market_hours: str, timeframe: str) -> pd.DataFrame:
+    """The bars that overlap the exchange's regular session, for an instrument with ``market_hours``
+    (``risk.market_hours``). Exness builds US stock bars from 06:00 New York: 30% of the H1 bars are
+    pre-market quotes, with half the range and two to four times the spread, which shrank the ATR
+    (so the stops) and padded the averages. Daily bars, and instruments without exchange hours,
+    are kept whole. The 09:00-10:00 New York bar stays: it holds the opening half hour."""
+    minutes = TIMEFRAME_MINUTES[timeframe]
+    if not market_hours or bars.empty or minutes >= 1440:
+        return bars
+    zone, opens, closes, _ = MARKET_HOURS[market_hours]
+    start = pd.to_datetime(bars["time"]).dt.tz_localize("UTC").dt.tz_convert(zone)
+    begin = start.dt.hour * 60 + start.dt.minute
+    session = (begin < closes.hour * 60 + closes.minute) & (begin + minutes > opens.hour * 60 + opens.minute)
+    keep = (session & (start.dt.day_of_week < 5)).to_numpy()
+    return bars if keep.all() else bars[keep].reset_index(drop=True)
+
+
 def compute_signals(
     bars: pd.DataFrame,
     p: StrategyParams,
     timeframe: str,
     htf: pd.DataFrame | dict[str, pd.DataFrame] | None = None,
+    market_hours: str = "",
 ) -> pd.DataFrame:
     """Indicators + filtered signal for every closed bar.
 
     ``htf`` holds real higher-timeframe bars: a dict keyed by timeframe, or one frame for the first
     timeframe of the ladder. Missing ones are resampled from ``bars``. ``trend`` is +1 / -1 only
-    when every timeframe of the ladder agrees; ``trend_<TF>`` holds each one.
+    when every timeframe of the ladder agrees; ``trend_<TF>`` holds each one. ``market_hours``
+    (an instrument's ``risk.market_hours``): only the regular session's bars are read.
     """
-    df = bars.reset_index(drop=True).copy()
+    df = regular_session(bars, market_hours, timeframe).reset_index(drop=True).copy()
     close = df["close"]
     df["atr"] = atr(df, p.atr_period)
     df["ema_fast"] = ema(close, p.fast_ema)

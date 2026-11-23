@@ -114,8 +114,12 @@ and the nine stock symbols in `config/config.json`. Each still needs a valid sig
 the spread, session, news, position, margin and risk limits. US stocks and Anthropic enter, and
 have their stops managed, only while the exchange takes orders: 09:30 to 16:00 New York time on
 weekdays, without NYSE holidays and with its 13:00 early closes (`risk.market_hours: "us_stocks"`).
-Exness quotes them from 06:00 New York, but refuses orders before the open. An instrument your
-account does not offer is skipped. Set `overrides.<symbol>.risk.auto_trade` to `false` to keep an instrument on the
+Exness quotes them from 06:00 New York, but refuses orders before the open. Their indicators
+read only the regular session's bars (pre-market quotes have half the range and up to four
+times the spread), and a stock listed in `config/earnings.json` takes no new entry from the
+trading day before its report to the day after it (`schedule.earnings_days_before/after`): a
+report can gap the price past any stop. Fill that file with each stock's report dates; the
+dashboard says when a stock has none. An instrument your account does not offer is skipped. Set `overrides.<symbol>.risk.auto_trade` to `false` to keep an instrument on the
 watchlist for signals only. `tradebot check` shows each instrument's **Auto entry** mode, and the
 trading loop logs its automatic-entry and signals-only lists at startup. The default config
 remains a dry run; a separate local config is used only when passed with `-c`.

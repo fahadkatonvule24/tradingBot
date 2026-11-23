@@ -1,0 +1,3 @@
+{
+  "_how": "Each stock's earnings report dates, New York calendar days, e.g. \"AAPL\": [\"2027-01-28\"]. The bot makes no new entry on that stock from the trading day before a report to the trading day after it (schedule.earnings_days_before / _after). A stock not listed here has no earnings pause."
+}

@@ -213,7 +213,7 @@ def breakout_buys(monkeypatch):
     """The other setups are computed from the bars: make the breakout one signal a buy."""
     monkeypatch.setattr("tradebot.ui.monitor.preview_features", lambda *a, **k: None)
 
-    def compute(bars, p, timeframe, htf=None):
+    def compute(bars, p, timeframe, htf=None, market_hours=""):
         return features({"signal": 1, "raw_signal": 1} if p.name == "breakout" else None)
 
     monkeypatch.setattr("tradebot.ui.monitor.compute_signals", compute)

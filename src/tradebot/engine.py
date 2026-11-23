@@ -25,6 +25,7 @@ import pandas as pd
 
 from tradebot.broker.base import BUY, Account, Broker, Deal, OrderRequest, Position, SymbolSpec
 from tradebot.config import BotConfig, RiskParams, SymbolParams, market_closed
+from tradebot.earnings import EarningsCalendar
 from tradebot.journal import Journal, JournalEvent
 from tradebot.news import NewsCalendar
 from tradebot.risk import drawdown_percent, loss_per_lot, open_risk, position_size, tighter_stop
@@ -115,10 +116,12 @@ class Engine:
     _acted_bar: dict[str, pd.Timestamp] = field(default_factory=dict)
     _older_deals: tuple[datetime, int, list[Deal]] | None = None
     _news: NewsCalendar | None = None
+    _earnings: EarningsCalendar | None = None
 
     def __post_init__(self) -> None:
         schedule = self.config.schedule
         self._news = NewsCalendar(schedule.news_file, schedule.news_feed_file if schedule.news_feed else None)
+        self._earnings = EarningsCalendar(schedule.earnings_file or None)
 
     @property
     def scope(self) -> int | None:
@@ -129,6 +132,10 @@ class Engine:
     @property
     def news(self) -> NewsCalendar | None:
         return self._news
+
+    @property
+    def earnings(self) -> EarningsCalendar | None:
+        return self._earnings
 
     def forget_account(self) -> None:
         """The terminal switched accounts: the loss limits are read again from the new account's
@@ -371,6 +378,15 @@ class Engine:
         )
         if event:
             return f"news: {event.currency} {event.title} at {event.time:%H:%M} UTC"
+        report = (
+            self._earnings.blackout(symbol, now, sched.earnings_days_before, sched.earnings_days_after)
+            if self._earnings
+            else None
+        )
+        if report:
+            return (
+                f"earnings: {symbol} reports on {report:%a %d %b} (a report can gap the price past the stop)"
+            )
 
         status, today = self._limits(r, now, self.broker.account())
         if status.blocked:

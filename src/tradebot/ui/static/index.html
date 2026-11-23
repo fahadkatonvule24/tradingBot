@@ -1711,7 +1711,7 @@ function renderPlan(row) {
   const typing = document.activeElement;   // a refresh must not take the lots box away while you type in it
   if (typing && typing.id === "own-lots" && box.contains(typing) && p && typing.dataset.key === `${row.symbol}:${p.side}`) return;
   if (!p) {
-    box.replaceChildren(el("h2", { text: "Trade plan" }), el("div", { class: "empty", text: "No plan while the market is closed." }));
+    box.replaceChildren(...[el("h2", { text: "Trade plan" }), el("div", { class: "empty", text: "No plan while the market is closed." }), stockNote(row)].filter(Boolean));
     return;
   }
   const word = p.side > 0 ? "BUY" : "SELL";
@@ -1731,7 +1731,7 @@ function renderPlan(row) {
     ...line("Stop loss", px(p.stop, row.digits), distance(row, p.stop_distance), css("--down")),
     ...line("Take profit", px(p.target, row.digits), distance(row, p.target_distance), css("--up")),
     el("div", { class: "divider" }),
-    ...line("Size", p.volume ? `${p.volume} lots` : "—", p.volume ? `${num(p.risk_percent)}% risk` : ""),
+    ...line("Size", p.volume ? `${p.volume} lots${sharesText(row, p.volume)}` : "—", p.volume ? `${num(p.risk_percent)}% risk` : ""),
     ...line("Reward : risk", `${num(p.reward_risk, 1)} : 1`, ""),
   );
   const outcome = el("div", { class: "outcome" },
@@ -1755,7 +1755,7 @@ function renderPlan(row) {
         : "The size above is for the MetaTrader 5 account. Choose one of your accounts under Account to size from its equity.",
       "Nothing is sent to a broker from here. Place the trade on your phone, then log it so the loss limits, the reversal warning and the review know about it.",
     ].filter(Boolean).map((text) => el("div", { class: "fine", text }));
-    box.replaceChildren(...[el("h2", { text: title }), toggle, el("div", { class: "sub", text: subtitle }), list, outcome, sizes, overlap, logBtn, ...fine].filter(Boolean));
+    box.replaceChildren(...[el("h2", { text: title }), toggle, el("div", { class: "sub", text: subtitle }), list, outcome, sizes, overlap, logBtn, stockNote(row), ...fine].filter(Boolean));
     return;
   }
   const g = state.gate;
@@ -1772,7 +1772,7 @@ function renderPlan(row) {
   else if (a.blocker) label = `Blocked by a risk rule: ${a.blocker}`;
   else { label = `Place ${word} ${p.volume} lots (your call)`; disabled = false; }
   const btn = el("button", { class: `order-btn ${disabled ? "" : cls}`, type: "button", disabled, text: label, onclick: () => confirmOrder(row, order, !live || Boolean(over), over) });
-  const notes = [];
+  const notes = [stockNote(row)].filter(Boolean);
   if (row.auto_trade === false) notes.push(el("div", { class: "notice", style: "margin-top:10px", text: `Signals only: the trading loop never trades ${row.symbol} by itself. Its setup did not hold up in the backtest; place it here if you want it.` }));
   if (getIn && g.execute) notes.push(el("div", { class: "fine", text: `The bot skipped this ${a.action === "JOIN" ? "join" : "signal"}: ${getIn.over}. Get in takes it anyway as your own call, sized at the configured risk per trade${getIn.plan.risk_amount ? ` (${money(-getIn.plan.risk_amount, true)} at the stop)` : ""}.` }));
   else if (p.rejected) notes.push(el("div", { class: "fine", text: `The engine would not take this trade: ${p.rejected}.${g.execute ? " Type your own size above to take it anyway, as your call." : ""}` }));
@@ -1783,6 +1783,20 @@ function renderPlan(row) {
   const be = state.breakeven || {};
   notes.push(el("div", { class: "fine", text: `The stop and target are sent with the order. Breakeven at +${be.at_r ?? 1}R, ${Math.round((be.partial_fraction ?? 0.5) * 100)}% off at +${be.partial_r ?? 1.5}R and the trailing stop from +${be.trail_start_r ?? 1.5}R apply while \`tradebot run\` manages the position.` }));
   box.replaceChildren(...[el("h2", { text: title }), toggle, el("div", { class: "sub", text: subtitle }), list, outcome, sizes, overlap, btn, own, ...notes].filter(Boolean));
+}
+
+// A stock: lots in shares, its exchange hours and its next earnings report
+const sharesText = (row, lots) => (row.market_hours && row.contract_size ? ` · ${Math.round(lots * row.contract_size)} shares` : "");
+function stockNote(row) {
+  if (!row.market_hours) return null;
+  const hours = `${row.market_open ? "Exchange open" : "Exchange closed"}: orders are taken ${row.market_hours}, weekdays (no NYSE holidays). The bot enters and moves stops only then.`;
+  const next = row.earnings_next ? new Date(`${row.earnings_next}T12:00:00Z`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" }) : null;
+  const earnings = row.earnings_error ? `Earnings dates: ${row.earnings_error}`
+    : next ? `Next earnings report: ${next}. No new entry from the trading day before to the day after: a report can gap the price past any stop.`
+    : row.earnings_known ? "No upcoming earnings date listed for it."
+    : "Earnings dates not set for it (config/earnings.json): the bot cannot pause around its reports.";
+  return el("div", { class: `notice${!row.earnings_known && !row.earnings_error ? " caution" : ""}`, style: "margin-top:10px;display:block" },
+    el("div", { text: hours }), el("div", { style: "margin-top:6px", text: earnings }));
 }
 
 // "Your size": the lots you type, with the bot's stop and target for this side at the live price

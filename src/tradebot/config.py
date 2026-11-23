@@ -335,6 +335,12 @@ class ScheduleParams:
     news_feed_file: str = "news_feed.json"
     news_before_minutes: int = 30
     news_after_minutes: int = 30
+    earnings_file: str = "config/earnings.json"
+    """Stocks' earnings report dates (``tradebot.earnings``): no new entry on a stock from
+    ``earnings_days_before`` trading days before its report to ``earnings_days_after`` after it.
+    Empty, missing or without the stock = no earnings pause for it."""
+    earnings_days_before: int = 1
+    earnings_days_after: int = 1
     max_bar_age_bars: int = 2
 
     def hours(self, when: datetime | date | None = None) -> tuple[int, int]:
@@ -562,6 +568,8 @@ def _validate(c: BotConfig) -> list[str]:
         errors.append("schedule.max_bar_age_bars must be >= 1")
     if c.schedule.news_before_minutes < 0 or c.schedule.news_after_minutes < 0:
         errors.append("schedule.news_before_minutes and news_after_minutes must be >= 0")
+    if not 0 <= c.schedule.earnings_days_before <= 10 or not 0 <= c.schedule.earnings_days_after <= 10:
+        errors.append("schedule.earnings_days_before and earnings_days_after must be 0 to 10")
     for channel in ("whatsapp", "ntfy"):
         level = getattr(c.alerts, channel)
         if level not in ALERT_LEVELS:

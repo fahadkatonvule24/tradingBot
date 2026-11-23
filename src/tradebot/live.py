@@ -19,7 +19,7 @@ from tradebot.config import TIMEFRAME_MINUTES, BotConfig
 from tradebot.duty import Duty
 from tradebot.engine import Engine
 from tradebot.reversal import EXIT, Alerts, assess, holding_text
-from tradebot.strategy import compute_signals
+from tradebot.strategy import compute_signals, regular_session
 
 log = logging.getLogger(__name__)
 
@@ -275,6 +275,9 @@ class LiveRunner:
         params = self.config.for_symbol(symbol)
         spec = self.broker.symbol(symbol)
         features = latest_features(self.broker, self.config, symbol)
+        if features.empty:  # a stock with no regular-session bar in its history yet
+            log.info("%s: no bar of the exchange's regular session yet; nothing to decide", symbol)
+            return
         self._features[symbol] = features
         row = features.iloc[-1].copy()
         now = self.broker.now()
@@ -311,7 +314,8 @@ filter near a crossing), 0.0006% after 6. Live trading must see the same trend a
 def latest_features(broker: Broker, config: BotConfig, symbol: str) -> pd.DataFrame:
     """Signals on the most recent closed bars, with the trend filter fed by real higher-timeframe bars."""
     bars, htf = fetch_frames(broker, config, symbol)
-    return compute_signals(bars, config.for_symbol(symbol).strategy, config.timeframe, htf)
+    params = config.for_symbol(symbol)
+    return compute_signals(bars, params.strategy, config.timeframe, htf, params.risk.market_hours)
 
 
 def fetch_frames(
@@ -360,6 +364,9 @@ def preview_features(
     bar = forming(symbol, config.timeframe)
     if bar is None or pd.Timestamp(bar["time"]) <= closed["time"].iloc[-1]:
         return None
+    market_hours = config.for_symbol(symbol).risk.market_hours
+    if market_hours and regular_session(pd.DataFrame([bar]), market_hours, config.timeframe).empty:
+        return None  # a pre-market bar: the regular session's signals do not read it
     # the forming bar is never joined, and the join columns cost a full liquidity scan each time
     strategy = replace(config.for_symbol(symbol).strategy, auto_join=False)
     columns = [*BAR_COLUMNS, *(c for c in ("tick_volume",) if c in closed.columns and c in bar)]
@@ -375,7 +382,7 @@ def preview_features(
         if higher and pd.Timestamp(higher["time"]) + pd.Timedelta(minutes=TIMEFRAME_MINUTES[tf]) <= closes:
             frame = pd.concat([frame, pd.DataFrame([{**higher, "spread": 0}])], ignore_index=True)
         htf[tf] = frame
-    return compute_signals(base, strategy, config.timeframe, htf)
+    return compute_signals(base, strategy, config.timeframe, htf, market_hours)
 
 
 def describe_bar(row: pd.Series) -> str:

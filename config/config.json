@@ -102,10 +102,10 @@
   },
 
   "overrides": {
-    "AAPL": { "strategy": { "name": "retest" },
+    "AAPL": { "strategy": { "name": "breakout" },
              "risk": { "market_hours": "us_stocks" },
              "backtest": { "commission_per_lot": 0.0, "swap_long": -6.2, "swap_short": -5.1, "swap_triple_day": 4 } },
-    "AMD": { "strategy": { "name": "breakout" },
+    "AMD": { "strategy": { "name": "pullback" },
              "risk": { "market_hours": "us_stocks" },
              "backtest": { "commission_per_lot": 0.0, "swap_long": -7.9, "swap_short": -6.5, "swap_triple_day": 4 } },
     "AMZN": { "strategy": { "name": "pullback" },
@@ -132,7 +132,7 @@
     "NVDA": { "strategy": { "name": "breakout" },
              "risk": { "market_hours": "us_stocks" },
              "backtest": { "commission_per_lot": 0.0, "swap_long": -2.5, "swap_short": -3.1, "swap_triple_day": 4 } },
-    "TSLA": { "strategy": { "name": "breakout" },
+    "TSLA": { "strategy": { "name": "retest" },
              "risk": { "auto_trade": true, "market_hours": "us_stocks" },
              "backtest": { "commission_per_lot": 0.0, "swap_long": -6.4, "swap_short": -5.2, "swap_triple_day": 4 } },
     "USDCAD": { "strategy": { "name": "breakout" },

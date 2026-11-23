@@ -7,6 +7,9 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from test_advisor_ui import broker as broker
+from test_advisor_ui import cfg as cfg
+from test_advisor_ui import fake as fake
 
 from tradebot import cli
 from tradebot.broker.base import SymbolSpec
@@ -288,3 +291,147 @@ def test_fetch_saves_each_symbols_history_under_its_own_name(tmp_path, monkeypat
     assert pd.read_csv(tmp_path / "AMD_H1.csv")["source"].tolist() == ["AMDm"]
     assert pd.read_csv(tmp_path / "META_H1.csv")["source"].tolist() == ["METAm"]
     assert not (tmp_path / "GONE_H1.csv").exists()
+
+
+def _hourly(start: str, hours: int) -> pd.DataFrame:
+    times = pd.date_range(start, periods=hours, freq="h")
+    price = pd.Series(range(hours), dtype=float) / 10 + 100
+    return pd.DataFrame({"time": times, "open": price, "high": price + 1, "low": price - 1, "close": price,
+                         "spread": 10, "tick_volume": 100})  # fmt: skip
+
+
+def test_a_stock_reads_only_its_regular_session_bars():
+    """30% of the stock H1 bars are pre-market quotes (half the range, 2-4x the spread)."""
+    from tradebot.strategy import regular_session
+
+    winter = _hourly("2026-11-23 10:00", 12)  # Monday 05:00-16:00 New York (EST)
+    kept = regular_session(winter, "us_stocks", "H1")
+    hours_ny = kept["time"].dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.hour.tolist()
+    assert hours_ny == [9, 10, 11, 12, 13, 14, 15]  # the 09:00 bar holds the opening half hour
+    summer = _hourly("2026-07-06 09:00", 12)  # Monday 05:00-16:00 New York (EDT)
+    assert len(regular_session(summer, "us_stocks", "H1")) == 7
+    saturday = _hourly("2026-11-21 14:00", 3)
+    assert regular_session(saturday, "us_stocks", "H1").empty
+    assert len(regular_session(winter, "", "H1")) == 12  # forex: every bar
+    assert len(regular_session(winter, "us_stocks", "D1")) == 12  # daily bars: whole
+
+
+def test_a_stocks_atr_ignores_the_pre_market():
+    from tradebot.config import StrategyParams
+    from tradebot.strategy import compute_signals
+
+    bars = pd.concat([_hourly(f"2026-11-{d} 10:00", 12) for d in (16, 17, 18, 19, 20, 23, 24, 25)])
+    bars = bars.reset_index(drop=True)
+    pre = bars["time"].dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.hour < 9
+    bars.loc[pre, "high"] = bars.loc[pre, "close"] + 0.01  # quiet pre-market quotes
+    bars.loc[pre, "low"] = bars.loc[pre, "close"] - 0.01
+    p = StrategyParams(use_trend_filter=False, atr_period=14)
+    stock = compute_signals(bars, p, "H1", market_hours="us_stocks")
+    every = compute_signals(bars, p, "H1")
+    hour = bars["time"].dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.hour
+    assert len(stock) == int(((hour >= 9) & (hour <= 15)).sum())  # pre-market and after the close dropped
+    assert stock["atr"].iloc[-1] > every["atr"].iloc[-1] * 1.2  # the thin quotes no longer shrink it (+25%)
+
+
+def test_the_dashboard_asks_a_closed_market_for_bars_once_a_minute(cfg, broker, monkeypatch):
+    from types import SimpleNamespace
+
+    from test_advisor_ui import SYMBOL
+
+    from tradebot.ui import monitor as module
+    from tradebot.ui.monitor import Monitor
+
+    clock = [1000.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    calls = []
+    friday = _hourly("2026-11-20 10:00", 11)  # the market's last bars, Friday
+
+    def fetch(broker, config, symbol):
+        calls.append(clock[0])
+        return friday, {}
+
+    monkeypatch.setattr(module, "fetch_frames", fetch)
+    monitor = Monitor(cfg, broker, [SYMBOL])
+    sunday = datetime_utc(2026, 11, 22, 12, 0)
+    monitor._features_for(SYMBOL, sunday)
+    for _ in range(30):  # every 5 s for 2.5 minutes
+        clock[0] += 5
+        monitor._features_for(SYMBOL, sunday)
+    assert len(calls) == 3  # the first look, then once a minute: not every 5 s
+
+
+def datetime_utc(*parts):
+    from datetime import datetime
+
+    return datetime(*parts)
+
+
+def test_new_stock_entries_pause_around_an_earnings_report(tmp_path):
+    """Reports come before the open or after the close: the gap is on the report day or the next."""
+    import json
+    from datetime import date, datetime
+
+    from tradebot.earnings import EarningsCalendar
+
+    path = tmp_path / "earnings.json"
+    path.write_text(json.dumps({"_how": "notes are skipped", "AAPL": ["2027-01-28"], "A": ["2027-03-01"]}))
+    calendar = EarningsCalendar(path)
+    report = date(2027, 1, 28)  # a Thursday
+    assert calendar.blackout("AAPLm", datetime(2027, 1, 26, 15), 1, 1) is None  # Tuesday: two days before
+    assert calendar.blackout("AAPLm", datetime(2027, 1, 27, 15), 1, 1) == report  # the day before
+    assert calendar.blackout("AAPLm", datetime(2027, 1, 29, 15), 1, 1) == report  # the day after
+    assert calendar.blackout("AAPLm", datetime(2027, 2, 1, 15), 1, 1) is None  # Monday after: clear
+    assert calendar.next_report("AAPLm", datetime(2027, 1, 2)) == report and calendar.known("AAPLm")
+    assert not calendar.known("TSLAm") and calendar.blackout("TSLAm", datetime(2027, 1, 27, 15), 1, 1) is None
+    assert calendar.blackout("AMDm", datetime(2027, 3, 1, 15), 1, 1) == date(2027, 3, 1)  # "A" by prefix
+    friday = EarningsCalendar(path)
+    path.write_text(json.dumps({"AAPL": ["2027-02-01"]}))  # a Monday report: the Friday before pauses
+    assert friday.blackout("AAPLm", datetime(2027, 1, 29, 15), 1, 1) == date(2027, 2, 1)
+    path.write_text("not json")
+    broken = EarningsCalendar(path)
+    assert (
+        broken.blackout("AAPLm", datetime(2027, 1, 29, 15), 1, 1) is None
+        and "could not be read" in broken.error
+    )
+    assert EarningsCalendar(tmp_path / "missing.json").next_report("AAPLm", datetime(2027, 1, 2)) is None
+
+
+def test_the_engine_skips_a_stock_signal_in_its_earnings_pause(config, eurusd, tmp_path):
+    import json
+
+    from conftest import at
+    from test_engine import flat, setup, step
+
+    path = tmp_path / "earnings.json"
+    path.write_text(json.dumps({"EURUSD": [str(pd.Timestamp(at(0)).date())]}))  # "reports" today
+    paused = replace(config, schedule=replace(config.schedule, earnings_file=str(path)))
+    config, sim, engine = setup(paused, eurusd)
+    step(engine, sim, config, eurusd, flat(0, signal=1, raw_signal=1))
+    assert not sim.positions(config.magic) and engine.events[-1].detail.startswith(
+        "buy signal skipped: earnings:"
+    )
+
+
+def test_earnings_pause_days_are_validated():
+    from tradebot.config import ConfigError, ScheduleParams
+
+    with pytest.raises(ConfigError, match="earnings_days"):
+        BotConfig(schedule=ScheduleParams(earnings_days_before=-1)).validate()
+
+
+def test_the_dashboard_row_says_a_stocks_hours_shares_and_earnings(cfg, broker):
+    from test_advisor_ui import SYMBOL, features, primed
+
+    from tradebot.ui.monitor import Monitor
+
+    stock = replace(cfg, overrides={SYMBOL: {"risk": {"market_hours": "us_stocks"}}},
+                    schedule=replace(cfg.schedule, earnings_file=""))  # fmt: skip
+    monitor = primed(Monitor(stock, broker, [SYMBOL]), features())
+    monitor.refresh()
+    row = monitor.snapshot()["symbols"][0]
+    assert row["market_hours"] == "09:30 to 16:00 New York time"
+    assert row["contract_size"] > 0 and row["earnings_known"] is False and row["earnings_next"] is None
+    assert isinstance(row["market_open"], bool)
+    forex = primed(Monitor(cfg, broker, [SYMBOL]), features())
+    forex.refresh()
+    assert forex.snapshot()["symbols"][0]["market_hours"] == ""
