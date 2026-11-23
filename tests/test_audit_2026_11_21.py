@@ -101,6 +101,166 @@ def test_the_triple_swap_day_is_validated():
         bad.validate()
 
 
+def test_review_finds_the_first_stop_saved_for_the_logged_in_account(tmp_path):
+    """First stops are saved per (login, server); `tradebot review` still looked them up by ticket
+    alone, so a phone trade that opened without a stop lost its 1R again (audit of 23 Nov 2026)."""
+    from types import SimpleNamespace
+
+    from tradebot.book import Book
+    from tradebot.cli import _SeenStops
+
+    book = Book(tmp_path / "journal.sqlite")
+    book.remember_stop(41, 1.09, account=(101, "Broker-A"))
+    book.remember_stop(41, 1.05, account=(202, "Broker-A"))  # the same ticket on another account
+    terminal = SimpleNamespace(opening=lambda ticket: (0.1, None), account_id=lambda: (101, "Broker-A"))
+    assert _SeenStops(terminal, book).opening(41) == (0.1, 1.09)
+    terminal.account_id = lambda: (303, "Broker-B")
+    assert _SeenStops(terminal, book).opening(41) == (0.1, None)  # never another account's stop
+    with_stop = SimpleNamespace(opening=lambda ticket: (0.1, 1.08), account_id=lambda: (101, "Broker-A"))
+    assert _SeenStops(with_stop, book).opening(41) == (0.1, 1.08)  # the terminal's own stop first
+    book.close()
+
+
+def test_a_stop_saved_before_accounts_were_kept_goes_to_the_account_that_owns_the_ticket(tmp_path):
+    """Ten first stops in the real journal predate per-account stops; four phone trades need one
+    for their 1R. The account whose own history holds the ticket claims it; no other can after."""
+    from types import SimpleNamespace
+
+    from tradebot.book import Book
+    from tradebot.cli import _SeenStops
+
+    book = Book(tmp_path / "journal.sqlite")
+    book.remember_stop(41, 1.09)  # the old way: no account
+    terminal = SimpleNamespace(opening=lambda ticket: (0.1, None), account_id=lambda: (101, "Broker-A"))
+    assert _SeenStops(terminal, book).opening(41) == (0.1, 1.09)
+    assert book.seen_stop(41) is None  # moved, not copied
+    assert book.seen_stop(41, account=(101, "Broker-A")) == 1.09
+    assert book.first_stop(41, (202, "Broker-A")) is None  # another account never gets it
+    assert book.first_stop(42, (101, "Broker-A")) is None
+    book.close()
+
+
+def test_a_trade_open_across_the_upgrade_keeps_its_first_stop_not_its_moved_one(fake_mt5, tmp_path):
+    from types import SimpleNamespace
+
+    from tradebot.book import Book, BookBroker
+    from tradebot.broker.mt5 import MT5Broker
+    from tradebot.config import MT5Login
+
+    book = Book(tmp_path / "journal.sqlite")
+    book.remember_stop(41, 1.0900)  # saved before the upgrade, without an account
+    fake_mt5.positions = [SimpleNamespace(ticket=41, magic=0, symbol="EURUSDm", type=0, volume=0.1,
+                                          price_open=1.1, sl=1.1000, tp=0.0,  # at breakeven now
+                                          time=fake_mt5.server_epoch(pd.Timestamp("2026-03-04 10:00").to_pydatetime()),
+                                          profit=0.0, comment="")]  # fmt: skip
+    fake_mt5.orders = [
+        SimpleNamespace(position_id=41, time_setup=0, volume_initial=0.1, sl=0.0)
+    ]  # phone: no stop
+    wrapped = BookBroker(MT5Broker(MT5Login(), offset_hours=2, module=fake_mt5), book, 1)
+    (position,) = wrapped.terminal_positions(None)
+    assert position.initial_sl == 1.09  # 1R from the first stop, not from breakeven
+    book.close()
+
+
+def test_us_stocks_take_orders_only_in_new_york_trading_hours():
+    """Exness quotes US stocks from 06:00 New York but refuses orders before 09:30: AMZN's pre-market
+    BUY was rejected live on 23 Nov 2026 ("session closed")."""
+    from datetime import datetime
+
+    from tradebot.config import market_closed
+
+    def is_open(*utc):
+        return market_closed("us_stocks", datetime(*utc)) is None
+
+    assert not is_open(2026, 11, 23, 12, 0)  # 07:00 New York (EST): pre-market, the rejected order
+    assert not is_open(2026, 11, 23, 14, 29) and is_open(2026, 11, 23, 14, 30)  # opens 09:30
+    assert is_open(2026, 11, 23, 20, 59) and not is_open(2026, 11, 23, 21, 0)  # closes 16:00
+    assert is_open(2026, 7, 6, 13, 30) and not is_open(2026, 7, 6, 20, 0)  # summer (EDT): an hour earlier
+    assert not is_open(2026, 11, 21, 15, 0)  # Saturday
+    assert market_closed("", datetime(2026, 11, 21, 3, 0)) is None  # forex: whenever quoted
+    assert not is_open(2026, 11, 26, 16, 0)  # Thanksgiving, 11:00 New York
+    assert "holiday" in market_closed("us_stocks", datetime(2026, 11, 26, 16, 0))
+    assert is_open(2026, 11, 27, 17, 59) and not is_open(2026, 11, 27, 18, 0)  # half day: 13:00 close
+    assert is_open(2026, 11, 30, 18, 0)  # the Monday after: a full day again
+
+
+def test_a_stock_signal_before_the_open_is_skipped_and_one_after_it_is_taken(config, eurusd):
+    from test_engine import flat, setup, step
+
+    stock = replace(config, overrides={"EURUSD": {"risk": {"market_hours": "us_stocks"}}})
+    config, sim, engine = setup(stock, eurusd)
+    step(engine, sim, config, eurusd, flat(0, signal=1, raw_signal=1))  # closes 10:15 UTC: 05:15 New York
+    assert not sim.positions(config.magic) and engine.events[-1].detail.startswith(
+        "buy signal skipped: market:"
+    )
+    step(engine, sim, config, eurusd, flat(300, signal=1, raw_signal=1))  # closes 15:15 UTC: 10:15 New York
+    assert len(sim.positions(config.magic)) == 1
+
+
+def test_a_stocks_stop_is_left_alone_until_the_exchange_opens():
+    """Breakeven due on a stock in the pre-market: the broker refuses the change, and the phone got
+    "STOP NOT MOVED". Held until 09:30 New York, then sent."""
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from test_protect import SPEC, position
+
+    from tradebot.config import ManagementParams
+    from tradebot.protect import BreakevenKeeper
+
+    sent = []
+    broker = SimpleNamespace(
+        symbol=lambda name: SPEC, tick=lambda name: SimpleNamespace(bid=1.1000, ask=1.1001),
+        modify=lambda p, sl, tp, magic: sent.append(sl) or SimpleNamespace(ok=True, message=""),
+    )  # fmt: skip
+    config = BotConfig(management=ManagementParams(auto_breakeven=True),
+                       overrides={"EURUSD": {"risk": {"market_hours": "us_stocks"}}})  # fmt: skip
+    keeper = BreakevenKeeper()
+    keeper.run(broker, [position()], config, now=datetime(2026, 11, 23, 12, 0))  # 07:00 New York
+    assert sent == []
+    keeper.run(broker, [position()], config, now=datetime(2026, 11, 23, 15, 0))  # 10:00 New York
+    assert len(sent) == 1
+
+
+def test_the_bots_own_stock_trade_is_not_managed_before_the_open(config, eurusd):
+    from test_engine import flat, setup, step
+
+    stock = replace(config, overrides={"EURUSD": {"risk": {"market_hours": "us_stocks"}}})
+    config, sim, engine = setup(stock, eurusd)
+    step(engine, sim, config, eurusd, flat(300, signal=1, raw_signal=1))  # 10:15 New York: opened
+    (opened,) = sim.positions(config.magic)
+    overnight = pd.Timestamp(at_minutes(300)) + pd.Timedelta(hours=16)  # 07:15 New York next day
+    step(
+        engine, sim, config, eurusd, {**flat(330, 1.1020, signal=-1, raw_signal=-1), "time": overnight}
+    )  # +1.3R: breakeven due
+    assert sim.positions(config.magic) == [opened]  # the opposite signal waits for the open
+    assert opened.sl == opened.initial_sl  # and breakeven too
+
+
+def at_minutes(minutes):
+    from conftest import at
+
+    return at(minutes)
+
+
+def test_get_in_never_sends_an_order_to_a_closed_exchange():
+    from types import SimpleNamespace
+
+    from tradebot.ui.monitor import get_in_rule
+
+    shut = SimpleNamespace(
+        action="SKIP", side=1, blocker="market: the exchange is closed", plan=SimpleNamespace(rejected="")
+    )
+    assert get_in_rule(shut) is None
+
+
+def test_an_unknown_market_hours_name_is_rejected():
+    from tradebot.config import ConfigError
+
+    with pytest.raises(ConfigError, match="market_hours"):
+        BotConfig(overrides={"EURUSD": {"risk": {"market_hours": "nyse"}}}).validate()
+
+
 class _Broker:
     def resolve(self, name: str) -> str | None:
         return None if name == "GONE" else f"{name}m"

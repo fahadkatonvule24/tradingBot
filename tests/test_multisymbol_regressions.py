@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from test_advisor_ui import features
 
@@ -34,12 +35,15 @@ def test_configured_symbols_can_send_an_order_on_a_valid_signal(fake_mt5, symbol
     config = load_config(ROOT / "config/config.json", env={})
     config = replace(config, schedule=ScheduleParams(session="all", news_file="", news_feed=""))
     name = f"{symbol}m"
+    stock = bool(config.for_symbol(name).risk.market_hours)
+    if stock:  # a US stock trades 09:30-16:00 New York: 15:07 UTC is 10:07 there (EST, 4 March)
+        fake_mt5.utc_now = fake_mt5.utc_now.replace(hour=15)
     add_symbol(fake_mt5, name)
     broker = broker_for(fake_mt5)
     engine = Engine(config, broker, execute=True, live=True)
     frame = features({"signal": 1, "raw_signal": 1})
     # Last closed H1 bar, at realistic FX prices, independently of the setup's trigger generation.
-    frame.loc[frame.index[-1], "time"] = fake_mt5.utc_now.replace(hour=11, minute=0)
+    frame.loc[frame.index[-1], "time"] = fake_mt5.utc_now.replace(minute=0) - pd.Timedelta(hours=1)
     monkeypatch.setattr("tradebot.live.latest_features", lambda *args: frame)
     runner = LiveRunner(config, broker, engine, [broker.resolve(symbol)])
     runner.cycle()
@@ -47,6 +51,25 @@ def test_configured_symbols_can_send_an_order_on_a_valid_signal(fake_mt5, symbol
     assert len(fake_mt5.sent) == 1
     assert fake_mt5.sent[0]["symbol"] == name
     assert fake_mt5.sent[0]["sl"] < fake_mt5.sent[0]["price"] < fake_mt5.sent[0]["tp"]
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    [s for s in SYMBOLS if load_config(ROOT / "config/config.json", env={}).for_symbol(s).risk.market_hours],
+)
+def test_configured_stocks_send_no_order_before_the_open(fake_mt5, symbol, monkeypatch):
+    """12:07 UTC is 07:07 in New York: Exness quotes the stocks but refuses orders (AMZN, 23 Nov)."""
+    config = load_config(ROOT / "config/config.json", env={})
+    config = replace(config, schedule=ScheduleParams(session="all", news_file="", news_feed=""))
+    add_symbol(fake_mt5, f"{symbol}m")
+    broker = broker_for(fake_mt5)
+    engine = Engine(config, broker, execute=True, live=True)
+    frame = features({"signal": 1, "raw_signal": 1})
+    frame.loc[frame.index[-1], "time"] = fake_mt5.utc_now.replace(hour=11, minute=0)
+    monkeypatch.setattr("tradebot.live.latest_features", lambda *args: frame)
+    LiveRunner(config, broker, engine, [broker.resolve(symbol)]).cycle()
+    assert fake_mt5.sent == []
+    assert engine.skips["market"] == 1
 
 
 @pytest.mark.parametrize("mode", [0, 3])

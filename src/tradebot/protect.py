@@ -51,13 +51,13 @@ import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
 import pandas as pd
 
 from tradebot.broker.base import Account, Position, SymbolSpec
-from tradebot.config import BotConfig, ManagementParams, RiskParams
+from tradebot.config import BotConfig, ManagementParams, RiskParams, market_closed
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +301,10 @@ class BreakevenKeeper:
                 continue
             params = config.for_symbol(position.symbol)
             m = params.management
+            if market_closed(
+                params.risk.market_hours, now or datetime.now(timezone.utc).replace(tzinfo=None)
+            ):
+                continue  # a stock out of hours: the broker refuses stop changes and closes until the open
             raw = (bars or {}).get(position.symbol)
             bar = Bar(*raw) if raw else None
             # a bar that closed before the trade opened: its prices are not the trade's

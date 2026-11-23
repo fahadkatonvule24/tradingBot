@@ -995,7 +995,12 @@ class _SeenStops:
 
     def opening(self, ticket: int) -> tuple[float | None, float | None]:
         volume, stop = self.inner.opening(ticket)
-        return volume, stop or (self.book.seen_stop(ticket) if self.book else None)
+        if stop or not self.book:
+            return volume, stop
+        # First stops are kept per account (login, server), as the dashboard writes them: looking
+        # one up by ticket alone found only the old unscoped ones (audit of 23 Nov 2026).
+        account = getattr(self.inner, "account_id", lambda: None)()
+        return volume, self.book.first_stop(ticket, account)
 
 
 def cmd_review(config: BotConfig, args: argparse.Namespace) -> int:

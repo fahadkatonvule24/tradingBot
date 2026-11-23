@@ -1757,13 +1757,14 @@ class Monitor:
 def get_in_rule(advice: Advice) -> str | None:
     """The limit that holds back the bot's own entry on ``advice.side`` (a signal it skipped, or a
     join), which "Get in" may set aside as your own call; None when there is nothing to get in on
-    or the hold-up is the data (a stale quote or bar) or the STOP file (your own pause on every
-    new entry), which nobody should trade through."""
+    or the hold-up is the data (a stale quote or bar), the STOP file (your own pause on every
+    new entry) or a closed exchange (the broker would refuse the order), which nobody should
+    trade through."""
     if advice.action not in ("SKIP", "JOIN") or advice.side not in WORD or advice.plan is None:
         return None
     held = advice.blocker or advice.plan.rejected
-    if not held or held.startswith(("data:", "kill switch")):
-        return None  # a stale quote or bar, or the STOP file: not limits to trade through
+    if not held or held.startswith(("data:", "kill switch", "market:")):
+        return None  # a stale quote or bar, the STOP file, a closed exchange: not limits
     return held
 
 

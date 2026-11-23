@@ -111,8 +111,11 @@ synthetic data.
 
 Automatic entries are enabled for all 15 configured instruments: the five forex pairs, gold,
 and the nine stock symbols in `config/config.json`. Each still needs a valid signal and must pass
-the spread, session, news, position, margin and risk limits. An instrument your account does not
-offer is skipped. Set `overrides.<symbol>.risk.auto_trade` to `false` to keep an instrument on the
+the spread, session, news, position, margin and risk limits. US stocks and Anthropic enter, and
+have their stops managed, only while the exchange takes orders: 09:30 to 16:00 New York time on
+weekdays, without NYSE holidays and with its 13:00 early closes (`risk.market_hours: "us_stocks"`).
+Exness quotes them from 06:00 New York, but refuses orders before the open. An instrument your
+account does not offer is skipped. Set `overrides.<symbol>.risk.auto_trade` to `false` to keep an instrument on the
 watchlist for signals only. `tradebot check` shows each instrument's **Auto entry** mode, and the
 trading loop logs its automatic-entry and signals-only lists at startup. The default config
 remains a dry run; a separate local config is used only when passed with `-c`.

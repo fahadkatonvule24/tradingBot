@@ -64,9 +64,10 @@ def costs(symbol: str) -> dict:
 
 
 def single(base: BotConfig, symbol: str, setup: str, join: bool) -> BotConfig:
-    config = replace(base, symbols=(symbol,), overrides={symbol: {"backtest": costs(symbol)}}).with_setup(
-        setup
-    )
+    override = {"backtest": costs(symbol)}
+    if symbol in STOCKS:  # entries only while the exchange takes orders, as live (not pre-market)
+        override["risk"] = {"market_hours": "us_stocks"}
+    config = replace(base, symbols=(symbol,), overrides={symbol: override}).with_setup(setup)
     config = config.with_strategy(auto_join=join)
     config.validate()
     return config

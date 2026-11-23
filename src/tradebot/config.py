@@ -87,6 +87,40 @@ def session_clock_text(name: str) -> str:
     return f"{CITY[open_zone]} {open_hour:02d}:00 to {CITY[close_zone]} {close_hour:02d}:00, local time"
 
 
+MARKET_HOURS = {
+    "us_stocks": ("America/New_York", dt_time(9, 30), dt_time(16, 0), "09:30 to 16:00 New York time")
+}
+"""Exchange hours by name: (time zone, open, close, as said to a person). Weekdays only."""
+
+
+US_HOLIDAYS = frozenset(date.fromisoformat(d) for d in (
+    "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+))  # fmt: skip
+"""NYSE full closures (New York dates) from the stocks' addition to the end of 2027. After that,
+only weekends are known: extend this each year from the NYSE calendar."""
+US_EARLY_CLOSES = frozenset(date.fromisoformat(d) for d in ("2026-11-27", "2026-12-24", "2027-11-26"))
+"""NYSE days that close at 13:00 New York time."""
+
+
+def market_closed(name: str, now: datetime) -> str | None:
+    """Why the exchange ``name`` takes no orders at ``now`` (naive UTC), or None when it does (or
+    when ``name`` is empty: the instrument trades whenever the broker quotes it)."""
+    if not name:
+        return None
+    zone, opens, closes, text = MARKET_HOURS[name]
+    local = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(ZoneInfo(zone))
+    if name == "us_stocks":
+        if local.date() in US_HOLIDAYS:
+            return "the exchange is closed for a US holiday"
+        if local.date() in US_EARLY_CLOSES:
+            closes = dt_time(13, 0)
+            text = f"{text}, and only to 13:00 today"
+    if local.weekday() >= 5 or not opens <= local.time() < closes:
+        return f"the exchange is closed (it takes orders {text}, weekdays)"
+    return None
+
+
 STRATEGIES = ("ema_cross", "breakout", "pullback", "retest")
 
 # Top-down analysis: the two higher timeframes that set the direction for each trading timeframe.
@@ -236,6 +270,11 @@ class RiskParams:
     """Skip a trade whose target is closer than this many times its stop distance. 0 = off. Only
     matters when a setup names its own target (the measured move); ATR targets are a fixed ratio."""
     allow_min_lot_overrisk: bool = False
+    market_hours: str = ""
+    """When the instrument's exchange takes orders, beyond the global trading hours: "" = whenever
+    the broker quotes it; "us_stocks" = 09:30 to 16:00 New York time on weekdays. Exness quotes US
+    stocks, and builds their bars, from 06:00 New York, but refuses orders before the open: an entry
+    on a pre-market bar was rejected live and counted as filled in backtests."""
     auto_trade: bool = True
     """False = signals only: the trading loop never opens a trade on this symbol by itself (no
     signal, no join), but still manages one that is open. The dashboard shows its advice and
@@ -581,6 +620,8 @@ def _validate_symbol(p: SymbolParams) -> list[str]:
     for name in ("commission_per_lot", "slippage_points", "min_spread_points"):
         if getattr(p.backtest, name) < 0:
             errors.append(f"backtest.{name} must be >= 0")
+    if p.risk.market_hours not in ("", *MARKET_HOURS):
+        errors.append(f"risk.market_hours must be empty or one of: {', '.join(MARKET_HOURS)}")
     if not 0 <= p.backtest.swap_triple_day <= 6:
         errors.append("backtest.swap_triple_day must be 0 (Monday) to 6 (Sunday)")
     if s.name not in STRATEGIES:

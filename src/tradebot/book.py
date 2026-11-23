@@ -237,6 +237,30 @@ class Book:
                 ).fetchone()
             return row[0] if row else None
 
+    def claim_legacy_stop(self, ticket: int, account: tuple[int, str]) -> float | None:
+        """Move a first stop saved before stops were kept per account to ``account``. Only for a
+        ticket from that account's own positions or deal history, which proves whose it is. Moved,
+        not copied, so no second account can ever take it. None when there is none to move."""
+        with self._lock:
+            row = self._db.execute("SELECT sl FROM seen_stops WHERE ticket = ?", (ticket,)).fetchone()
+            if row is None:
+                return None
+            self._db.execute(
+                "INSERT OR IGNORE INTO account_seen_stops (login, server, ticket, sl) VALUES (?, ?, ?, ?)",
+                (*account, ticket, row[0]),
+            )
+            self._db.execute("DELETE FROM seen_stops WHERE ticket = ?", (ticket,))
+            self._db.commit()
+        return self.seen_stop(ticket, account)
+
+    def first_stop(self, ticket: int, account: tuple[int, str] | None) -> float | None:
+        """The first stop saved for ``ticket``, a ticket of ``account``'s own: its scoped one, else
+        one saved before stops were kept per account (claimed for it now)."""
+        if account is None:
+            return self.seen_stop(ticket)
+        found = self.seen_stop(ticket, account)
+        return found if found is not None else self.claim_legacy_stop(ticket, account)
+
     def remember_stop(self, ticket: int, sl: float, account: tuple[int, str] | None = None) -> None:
         """Keep the first stop a position was seen with. Not a change to the book: no new version."""
         if not math.isfinite(sl) or sl <= 0 or self.seen_stop(ticket, account) is not None:
@@ -526,6 +550,10 @@ class BookBroker:
         held = self.inner.positions(magic)
         opening = getattr(self.inner, "opening", None)
         for p in held:
+            if account is not None:
+                # a trade open across the upgrade keeps the first stop saved for it then, not the
+                # stop it has now (breakeven may have moved it already)
+                self.book.first_stop(p.ticket, account)
             self.book.remember_stop(p.ticket, p.sl, account)
             first = self.book.seen_stop(p.ticket, account)
             if first and opening is not None and not opening(p.ticket)[1]:
@@ -567,7 +595,7 @@ class BookBroker:
             account = getattr(self.inner, "account_id", lambda: None)()
             inner = getattr(self.inner, "opening", None)
             volume, stop = inner(ticket) if inner else (None, None)
-            return volume, stop or self.book.seen_stop(ticket, account)
+            return volume, stop or self.book.first_stop(ticket, account)
         try:
             trade = self.book.trade(ticket)
         except BookError:

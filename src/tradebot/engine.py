@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 from tradebot.broker.base import BUY, Account, Broker, Deal, OrderRequest, Position, SymbolSpec
-from tradebot.config import BotConfig, RiskParams, SymbolParams
+from tradebot.config import BotConfig, RiskParams, SymbolParams, market_closed
 from tradebot.journal import Journal, JournalEvent
 from tradebot.news import NewsCalendar
 from tradebot.risk import drawdown_percent, loss_per_lot, open_risk, position_size, tighter_stop
@@ -276,6 +276,8 @@ class Engine:
         now: datetime,
     ) -> None:
         m = params.management
+        if market_closed(params.risk.market_hours, now):
+            return  # a stock before the open: the broker refuses closes and stop changes until then
         bid = self.broker.tick(symbol).bid if self.live else float(row["close"])
         bar_minutes = self.config.bar_minutes
         exit_signal = row.get("exit_signal")
@@ -358,6 +360,9 @@ class Engine:
         closed = sched.closed(now)
         if closed:
             return f"session: {closed}"
+        shut = market_closed(r.market_hours, now)
+        if shut:
+            return f"market: {shut}"  # not a limit: the broker would refuse the order
         currencies = {spec.currency_base, spec.currency_profit} - {""}
         event = (
             self._news.blackout(now, currencies, sched.news_before_minutes, sched.news_after_minutes)

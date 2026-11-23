@@ -88,6 +88,21 @@ def test_the_real_child_measures_stored_history(tmp_path):
     assert record["start"].endswith("Z")  # JSON-safe, as the page needs it
 
 
+def test_one_symbol_without_history_leaves_the_others_their_record(tmp_path):
+    """The stocks have only H1/H4/D1 history: on M15 their files are missing, and that used to
+    leave every symbol, forex included, without a record (audit of 23 Nov 2026)."""
+    data = tmp_path / "data"
+    data.mkdir()
+    synthetic_bars(n=3000, seed=8).to_csv(data / "EURUSD_M15.csv", index=False)
+    config = BotConfig(symbols=("EURUSD", "AAPL"), timeframe="M15",
+                       overrides={"AAPL": {"risk": {"auto_trade": False}}},
+                       schedule=ScheduleParams(session="all", trade_weekends=True, news_file=""))  # fmt: skip
+    breakout = config.with_strategy(name="breakout", use_trend_filter=False)
+    record = TrackRecords().get(breakout, data, {"EURUSDm": "EURUSD", "AAPLm": "AAPL"})
+    assert record["trades"] > 0 and set(record["symbols"]) == {"EURUSDm"}
+    assert record["missing"] == ["AAPL"]
+
+
 def test_missing_history_is_no_record_not_a_crash(tmp_path):
     with pytest.raises(NoRecord, match="no track record"):
         TrackRecords().get(BotConfig(symbols=("EURUSD",), timeframe="M15"), tmp_path, {"EURUSD": "EURUSD"})

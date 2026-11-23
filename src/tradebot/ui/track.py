@@ -39,6 +39,7 @@ def measure(config: BotConfig, data_dir: str | Path, names: dict[str, str]) -> d
     from tradebot.data import load_dataset, load_trend_bars
     from tradebot.ui.monitor import clean
 
+    config, missing = _with_history(config, Path(data_dir))
     data, specs = load_dataset(Path(data_dir), list(config.symbols), config.timeframe)
     htf = load_trend_bars(Path(data_dir), config)
     result = run_backtest(config, data, specs, htf=htf)
@@ -62,6 +63,7 @@ def measure(config: BotConfig, data_dir: str | Path, names: dict[str, str]) -> d
                 for broker_name, configured in names.items()
                 if configured in per.index
             },
+            "missing": missing,  # configured symbols without stored history on this timeframe
         }
     )
 
@@ -137,6 +139,35 @@ class TrackRecords:
     def _stop_running(self) -> None:
         if self._process is not None and self._process.poll() is None:
             _kill_tree(self._process)
+
+
+def _with_history(config: BotConfig, folder: Path) -> tuple[BotConfig, list[str]]:
+    """``config`` narrowed to the symbols with stored history on its timeframe, and the configured
+    symbols left out. One symbol without history used to leave every symbol without a record: the
+    stocks have only H1, H4 and D1, so the M15 view had none at all. (Missing trend-filter bars are
+    fine: the backtest builds them from the trading timeframe's.) Raises FileNotFoundError when no
+    symbol has any."""
+    from dataclasses import replace
+
+    from tradebot.data import bars_path, load_spec
+
+    have: list[str] = []
+    missing: list[str] = []
+    for symbol in config.symbols:
+        try:
+            load_spec(folder, symbol)  # a stock without its exported contract is not measurable
+            ok = bars_path(folder, symbol, config.timeframe).is_file()
+        except ValueError:
+            ok = False
+        (have if ok else missing).append(symbol)
+    if not have:
+        raise FileNotFoundError(
+            f"no {config.timeframe} history for any symbol (run `tradebot fetch --timeframe {config.timeframe}`)"
+        )
+    if missing:
+        keep = {k: v for k, v in config.overrides.items() if k in have}
+        config = replace(config, symbols=tuple(have), overrides=keep)
+    return config, missing
 
 
 def _key(config: BotConfig) -> str:
