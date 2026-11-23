@@ -46,8 +46,17 @@ def test_configured_symbols_can_send_an_order_on_a_valid_signal(fake_mt5, symbol
     frame.loc[frame.index[-1], "time"] = fake_mt5.utc_now.replace(minute=0) - pd.Timedelta(hours=1)
     monkeypatch.setattr("tradebot.live.latest_features", lambda *args: frame)
     runner = LiveRunner(config, broker, engine, [broker.resolve(symbol)])
+    emitted = []
+    original = engine._emit
+    engine._emit = lambda now, kind, sym, detail, *a, **k: (
+        emitted.append((kind, sym)) or original(now, kind, sym, detail, *a, **k)
+    )
     runner.cycle()
     runner.cycle()  # the same signal must not be traded twice
+    if not config.for_symbol(name).risk.auto_trade:  # signals only (gold, NVDA): an alert, never an order
+        assert fake_mt5.sent == []
+        assert emitted.count(("signal", name)) == 1, emitted
+        return
     assert len(fake_mt5.sent) == 1
     assert fake_mt5.sent[0]["symbol"] == name
     assert fake_mt5.sent[0]["sl"] < fake_mt5.sent[0]["price"] < fake_mt5.sent[0]["tp"]
@@ -67,9 +76,14 @@ def test_configured_stocks_send_no_order_before_the_open(fake_mt5, symbol, monke
     frame = features({"signal": 1, "raw_signal": 1})
     frame.loc[frame.index[-1], "time"] = fake_mt5.utc_now.replace(hour=11, minute=0)
     monkeypatch.setattr("tradebot.live.latest_features", lambda *args: frame)
-    LiveRunner(config, broker, engine, [broker.resolve(symbol)]).cycle()
+    events = []
+    runner = LiveRunner(config, broker, engine, [broker.resolve(symbol)])
+    runner.engine._emit = lambda now, kind, sym, detail, *a, **k: events.append((kind, detail))
+    runner.cycle()
     assert fake_mt5.sent == []
-    assert engine.skips["market"] == 1
+    assert any(kind == "skip" and "market: the exchange is closed" in detail for kind, detail in events), (
+        events
+    )
 
 
 @pytest.mark.parametrize("mode", [0, 3])

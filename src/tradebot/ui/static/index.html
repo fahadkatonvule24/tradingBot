@@ -1792,6 +1792,7 @@ function stockNote(row) {
   const hours = `${row.market_open ? "Exchange open" : "Exchange closed"}: orders are taken ${row.market_hours}, weekdays (no NYSE holidays). The bot enters and moves stops only then.`;
   const next = row.earnings_next ? new Date(`${row.earnings_next}T12:00:00Z`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" }) : null;
   const earnings = row.earnings_error ? `Earnings dates: ${row.earnings_error}`
+    : next && row.earnings_estimated ? `Next earnings report: around ${next} (estimated; not yet confirmed by the company). No new entry from two trading days before to two after: a report can gap the price past any stop.`
     : next ? `Next earnings report: ${next}. No new entry from the trading day before to the day after: a report can gap the price past any stop.`
     : row.earnings_known ? "No upcoming earnings date listed for it."
     : "Earnings dates not set for it (config/earnings.json): the bot cannot pause around its reports.";

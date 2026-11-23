@@ -435,3 +435,60 @@ def test_the_dashboard_row_says_a_stocks_hours_shares_and_earnings(cfg, broker):
     forex = primed(Monitor(cfg, broker, [SYMBOL]), features())
     forex.refresh()
     assert forex.snapshot()["symbols"][0]["market_hours"] == ""
+
+
+def test_a_signals_only_alert_states_the_real_risk_of_the_smallest_lot(config, eurusd):
+    """Gold: the smallest lot risks ~3.8% while risk_percent is 1.5; the alert said "1.5% risk"."""
+    from conftest import make_sim
+    from test_engine import flat, step
+
+    from tradebot.engine import Engine
+
+    small = replace(config, overrides={"EURUSD": {"risk": {"auto_trade": False, "allow_min_lot_overrisk": True,
+                                                            "risk_percent": 1.5}}})  # fmt: skip
+    sim = make_sim({"EURUSD": eurusd}, balance=40.0)  # 0.01 lot at a 15-pip stop: $1.50, 3.8%
+    engine = Engine(small, sim, execute=True, live=True)
+    step(engine, sim, small, eurusd, flat(0, signal=1, raw_signal=1))
+    signal = engine.events[-1]
+    assert signal.kind == "signal" and "0.01 lots" in signal.detail
+    assert "(3.8% risk, over your 1.5% a trade)" in signal.detail
+
+
+def test_an_estimated_earnings_date_pauses_a_day_wider_each_side(tmp_path):
+    import json
+    from datetime import date, datetime
+
+    from tradebot.earnings import EarningsCalendar
+
+    path = tmp_path / "earnings.json"
+    path.write_text(json.dumps({"AAPL": ["~2027-01-28"], "MSFT": ["2027-01-28"]}))  # Thursday
+    calendar = EarningsCalendar(path)
+    report = date(2027, 1, 28)
+    assert calendar.is_estimated("AAPLm", report) and not calendar.is_estimated("MSFTm", report)
+    tuesday, monday_after = datetime(2027, 1, 26, 15), datetime(2027, 2, 1, 15)
+    assert calendar.blackout("AAPLm", tuesday, 1, 1) == report  # two trading days before
+    assert calendar.blackout("AAPLm", monday_after, 1, 1) == report  # two after (over the weekend)
+    assert (
+        calendar.blackout("MSFTm", tuesday, 1, 1) is None
+        and calendar.blackout("MSFTm", monday_after, 1, 1) is None
+    )
+    assert calendar.blackout("AAPLm", datetime(2027, 1, 25, 15), 1, 1) is None
+    assert calendar.next_report("AAPLm", datetime(2027, 1, 2)) == report
+
+
+def test_the_shipped_earnings_file_reads_and_covers_the_traded_stocks():
+    from datetime import datetime
+    from pathlib import Path
+
+    from tradebot.config import load_config
+    from tradebot.earnings import EarningsCalendar
+
+    root = Path(__file__).resolve().parents[1]
+    calendar = EarningsCalendar(root / "config" / "earnings.json")
+    config = load_config(root / "config" / "config.json", env={})
+    stocks = [s for s in config.symbols if config.for_symbol(s).risk.market_hours and s != "ANT"]
+    assert calendar.error is None or calendar.known("AAPL")
+    assert all(calendar.known(s) for s in stocks), [s for s in stocks if not calendar.known(s)]
+    assert calendar.error is None
+    assert not calendar.known("ANT")  # no estimate exists yet: the dashboard says so
+    assert calendar.next_report("NVDAm", datetime(2026, 11, 23)).isoformat() == "2027-02-24"

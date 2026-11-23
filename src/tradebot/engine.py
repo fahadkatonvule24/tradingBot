@@ -222,13 +222,21 @@ class Engine:
             return
         tick = self.broker.tick(symbol)
         entry = tick.ask if side > 0 else tick.bid
-        plan = self.plan_entry(symbol, spec, params, row, spread, side)
+        # your own trade: sized at the risk per trade, without the bot's open-risk and margin caps
+        plan = self.plan_entry(symbol, spec, params, row, spread, side, caps=False)
         if isinstance(plan, Rejection):
             sl, tp = stop_distances(spec, params.risk, float(row["atr"]), spread)
-            size = f"no size at your risk per trade: {plan.message}"
+            size = f"no size: {plan.message}"
         else:
             sl, tp = plan.sl_distance, plan.tp_distance
-            size = f"{plan.volume:g} lots, {plan.risk_amount:,.2f} at the stop ({params.risk.risk_percent:g}% risk)"
+            share = plan.risk_amount / plan.equity * 100 if plan.equity > 0 else 0.0
+            over = (
+                f", over your {params.risk.risk_percent:g}% a trade"
+                if share > params.risk.risk_percent * 1.05
+                else ""
+            )
+            # the real share: with allow_min_lot_overrisk (gold) the smallest lot can risk far more
+            size = f"{plan.volume:g} lots, {plan.risk_amount:,.2f} at the stop ({share:.1f}% risk{over})"
         digits = spec.digits
         detail = (
             f"{word} signal · signals only: the bot does not trade {symbol}; place it yourself if you want it\n"
@@ -384,9 +392,8 @@ class Engine:
             else None
         )
         if report:
-            return (
-                f"earnings: {symbol} reports on {report:%a %d %b} (a report can gap the price past the stop)"
-            )
+            when = "around" if self._earnings and self._earnings.is_estimated(symbol, report) else "on"
+            return f"earnings: {symbol} reports {when} {report:%a %d %b} (a report can gap the price past the stop)"
 
         status, today = self._limits(r, now, self.broker.account())
         if status.blocked:

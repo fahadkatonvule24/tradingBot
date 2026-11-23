@@ -1010,7 +1010,8 @@ class Monitor:
             "market_open": market_closed(hours, now) is None,
             "contract_size": spec.contract_size,
             "earnings_known": bool(calendar and calendar.known(symbol)),
-            "earnings_next": calendar.next_report(symbol, now) if calendar else None,
+            "earnings_next": (upcoming := calendar.next_report(symbol, now) if calendar else None),
+            "earnings_estimated": bool(calendar and upcoming and calendar.is_estimated(symbol, upcoming)),
             "earnings_error": calendar.error if calendar else None,
         }
 

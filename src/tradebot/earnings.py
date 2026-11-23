@@ -7,8 +7,10 @@ any stop. Read from a JSON file of New York dates per stock, e.g.
 
 Companies report before the open or after the close, so the gap is on the report day or the next
 one: new entries pause from ``days_before`` trading days before the report date to ``days_after``
-trading days after it. Keys starting with "_" are notes. The file is read again when it changes.
-Broker names match by prefix, the longest key first: AAPLm is AAPL.
+trading days after it. A date written "~2027-01-28" is an estimate (companies confirm a few weeks
+ahead): its pause is one trading day wider on each side, and the dashboard calls it estimated.
+Keys starting with "_" are notes. The file is read again when it changes. Broker names match by
+prefix, the longest key first: AAPLm is AAPL.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ class EarningsCalendar:
         self.path = Path(path) if path else None
         self._stamp: tuple[int, int] | None = None
         self._dates: dict[str, list[date]] = {}
+        self._estimated: set[tuple[str, date]] = set()
         self.error: str | None = None
 
     def _load(self) -> dict[str, list[date]]:
@@ -54,17 +57,26 @@ class EarningsCalendar:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("expected an object of symbol: [dates]")
-            dates = {
-                str(symbol).upper(): sorted(date.fromisoformat(str(d)) for d in values)
-                for symbol, values in raw.items()
-                if not str(symbol).startswith("_")
-            }
+            dates: dict[str, list[date]] = {}
+            estimated: set[tuple[str, date]] = set()
+            for symbol, values in raw.items():
+                if str(symbol).startswith("_"):
+                    continue
+                key = str(symbol).upper()
+                days = []
+                for value in values:
+                    text = str(value).strip()
+                    day = date.fromisoformat(text.lstrip("~"))
+                    days.append(day)
+                    if text.startswith("~"):
+                        estimated.add((key, day))
+                dates[key] = sorted(days)
             self.error = None
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, AttributeError) as exc:
             log.warning("earnings dates not read from %s: %s", self.path, exc)
             self.error = f"{self.path} could not be read: {exc}"
-            dates = {}
-        self._stamp, self._dates = stamp, dates
+            dates, estimated = {}, set()
+        self._stamp, self._dates, self._estimated = stamp, dates, estimated
         return dates
 
     def _key(self, symbol: str) -> str | None:
@@ -84,6 +96,11 @@ class EarningsCalendar:
         today = _new_york_day(now)
         return next((d for d in self._dates[key] if d >= today), None)
 
+    def is_estimated(self, symbol: str, day: date) -> bool:
+        """Whether ``day`` is listed for ``symbol`` as an estimate ("~2027-01-28")."""
+        key = self._key(symbol)
+        return key is not None and (key, day) in self._estimated
+
     def blackout(self, symbol: str, now: datetime, days_before: int, days_after: int) -> date | None:
         """The report date whose quiet period ``now`` falls in, or None."""
         key = self._key(symbol)
@@ -91,7 +108,8 @@ class EarningsCalendar:
             return None
         today = _new_york_day(now)
         for report in self._dates[key]:
-            if _shift(report, -days_before) <= today <= _shift(report, days_after):
+            wider = 1 if (key, report) in self._estimated else 0
+            if _shift(report, -days_before - wider) <= today <= _shift(report, days_after + wider):
                 return report
         return None
 

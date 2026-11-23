@@ -1,3 +1,12 @@
 {
-  "_how": "Each stock's earnings report dates, New York calendar days, e.g. \"AAPL\": [\"2027-01-28\"]. The bot makes no new entry on that stock from the trading day before a report to the trading day after it (schedule.earnings_days_before / _after). A stock not listed here has no earnings pause."
+  "_how": "Each stock's earnings report dates, New York calendar days, e.g. \"AAPL\": [\"2027-01-28\"]. The bot makes no new entry on that stock from the trading day before a report to the trading day after it (schedule.earnings_days_before / _after). A date written \"~2027-01-28\" is an estimate: its pause is one trading day wider on each side. Replace an estimate with the company's confirmed date (drop the ~) once it is announced, usually 3-4 weeks ahead on its investor relations site. A stock not listed has no earnings pause.",
+  "_sources": "Estimated on 2026-11-23 from third-party calendars and each company's date a year earlier (none confirmed yet): AAPL ~27-28 Jan (last year 29 Jan); MSFT ~27 Jan (28 Jan); META late Jan (28 Jan); TSLA ~27 Jan (28 Jan); AMD ~2 Feb (3 Feb); GOOGL early Feb (4 Feb); AMZN ~4 Feb (5 Feb); NVDA ~24 Feb (25 Feb; it reported Q3 on 17 Nov 2026). ANT (Anthropic, listed 17 Nov 2026) has no estimate: its first report is expected by 31 Mar 2027.",
+  "AAPL": ["~2027-01-28"],
+  "MSFT": ["~2027-01-27"],
+  "META": ["~2027-01-27"],
+  "TSLA": ["~2027-01-27"],
+  "AMD": ["~2027-02-02"],
+  "GOOGL": ["~2027-02-03"],
+  "AMZN": ["~2027-02-04"],
+  "NVDA": ["~2027-02-24"]
 }

@@ -16,6 +16,7 @@ STOP
 OFF
 start_bot.log
 *.log
+*.log.[0-9]*
 trade_journal.*
 news_feed.json
 news_feed.tmp
