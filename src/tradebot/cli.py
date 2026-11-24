@@ -200,8 +200,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         }[args.command]  # fmt: skip
         return handler(config, args)
     except (ConfigError, FileNotFoundError, ValueError) as exc:
-        console.print(f"[bold red]error:[/] {escape(str(exc))}")
+        if args.command in ("run", "ui"):
+            # into tradebot.log too: a loop the autostart task starts closes its window on exit
+            log.error("tradebot %s did not start: %s", args.command, exc)
+        else:
+            console.print(f"[bold red]error:[/] {escape(str(exc))}")
         return 2
+    except Exception:
+        if args.command not in ("run", "ui"):
+            raise
+        log.exception("tradebot %s stopped on an unexpected error", args.command)
+        return 1
 
 
 def _setup_logging(verbose: bool, to_file: bool) -> None:
@@ -330,7 +339,8 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
         runner = LiveRunner(
             config, broker, engine, symbols, notifier=notifier, duty=duty, manage=gate.execute, book=book,
             gate=lambda: trading_gate(config, broker.account(), args.live, broker.terminal_trading_allowed()),
-            heartbeat=_working_folder(config) / HEARTBEAT_FILE,
+            # --live only: start_bot.ps1 watches live loops, and a dry run beating would hide a frozen one
+            heartbeat=_working_folder(config) / HEARTBEAT_FILE if args.live else None,
         )  # fmt: skip
         runner.run(once=args.once)
     return 0

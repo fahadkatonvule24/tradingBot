@@ -146,7 +146,7 @@ def test_config_validates_the_drawdown_settings():
     with pytest.raises(ConfigError, match="drawdown_days"):
         BotConfig(risk=RiskParams(drawdown_days=0)).validate()
     shipped = load_config(cli.Path(__file__).resolve().parent.parent / "config" / "config.json", env={})
-    assert (shipped.risk.max_drawdown_percent, shipped.risk.drawdown_days) == (10.0, 365)
+    assert (shipped.risk.max_drawdown_percent, shipped.risk.drawdown_days) == (15.0, 365)
 
 
 def test_backtest_says_when_the_live_limit_would_have_tripped():

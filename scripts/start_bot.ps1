@@ -76,7 +76,9 @@ try {
         foreach ($p in $loop) {
             Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue  # not the tree: MT5 stays
         }
-        Start-Sleep -Seconds 3  # the operating system lets go of its locks
+        # gone for good before the new one starts: a stopped loop holds its lock until it has exited
+        Wait-Process -Id ($loop | ForEach-Object { $_.ProcessId }) -Timeout 60 -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
         $minutes = [math]::Floor($quiet.TotalMinutes)
         $note = "The trading loop froze: no cycle for $minutes min (last at {0:HH:mm}). It was stopped and started again; check that MT5 is connected." -f $last
         Set-Content -Path (Join-Path $root "tradebot.loop.frozen") -Value $note -Encoding utf8
