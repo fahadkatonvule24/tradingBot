@@ -58,6 +58,12 @@ NTFY_PRIORITY = {"signal": 4, "exit": 4, "failed": 4, "news": 3, "order": 3, "po
 """Phone behaviour by alert kind: 4 = long vibration and a pop-over, 3 = the usual sound, 2 (all
 other kinds) = silent, in the notification drawer only."""
 
+RETRY_SECONDS = (10.0, 30.0, 60.0, 120.0, 300.0)
+"""An ntfy or WhatsApp alert that could not reach the service is tried again after each of these
+waits (about 8.5 minutes in all) before it is dropped; later alerts wait their turn behind it.
+Found the hard way: one try only, and the user's line dropped 33 times in one night (MT5's own
+journal), so an "order opened" or "get out" alert could vanish while nobody was at the PC."""
+
 IMPORTANT = frozenset({"signal", "failed", "exit", "position", "news", "order", "status"})
 """Alert kinds a channel set to "important" sends: a confirmed buy or sell, a failed break,
 get-out and reversal warnings and assumed closes on open positions, news, and orders. The rest
@@ -247,7 +253,10 @@ def discover_chats(token: str, opener: Callable = urllib.request.urlopen) -> lis
 
 
 class WhatsAppError(RuntimeError):
-    pass
+    def __init__(self, message: str, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
+        """The connection failed (or the service was down): the same message may go through later."""
 
 
 def whatsapp_call(
@@ -263,9 +272,11 @@ def whatsapp_call(
         with opener(request, timeout=timeout) as response:
             body = response.read(4000).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        raise WhatsAppError(f"CallMeBot answered {exc.code}") from None
-    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-        raise WhatsAppError(f"could not reach CallMeBot ({type(exc).__name__})") from None
+        raise WhatsAppError(f"CallMeBot answered {exc.code}", transient=exc.code >= 500) from None
+    except http.client.HTTPException as exc:  # a broken reply: the message most likely went out
+        raise WhatsAppError(f"CallMeBot's reply was cut short ({type(exc).__name__})") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise WhatsAppError(f"could not reach CallMeBot ({type(exc).__name__})", transient=True) from None
     if "apikey" in body.lower() and ("invalid" in body.lower() or "not valid" in body.lower()):
         raise WhatsAppError("CallMeBot rejected the API key (check WHATSAPP_APIKEY and WHATSAPP_PHONE)")
     reply = " ".join(re.sub(r"<[^>]+>", " ", body).split())
@@ -342,18 +353,50 @@ class _Channel:
                 else:
                     batch.append(more)
             for text, kind in self._merge(batch):
-                try:
-                    self._deliver(text, kind)
-                except Exception:  # e.g. http.client.IncompleteRead: one bad reply must not end alerts
-                    log.warning("%s alert not sent: unexpected error", self.name, exc_info=True)
+                self._deliver_patiently(text, kind)
                 self._closing.wait(self._gap)
             if done:
                 return
 
+    def _deliver_patiently(self, text: str, kind: str) -> None:
+        """Deliver one alert, trying again while the internet is down (``RETRY_SECONDS``)."""
+        for attempt, wait in enumerate((0.0, *RETRY_SECONDS)):
+            if wait and self._closing.wait(wait):
+                return  # shutting down
+            try:
+                result = self._deliver(text, kind, retrying=attempt > 0)
+            except Exception:  # an unexpected error: one bad reply must not end alerts
+                log.warning("%s alert not sent: unexpected error", self.name, exc_info=True)
+                return
+            if result is not None:  # sent, or refused for a reason that waiting cannot fix
+                if result and attempt:
+                    log.info(
+                        "%s alert sent on try %d, after the connection came back", self.name, attempt + 1
+                    )
+                return
+        log.warning(
+            "%s alert dropped: no connection for %.0f minutes (%s)",
+            self.name, sum(RETRY_SECONDS) / 60, text.partition("\n")[0][:80],
+        )  # fmt: skip
+
+    def _failed(self, exc: Exception, retrying: bool) -> bool | None:
+        """Log a failed delivery. None: the connection failed, so it is worth another try (only
+        from the background queue; a direct send reports the failure at once)."""
+        if getattr(exc, "transient", False) and self._background:
+            if not retrying:
+                log.warning(
+                    "%s alert not sent yet: %s; trying again for up to %.0f minutes",
+                    self.name, exc, sum(RETRY_SECONDS) / 60,
+                )  # fmt: skip
+            return None
+        log.warning("%s alert not sent: %s", self.name, exc)
+        return False
+
     def _merge(self, batch: list[tuple[str, str]]) -> list[tuple[str, str]]:
         return batch
 
-    def _deliver(self, text: str, kind: str) -> bool:
+    def _deliver(self, text: str, kind: str, retrying: bool = False) -> bool | None:
+        """True: sent. False: refused for good. None: the connection failed (try again later)."""
         raise NotImplementedError
 
 
@@ -388,17 +431,19 @@ class WhatsApp(_Channel):
         joined = "\n\n".join(text for text, _ in batch)
         return [(part, "signal") for part in chunks(joined, WHATSAPP_MAX_CHARS)]
 
-    def _deliver(self, text: str, kind: str = "info") -> bool:
+    def _deliver(self, text: str, kind: str = "info", retrying: bool = False) -> bool | None:
         try:
             whatsapp_call(self.phone or "", self.apikey or "", text, self._opener)
         except WhatsAppError as exc:
-            log.warning("WhatsApp alert not sent: %s", exc)
-            return False
+            return self._failed(exc, retrying)
         return True
 
 
 class NtfyError(RuntimeError):
-    pass
+    def __init__(self, message: str, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
+        """The connection failed (or the service was down): the same message may go through later."""
 
 
 def valid_topic(topic: str | None) -> bool:
@@ -433,10 +478,13 @@ def ntfy_call(
         reason = {401: "the access token was rejected", 403: "this topic needs an access token (NTFY_TOKEN)",
                   429: "too many messages: ntfy.sh allows 250 a day", 413: "the message is too large",
                   400: "bad request (check NTFY_TOPIC)"}.get(exc.code, exc.reason)  # fmt: skip
-        raise NtfyError(f"ntfy answered {exc.code}: {reason}") from None
-    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        raise NtfyError(f"ntfy answered {exc.code}: {reason}", transient=exc.code >= 500) from None
+    except http.client.HTTPException as exc:  # a broken reply: the notification most likely went out
         where = urllib.parse.urlsplit(server).netloc or server
-        raise NtfyError(f"could not reach {where} ({type(exc).__name__})") from None
+        raise NtfyError(f"{where}'s reply was cut short ({type(exc).__name__})") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        where = urllib.parse.urlsplit(server).netloc or server
+        raise NtfyError(f"could not reach {where} ({type(exc).__name__})", transient=True) from None
 
 
 def _clip(text: str, limit: int) -> str:
@@ -471,14 +519,13 @@ class Ntfy(_Channel):
             )
         super().__init__(bool(self.topic), level, background, 0.0, gap_seconds)
 
-    def _deliver(self, text: str, kind: str = "info") -> bool:
+    def _deliver(self, text: str, kind: str = "info", retrying: bool = False) -> bool | None:
         title, _, body = text.partition("\n")
         try:
             ntfy_call(self.server, self.topic or "", body.strip() or title, title if body.strip() else None,
                       NTFY_PRIORITY.get(kind, 2), self.token, self._opener)  # fmt: skip
         except NtfyError as exc:
-            log.warning("ntfy alert not sent: %s", exc)
-            return False
+            return self._failed(exc, retrying)
         return True
 
 
