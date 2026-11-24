@@ -27,3 +27,4 @@ reports/
 tradebot.*.lock
 tradebot.loop.heartbeat
 tradebot.loop.frozen
+DASHBOARD_OFF
