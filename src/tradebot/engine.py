@@ -114,6 +114,8 @@ class Engine:
     events: list[Event] = field(default_factory=list)
     skips: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     _acted_bar: dict[str, pd.Timestamp] = field(default_factory=dict)
+    _data_logged: dict[str, str] = field(default_factory=dict)
+    """The data problem last logged per symbol: one seen on every poll is logged once."""
     _older_deals: tuple[datetime, int, list[Deal]] | None = None
     _news: NewsCalendar | None = None
     _earnings: EarningsCalendar | None = None
@@ -174,6 +176,7 @@ class Engine:
             if pd.isna(closed_at) or closed_at > now:
                 self._emit(now, "skip", symbol, "data: latest bar has not closed yet")
                 return
+            self._data_logged.pop(symbol, None)  # the data is fine again: its next problem is logged
             if now - closed_at > timedelta(
                 minutes=self.config.bar_minutes * self.config.schedule.max_bar_age_bars
             ):
@@ -753,8 +756,18 @@ class Engine:
         price: float | None = None,
     ) -> None:
         self.events.append(Event(now, kind, symbol, detail, side, volume, price))
-        if self.live:
+        if self.live and not self._logged_already(symbol, detail):
             log.info("%s %s", symbol, detail)
+
+    def _logged_already(self, symbol: str, detail: str) -> bool:
+        """A data problem (a stock's stale quote all night) recurs on every poll, every 15 s:
+        it is logged once, and again only after the data was fine in between."""
+        if not detail.startswith("data:"):
+            return False
+        if self._data_logged.get(symbol) == detail:
+            return True
+        self._data_logged[symbol] = detail
+        return False
 
     def _journal(
         self,

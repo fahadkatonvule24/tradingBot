@@ -205,7 +205,7 @@ class Notifier:
             reply = self._handler(text) if self._handler else ""
         except Exception:
             log.exception("Telegram command failed")
-            reply = "That command failed; the details are in tradebot.log."
+            reply = "That command failed; the details are in the bot's log (tradebot.log or dashboard.log)."
         if reply:
             self.send(reply)
 

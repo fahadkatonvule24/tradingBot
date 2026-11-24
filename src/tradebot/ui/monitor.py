@@ -64,6 +64,10 @@ CHART_BARS = 600
 SPEC_REFRESH = timedelta(minutes=5)
 PREVIEW_SECONDS = 3.0
 LOST_LINK = "Lost the connection to MetaTrader 5. Is the terminal open? Prices are frozen; retrying."
+BROKER_OFFLINE = (
+    "MetaTrader 5 lost its connection to the broker's server (the internet connection?). "
+    "Prices are frozen until it reconnects."
+)
 
 
 SWITCHABLE = ("M5", "M15", "M30", "H1", "H4")
@@ -639,12 +643,12 @@ class Monitor:
 
     def cycle(self) -> None:
         if not self._link.ok():
-            return self._report(LOST_LINK)
+            return self._report(BROKER_OFFLINE if self._link.offline else LOST_LINK)
         try:
             self.refresh()
         except Exception as exc:  # keep the page alive and say what went wrong
             if not self._link.ok():
-                return self._report(LOST_LINK)
+                return self._report(BROKER_OFFLINE if self._link.offline else LOST_LINK)
             message = f"{type(exc).__name__}: {exc}"
             if message != self._last_error:  # the same failure every second is logged once
                 log.exception("dashboard refresh failed")
@@ -1005,12 +1009,15 @@ class Monitor:
         if not hours:
             return {"market_hours": ""}
         calendar = self.engine.earnings
+        upcoming = calendar.next_report(symbol, now) if calendar else None
         return {
             "market_hours": MARKET_HOURS[hours][3],
             "market_open": market_closed(hours, now) is None,
             "contract_size": spec.contract_size,
             "earnings_known": bool(calendar and calendar.known(symbol)),
-            "earnings_next": (upcoming := calendar.next_report(symbol, now) if calendar else None),
+            # as text: a date object made every /api/state request fail as soon as the file had a
+            # date in it (24 Nov 2026: the dashboard showed nothing)
+            "earnings_next": upcoming.isoformat() if upcoming else None,
             "earnings_estimated": bool(calendar and upcoming and calendar.is_estimated(symbol, upcoming)),
             "earnings_error": calendar.error if calendar else None,
         }

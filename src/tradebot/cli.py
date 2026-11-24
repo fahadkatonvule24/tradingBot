@@ -181,7 +181,7 @@ def safe_streams() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     safe_streams()
     args = build_parser().parse_args(argv)
-    _setup_logging(args.verbose, args.command in ("run", "ui"))
+    _setup_logging(args.verbose, args.command in ("run", "ui"), LOG_FILES.get(args.command, "tradebot.log"))
     try:
         config = load_config(args.config)
         if getattr(args, "symbols", None):
@@ -201,7 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return handler(config, args)
     except (ConfigError, FileNotFoundError, ValueError) as exc:
         if args.command in ("run", "ui"):
-            # into tradebot.log too: a loop the autostart task starts closes its window on exit
+            # into its log file too: a loop the autostart task starts closes its window on exit
             log.error("tradebot %s did not start: %s", args.command, exc)
         else:
             console.print(f"[bold red]error:[/] {escape(str(exc))}")
@@ -213,12 +213,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
-def _setup_logging(verbose: bool, to_file: bool) -> None:
+LOG_FILES = {"run": "tradebot.log", "ui": "dashboard.log"}
+"""One log file per long-running process. Found the hard way: when the dashboard and the trading
+loop shared tradebot.log, neither could rename it at 5 MB on Windows while the other had it
+open, and every line both wrote was lost until one managed to (23 Nov: 36 minutes, the
+USDJPY order line included)."""
+
+
+def _setup_logging(verbose: bool, to_file: bool, filename: str = "tradebot.log") -> None:
     handlers: list[logging.Handler] = [RichHandler(console=console, show_path=False, markup=False)]
     if to_file:
-        file_handler = RotatingFileHandler(
-            "tradebot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
-        )
+        file_handler = RotatingFileHandler(filename, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
         handlers.append(file_handler)
     logging.basicConfig(

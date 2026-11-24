@@ -125,6 +125,13 @@ class MT5Broker:
         except Exception:
             return False
 
+    def terminal_answers(self) -> bool:
+        """True while the terminal itself answers, connected to the broker's server or not."""
+        try:
+            return self.mt5.terminal_info() is not None
+        except Exception:
+            return False
+
     def reconnect(self) -> bool:
         """Re-open the link to the terminal. Safe to call repeatedly; False if it is still down."""
         try:

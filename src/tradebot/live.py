@@ -17,6 +17,7 @@ import pandas as pd
 from tradebot import protect
 from tradebot.book import Book, BookBroker
 from tradebot.broker.base import Account, Broker, Position
+from tradebot.broker.mt5 import MT5Error
 from tradebot.config import TIMEFRAME_MINUTES, BotConfig
 from tradebot.duty import Duty
 from tradebot.engine import Engine
@@ -64,27 +65,44 @@ class Link:
         self.down_since: float | None = None
         self.attempts = 0
         self._next_try = 0.0
+        self.offline = False
+        """While the link is down: the terminal answers, only its broker connection is lost."""
 
     def ok(self) -> bool:
         """Call before using the broker: True if the link works (reconnecting first if it can)."""
         connected = getattr(self.broker, "connected", None)
         if connected is None or connected():
             self._recovered()
+            self.offline = False
             return True
         now = self._clock()
+        # The terminal still answers and only its own link to the broker's server is down (the
+        # internet dropped: MT5's journal on this PC showed 33 such drops in one night). MT5
+        # reconnects to the server by itself, so the link to the terminal is left alone: no
+        # shutdown and initialize while it does (the 23 Nov freeze came right after that churn).
+        offline = self.offline = getattr(self.broker, "terminal_answers", lambda: False)()
         if self.down_since is None:
             self.down_since, self.attempts, self._next_try = now, 0, now
-            detail = getattr(self.broker, "last_error_text", lambda: "no details")()
-            log.error(
-                "lost the connection to MetaTrader 5: %s. Is the terminal open? Retrying until it is back.",
-                detail,
-            )
+            if offline:
+                log.warning(
+                    "MetaTrader 5 lost its connection to the broker's server (the internet connection?); "
+                    "waiting for it to reconnect"
+                )
+            else:
+                detail = getattr(self.broker, "last_error_text", lambda: "no details")()
+                log.error(
+                    "lost the connection to MetaTrader 5: %s. Is the terminal open? Retrying until it is back.",
+                    detail,
+                )
+        if offline:
+            return False
         if now >= self._next_try:
             self._next_try = now + self.DELAYS[min(self.attempts, len(self.DELAYS) - 1)]
             self.attempts += 1
             reconnect = getattr(self.broker, "reconnect", None)  # MT5Broker has it; a broker without a
             if reconnect is not None and reconnect():  # link to lose has no `connected` either
                 self._recovered()
+                self.offline = False
                 return True
         return False
 
@@ -152,6 +170,8 @@ class LiveRunner:
         self._reversals = Alerts()
         self._manager = protect.Manager()
         self._turned: dict[int, tuple[str, str]] = {}
+        self._quiet: set[str] = set()
+        """Symbols whose market-closed note is logged already (until a fresh bar arrives)."""
         self._book = BookBroker(broker, book, config.magic) if book is not None else None
 
     def stop(self, *_: object) -> None:
@@ -171,10 +191,13 @@ class LiveRunner:
                 if symbol not in self.symbols:
                     continue  # the account changed again during this cycle
                 self._process(symbol)
-            except Exception:  # one bad symbol must not stop the others
+            except Exception as exc:  # one bad symbol must not stop the others
                 if not self._link.ok():
                     return
-                log.exception("%s: cycle failed", symbol)
+                if isinstance(exc, MT5Error):  # a call refused while the terminal reconnects: no bug
+                    log.warning("%s: skipped this cycle: %s", symbol, exc)
+                else:
+                    log.exception("%s: cycle failed", symbol)
         duty = self.duty is None or self.duty.held()
         try:
             self._warn_reversals(send=duty)
@@ -198,6 +221,12 @@ class LiveRunner:
         sent on it? A switch to another account re-reads the loss limits from its history; a
         failed check stops orders (and this loop's trade management) until a check passes."""
         checked = True
+        connected = getattr(self.broker, "connected", None)
+        if connected is not None and not connected():
+            # the link dropped during this cycle: end it here. Nothing can be sent anyway, and the
+            # checks below would read "algo trading is disabled" and stop orders with a phone alert
+            # (24 Nov 04:26: stopped and resumed 15 s apart). The Link reports it next cycle.
+            return False
         try:
             identity = getattr(self.broker, "account_id", None)
             if identity is not None:
@@ -300,11 +329,17 @@ class LiveRunner:
         bar = timedelta(minutes=self.config.bar_minutes)
         age = now - (row["time"] + bar).to_pydatetime()
         if age > bar * self.config.schedule.max_bar_age_bars:
-            log.info("%s: last closed bar is %s old (market closed?); managing positions only", symbol, age)
+            if symbol not in self._quiet:  # once per closed stretch, not on every 15 s poll
+                self._quiet.add(symbol)
+                log.info(
+                    "%s: last closed bar is %s old (market closed?); managing positions only", symbol, age
+                )
             row["signal"] = 0
             row["exit_signal"] = 0
             if "join_signal" in row:
                 row["join_signal"] = 0
+        else:
+            self._quiet.discard(symbol)
         tick = self.broker.tick(symbol)
         self.engine.on_bar(symbol, spec, params, row, tick.ask - tick.bid, now)
         if row["signal"] == 0:

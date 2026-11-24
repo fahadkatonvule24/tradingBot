@@ -437,6 +437,27 @@ def test_the_dashboard_row_says_a_stocks_hours_shares_and_earnings(cfg, broker):
     assert forex.snapshot()["symbols"][0]["market_hours"] == ""
 
 
+def test_a_known_earnings_date_reaches_the_page_as_text(cfg, broker, tmp_path):
+    """Regression (24 Nov 2026): the next report went out as a date object, so every /api/state
+    request failed (the server's json.dumps raised) once earnings.json had a date in it."""
+    import json
+
+    from test_advisor_ui import SYMBOL, features, primed
+
+    from tradebot.ui.monitor import Monitor
+
+    dates = tmp_path / "earnings.json"
+    dates.write_text(json.dumps({SYMBOL[:6]: ["~2099-01-28"]}), encoding="utf-8")
+    stock = replace(cfg, overrides={SYMBOL: {"risk": {"market_hours": "us_stocks"}}},
+                    schedule=replace(cfg.schedule, earnings_file=str(dates)))  # fmt: skip
+    monitor = primed(Monitor(stock, broker, [SYMBOL]), features())
+    monitor.refresh()
+    snapshot = monitor.snapshot()
+    json.dumps(snapshot, allow_nan=False)  # what the server sends; it raised before
+    row = snapshot["symbols"][0]
+    assert row["earnings_next"] == "2099-01-28" and row["earnings_estimated"] is True
+
+
 def test_a_signals_only_alert_states_the_real_risk_of_the_smallest_lot(config, eurusd):
     """Gold: the smallest lot risks ~3.8% while risk_percent is 1.5; the alert said "1.5% risk"."""
     from conftest import make_sim
