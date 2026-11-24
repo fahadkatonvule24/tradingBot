@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 
@@ -94,6 +96,17 @@ class Link:
 
 NOTIFY_KINDS = {"open", "dry_open", "close", "partial", "rejected"}
 
+HEARTBEAT_FILE = "tradebot.loop.heartbeat"
+"""Rewritten by the trading loop when it starts and after every cycle, next to the journal.
+``scripts/start_bot.ps1`` restarts a loop whose heartbeat has gone quiet. Found the hard way: a
+call into the MetaTrader5 package has no timeout, and on 23 Nov 2026 one hung for 2 h 18 min
+after the terminal reconnected. The process stayed alive, so it looked like a running loop,
+while a signal was entered 39 minutes late and two others were missed."""
+
+FROZEN_NOTE = "tradebot.loop.frozen"
+"""Left next to the heartbeat by ``start_bot.ps1`` when it restarts a frozen loop: the new loop
+logs it, sends it to the phone and deletes it."""
+
 
 def resolve_symbols(broker: Broker, configured: Iterable[str]) -> list[str]:
     """Resolve the watchlist at startup and again when the terminal changes accounts."""
@@ -114,7 +127,7 @@ class LiveRunner:
     def __init__(
         self, config: BotConfig, broker: Broker, engine: Engine, symbols: list[str], notifier=None,
         *, duty: Duty | None = None, manage: bool = False, book: Book | None = None,
-        gate: Callable[[], Gate] | None = None,
+        gate: Callable[[], Gate] | None = None, heartbeat: Path | None = None,
     ) -> None:  # fmt: skip
         """``duty``: whether this loop or a running dashboard sends the reversal warnings and
         manages trades placed by hand (``tradebot.duty``); None = always this loop. ``manage``: do
@@ -122,9 +135,12 @@ class LiveRunner:
         the first stop seen on each position, kept by the dashboard, for the 1R of a trade that
         got its stop after it opened. ``gate``: ``trading_gate`` on the account the terminal is
         logged in to now, asked again before every symbol while orders are allowed: the terminal
-        can be switched to another account, a real-money one included, while this runs."""
+        can be switched to another account, a real-money one included, while this runs.
+        ``heartbeat``: the file ``run`` rewrites after every cycle (``HEARTBEAT_FILE``); None
+        writes none."""
         self.config, self.broker, self.engine, self.symbols = config, broker, engine, symbols
         self.notifier = notifier
+        self.heartbeat = heartbeat
         self.duty, self.manage = duty, manage
         self._gate = gate
         self._allowed = engine.execute
@@ -298,11 +314,45 @@ class LiveRunner:
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGINT, self.stop)
             signal.signal(signal.SIGTERM, self.stop)
+        self._report_frozen_restart()
+        self._beat()
         while not self._stop.is_set():
             self.cycle()
+            self._beat()
             if once:
                 return
             self._stop.wait(self.config.poll_seconds)
+
+    def _beat(self) -> None:
+        """Tell ``start_bot.ps1`` this loop is still cycling (``HEARTBEAT_FILE``)."""
+        if self.heartbeat is None:
+            return
+        try:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.heartbeat.write_text(f"{stamp} pid {os.getpid()}\n", encoding="ascii")
+        except OSError:  # a missed beat only risks a needless restart, never a trade
+            log.debug("heartbeat not written to %s", self.heartbeat, exc_info=True)
+
+    def _report_frozen_restart(self) -> None:
+        """If ``start_bot.ps1`` restarted this loop because the last one froze, say so once."""
+        if self.heartbeat is None:
+            return
+        note = self.heartbeat.with_name(FROZEN_NOTE)
+        try:
+            text = note.read_text(encoding="utf-8-sig").strip()  # PowerShell 5 writes a BOM
+        except FileNotFoundError:
+            return
+        except OSError:
+            log.debug("could not read %s", note, exc_info=True)
+            return
+        try:
+            note.unlink()
+        except OSError:
+            log.debug("could not delete %s", note, exc_info=True)
+        text = text or "The trading loop froze and was started again."
+        log.warning("restarted after a freeze: %s", text)
+        if self.notifier:
+            self.notifier.send(f"TRADING · {text}", "failed")
 
 
 HTF_HISTORY_MULTIPLE = 6

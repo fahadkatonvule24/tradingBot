@@ -25,3 +25,5 @@ data/
 reports/
 .screenshots-tmp/
 tradebot.*.lock
+tradebot.loop.heartbeat
+tradebot.loop.frozen

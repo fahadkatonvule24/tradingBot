@@ -292,7 +292,7 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
     from tradebot.duty import Duty
     from tradebot.engine import Engine
     from tradebot.journal import Journal
-    from tradebot.live import LiveRunner, trading_gate
+    from tradebot.live import HEARTBEAT_FILE, LiveRunner, trading_gate
 
     broker, account, symbols = _connect(config)
     with ExitStack() as resources:
@@ -330,6 +330,7 @@ def cmd_run(config: BotConfig, args: argparse.Namespace) -> int:
         runner = LiveRunner(
             config, broker, engine, symbols, notifier=notifier, duty=duty, manage=gate.execute, book=book,
             gate=lambda: trading_gate(config, broker.account(), args.live, broker.terminal_trading_allowed()),
+            heartbeat=_working_folder(config) / HEARTBEAT_FILE,
         )  # fmt: skip
         runner.run(once=args.once)
     return 0
