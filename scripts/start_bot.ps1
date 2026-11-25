@@ -19,6 +19,16 @@
 # MT5 is opened here, not by the bot: a terminal the bot's own process starts is that process's
 # child, and stopping the bot would then close the terminal with it.
 #
+# No window pops up. The loop and the dashboard start minimized (on the taskbar), each in a classic
+# console window with QuickEdit turned off by the bot, so a click in it cannot pause it. The task
+# runs this script through a headless console: "powershell -WindowStyle Hidden" alone still
+# flashed a black window every 5 minutes. The task's action:
+#
+#   C:\Windows\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass
+#       -WindowStyle Hidden -File "E:\GIT REPOS\tradingBot\scripts\start_bot.ps1"
+#
+# By hand (a window is fine then):
+#
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot.ps1
 #
 # Files in the tradingBot folder that change what it does:
@@ -82,7 +92,7 @@ function Start-Loop {
         Set-Content -Path (Join-Path $root "tradebot.loop.frozen") -Value $note -Encoding utf8
         $why = "trading loop frozen (no cycle for $minutes min, last {0:HH:mm:ss}): stopped process(es) $ids" -f $last
     }
-    Start-Process -FilePath $exe -ArgumentList "-c", $Config, "run", "--live" -WorkingDirectory $root -WindowStyle Normal
+    Start-Process -FilePath $exe -ArgumentList "-c", $Config, "run", "--live" -WorkingDirectory $root -WindowStyle Minimized
     Write-Line "${why}: started it ($Config)"
 }
 
@@ -97,7 +107,7 @@ function Start-Dashboard([bool]$browser) {
     if (-not $browser) {
         $arguments += "--no-browser"  # a dashboard that stopped comes back without a new browser tab
     }
-    Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Normal
+    Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Minimized
     Write-Line ("dashboard was not running: started it ({0})" -f $(if ($browser) { "opened in the browser" } else { "no browser tab" }))
 }
 

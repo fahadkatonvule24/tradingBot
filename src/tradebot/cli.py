@@ -18,6 +18,7 @@ import argparse
 import codecs
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from contextlib import ExitStack
@@ -178,9 +179,37 @@ def safe_streams() -> None:
             stream.reconfigure(errors="tradebot.ascii_fallback")
 
 
+ENABLE_QUICK_EDIT_MODE, ENABLE_EXTENDED_FLAGS = 0x0040, 0x0080
+
+
+def no_quick_edit(kernel32: Any = None) -> bool:
+    """Turn off QuickEdit in this process's console window (Windows). In a classic console window,
+    as the autostart task opens the loop and dashboard (minimized, so they do not pop up), a click
+    or a text selection in the window pauses every write to it, and with it the whole bot, until
+    the selection is cleared. Text can still be copied with the window menu's Edit > Mark.
+    Returns whether the mode was changed; anywhere else (no console, not Windows) it does nothing."""
+    import ctypes
+
+    if kernel32 is None:
+        if os.name != "nt":
+            return False
+        kernel32 = ctypes.windll.kernel32
+    handle = kernel32.GetStdHandle(-10)  # the console's input
+    mode = ctypes.c_uint32()
+    if not handle or not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        return False  # no console (output redirected, a service, a test)
+    if not mode.value & ENABLE_QUICK_EDIT_MODE:
+        return False
+    return bool(
+        kernel32.SetConsoleMode(handle, (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS)
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     safe_streams()
     args = build_parser().parse_args(argv)
+    if args.command in ("run", "ui"):
+        no_quick_edit()  # the long-running ones: a stray click must not freeze them
     _setup_logging(args.verbose, args.command in ("run", "ui"), LOG_FILES.get(args.command, "tradebot.log"))
     try:
         config = load_config(args.config)
