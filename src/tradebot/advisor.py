@@ -89,6 +89,10 @@ class Advice:
     cautions: list[dict] = field(default_factory=list)
     """What argues against a trade on ``side`` now: a sweep the other way, an opposite supply or
     demand zone or fair value gap (``smc.cautions``). At an opposite zone no join is offered."""
+    bot: str = ""
+    """What the trading bot itself does about a BUY, SELL, SKIP or JOIN: places it, or not and
+    why (signals only, auto-join off, a limit, no trading loop running). Set by the dashboard, which
+    knows whether a loop runs; also appended to ``detail`` so the card and the alert say it."""
 
 
 def next_entry_time(schedule: ScheduleParams, after: datetime, bar: timedelta) -> datetime | None:
@@ -179,16 +183,17 @@ def advise(
             bar_time,
             None,
         )
-    quote_problem = tick.problem(now)
-    if quote_problem:
-        return Advice(symbol, "CLOSED", "Waiting for a fresh quote", quote_problem, 0, False, bar_time, None)
-
+    # A closed market first: its quote goes stale too, and "waiting for a fresh quote" on one stock
+    # beside "market closed" on the others read like a fault (25 Nov 2026, GOOGL before the open).
     if now - bar_close > bar * config.schedule.max_bar_age_bars:
         return Advice(
             symbol, "CLOSED", "Market closed",
             f"The last {config.timeframe} bar closed at {bar_close:%a %H:%M} UTC; advice resumes with the next bar.",
             0, False, bar_time, None,
         )  # fmt: skip
+    quote_problem = tick.problem(now)
+    if quote_problem:
+        return Advice(symbol, "CLOSED", "Waiting for a fresh quote", quote_problem, 0, False, bar_time, None)
     if not np.isfinite(row["atr"]) or row["atr"] <= 0:
         return Advice(symbol, "WAIT", "Not enough history", "Indicators are still warming up.", 0, False,
                       bar_time, bar_close + bar)  # fmt: skip

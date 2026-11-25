@@ -33,7 +33,7 @@ from tradebot.strategy import explain
 
 log = logging.getLogger(__name__)
 
-SIGNALS_ONLY = "signals only (risk.auto_trade is off for this symbol): place it yourself if you want it"
+SIGNALS_ONLY = "signals only: the bot does not trade this symbol"
 
 
 @dataclass(frozen=True)

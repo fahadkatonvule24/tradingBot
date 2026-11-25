@@ -54,7 +54,8 @@ NTFY_TOPIC_ENV, NTFY_SERVER_ENV, NTFY_TOKEN_ENV = "NTFY_TOPIC", "NTFY_SERVER", "
 NTFY_MAX_BYTES = 3800
 """ntfy takes 4,096 bytes per message and turns longer ones into attachments; ntfy.sh also allows
 250 messages a day per sender, which is why the default is the important alerts only."""
-NTFY_PRIORITY = {"signal": 4, "exit": 4, "failed": 4, "news": 3, "order": 3, "position": 3, "status": 3}
+NTFY_PRIORITY = {"signal": 4, "exit": 4, "failed": 4, "news": 3, "order": 3, "position": 3, "status": 3,
+                 "skipped": 3}  # fmt: skip
 """Phone behaviour by alert kind: 4 = long vibration and a pop-over, 3 = the usual sound, 2 (all
 other kinds) = silent, in the notification drawer only."""
 
@@ -64,9 +65,12 @@ waits (about 8.5 minutes in all) before it is dropped; later alerts wait their t
 Found the hard way: one try only, and the user's line dropped 33 times in one night (MT5's own
 journal), so an "order opened" or "get out" alert could vanish while nobody was at the PC."""
 
-IMPORTANT = frozenset({"signal", "failed", "exit", "position", "news", "order", "status"})
+IMPORTANT = frozenset({"signal", "failed", "exit", "position", "news", "order", "status", "skipped"})
 """Alert kinds a channel set to "important" sends: a confirmed buy or sell, a failed break,
-get-out and reversal warnings and assumed closes on open positions, news, and orders. The rest
+get-out and reversal warnings and assumed closes on open positions, news, orders, and a signal of
+an auto-traded symbol that the bot held back ("skipped": on 25 Nov 2026 a GBPUSD sell was held
+back by the open-risk limit and the phone heard nothing, so it looked as if the bot had missed
+it). The rest
 ("forming", "blocked", "trend", "analysis", "info") are on the dashboard and in Telegram."""
 
 

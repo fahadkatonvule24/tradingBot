@@ -20,7 +20,7 @@ from tradebot.broker.base import Account, Broker, Position
 from tradebot.broker.mt5 import MT5Error
 from tradebot.config import TIMEFRAME_MINUTES, BotConfig
 from tradebot.duty import Duty
-from tradebot.engine import Engine
+from tradebot.engine import SIGNALS_ONLY, Engine
 from tradebot.reversal import EXIT, Alerts, assess, holding_text
 from tradebot.strategy import compute_signals, regular_session
 
@@ -113,6 +113,18 @@ class Link:
 
 
 NOTIFY_KINDS = {"open", "dry_open", "close", "partial", "rejected"}
+
+
+def held_back_signal(detail: str) -> bool:
+    """A skip event that is a real signal of an auto-traded symbol held back by a limit (open
+    risk, loss limits, news, session...), not a data hold-up, a signals-only symbol, or a signal
+    the bot already traded on this bar (seen again after a restart)."""
+    return (
+        " signal skipped: " in detail
+        and SIGNALS_ONLY not in detail
+        and not any(f"skipped: {why}:" in detail for why in ("data", "duplicate"))
+    )
+
 
 HEARTBEAT_FILE = "tradebot.loop.heartbeat"
 """Rewritten by the trading loop when it starts and after every cycle, next to the journal.
@@ -214,6 +226,11 @@ class LiveRunner:
                     self.notifier.send(f"{event.symbol}: {event.detail}", "order")
                 elif event.kind == "signal" and duty:  # a signals-only symbol; a dashboard sends its own
                     self.notifier.send(f"{event.symbol}: {event.detail}", "signal")
+                elif event.kind == "skip" and duty and self.engine.execute and held_back_signal(event.detail):
+                    # the bot's own signal, held back by a limit: said once, like the dashboard does
+                    self.notifier.send(
+                        f"{event.symbol}: {event.detail}. The bot did not place it.", "skipped"
+                    )
         self.engine.events.clear()
 
     def _authorize(self) -> bool:

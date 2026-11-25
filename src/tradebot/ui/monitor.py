@@ -960,10 +960,12 @@ class Monitor:
         advice = advise(
             self.engine, symbol, spec, self.config.for_symbol(symbol), features, tick, now, preview
         )
+        rule = get_in_rule(advice)
+        offer_get_in = rule is not None and not (self.desk and self.desk.manual)
+        advice = self._with_bot_line(symbol, advice, offer_get_in)  # before the alerts, which quote it
         sizes = self._sizes(symbol, advice, features, tick)  # before the alerts, which quote them
         get_in = None
-        rule = get_in_rule(advice)
-        if rule is not None and not (self.desk and self.desk.manual):  # the bot's entry, held back by a limit
+        if offer_get_in:  # the bot's entry, held back by a limit
             params = self.config.for_symbol(symbol)
             free = trade_plan(
                 self.engine, symbol, spec, params, features.iloc[-1], tick, advice.side, caps=False
@@ -1001,6 +1003,37 @@ class Monitor:
             "structure": self._structure_for(symbol, features, spec),
             "history": self._history(symbol, features),
         }
+
+    def bot_line(self, symbol: str, advice: Advice, offer_get_in: bool = False) -> str:
+        """What the trading bot does about this card, in one sentence ("" when nothing is to be
+        done). Found the hard way (25 Nov 2026): the dashboard said "Sell XAUUSDm now" and "join the
+        sell" on GBPUSD, the bot took neither (gold is signals only, joins are off, and a hand
+        trade had used the open-risk budget), and nothing on screen or phone said so."""
+        params = self.config.for_symbol(symbol)
+        if advice.action not in ("BUY", "SELL", "SKIP", "JOIN"):
+            return ""
+        get_in = ' The dashboard\'s "Get in" places it as your own trade.' if offer_get_in else ""
+        if not params.risk.auto_trade:
+            return f"Bot: does not trade {symbol} (signals only); place it yourself if you want it."
+        if advice.action == "SKIP" and (advice.blocker or "").startswith("duplicate:"):
+            return "Bot: already took a trade on this signal."
+        if advice.action == "SKIP":
+            return f"Bot: does not place it while that limit holds.{get_in}"
+        if advice.action == "JOIN" and not params.strategy.auto_join:
+            return f"Bot: does not join missed signals (auto-join is off); place it yourself if you want it.{get_in}"
+        if self.duty is not None and not self.duty.trading_loop_running():
+            return "Bot: no live trading loop is running, so nothing places it; place it yourself or start the bot."
+        if advice.action == "JOIN":
+            if advice.blocker:
+                return f"Bot: does not join while a limit holds ({advice.blocker}).{get_in}"
+            return "Bot: joins it itself, once, unless a limit holds it back."
+        return "Bot: places this trade itself."
+
+    def _with_bot_line(self, symbol: str, advice: Advice, offer_get_in: bool) -> Advice:
+        line = self.bot_line(symbol, advice, offer_get_in)
+        if not line:
+            return advice
+        return replace(advice, bot=line, detail=f"{advice.detail} {line}" if advice.detail else line)
 
     def _stock_facts(self, symbol: str, spec: SymbolSpec, now: datetime) -> dict[str, Any]:
         """For an instrument with exchange hours (a stock): the hours, whether they are on now, the
@@ -1476,7 +1509,16 @@ class Monitor:
             }
         )
         if advice.action in ("BUY", "SELL", "BLOCKED", "SKIP"):
-            kind = "signal" if advice.action in ("BUY", "SELL") else "blocked"
+            if advice.action in ("BUY", "SELL"):
+                kind = "signal"
+            elif (
+                advice.action == "SKIP"
+                and self.config.for_symbol(symbol).risk.auto_trade
+                and not (advice.blocker or "").startswith("duplicate:")
+            ):
+                kind = "skipped"  # the bot's own entry held back: worth hearing away from the PC
+            else:
+                kind = "blocked"
             text = self._alert_text(symbol, advice, spec)
             record = self.record_line(symbol) if kind == "signal" else ""
             self._send(f"{text}\n{record}" if record else text, kind)
