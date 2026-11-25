@@ -1017,6 +1017,8 @@ class Monitor:
             return f"Bot: does not trade {symbol} (signals only); place it yourself if you want it."
         if advice.action == "SKIP" and (advice.blocker or "").startswith("duplicate:"):
             return "Bot: already took a trade on this signal."
+        if advice.action == "SKIP" and already_in(advice.blocker):
+            return f"Bot: a trade is already open on {symbol}; it does not add another."
         if advice.action == "SKIP":
             return f"Bot: does not place it while that limit holds.{get_in}"
         if advice.action == "JOIN" and not params.strategy.auto_join:
@@ -1515,6 +1517,7 @@ class Monitor:
                 advice.action == "SKIP"
                 and self.config.for_symbol(symbol).risk.auto_trade
                 and not (advice.blocker or "").startswith("duplicate:")
+                and not already_in(advice.blocker)
             ):
                 kind = "skipped"  # the bot's own entry held back: worth hearing away from the PC
             else:
@@ -1837,6 +1840,14 @@ class Monitor:
             return  # switched while this ran: the newer run owns the screen
         self.track_record = record
         self._track_pending = False
+
+
+def already_in(blocker: str | None) -> bool:
+    """The hold-up is a trade already open on this very symbol ("positions: 1 open on XAUUSDm"),
+    often the bot's own from this signal: nothing was missed, so no "held back" alert. (25 Nov
+    2026: right after the bot sold gold, the card said it had not placed it.) The total cap
+    ("positions: 3 open in total") is a real limit and stays one."""
+    return blocker is not None and blocker.startswith("positions:") and " open on " in blocker
 
 
 def get_in_rule(advice: Advice) -> str | None:

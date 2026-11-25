@@ -102,6 +102,26 @@ def test_a_signal_the_bot_already_traded_is_not_called_held_back(cfg, broker):
     )
 
 
+def test_a_trade_already_open_on_the_symbol_is_not_a_missed_signal(cfg, broker):
+    """25 Nov: right after the bot sold gold, the card said "does not place it while that limit
+    holds" (the limit being its own open gold trade) and a "skipped" alert went to the phone."""
+    from tradebot.live import held_back_signal
+    from tradebot.ui.monitor import already_in
+
+    inbox = Inbox()
+    monitor = Monitor(cfg, broker, [SYMBOL], notifier=inbox)
+    holding = Advice(SYMBOL, "SKIP", "Sell signal, but skip it", f"positions: 1 open on {SYMBOL}", -1, False,
+                     NOW, None, blocker=f"positions: 1 open on {SYMBOL}")  # fmt: skip
+    assert monitor.bot_line(SYMBOL, holding, offer_get_in=True) == (
+        f"Bot: a trade is already open on {SYMBOL}; it does not add another."
+    )
+    monitor._note(SYMBOL, holding, NOW, broker.symbol(SYMBOL))
+    assert inbox.kinds == ["blocked"]  # quiet: a phone set to important alerts hears nothing
+    assert not held_back_signal(f"sell signal skipped: positions: 1 open on {SYMBOL}")
+    assert already_in(f"positions: 1 open on {SYMBOL}") and not already_in("positions: 3 open in total")
+    assert held_back_signal("sell signal skipped: positions: 3 open in total")  # a real limit
+
+
 def test_cards_without_a_trade_say_nothing_about_the_bot(cfg, broker):
     monitor = Monitor(cfg, broker, [SYMBOL])
     for action in ("WAIT", "TREND", "CLOSED", "BLOCKED"):

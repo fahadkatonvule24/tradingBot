@@ -123,6 +123,7 @@ def held_back_signal(detail: str) -> bool:
         " signal skipped: " in detail
         and SIGNALS_ONLY not in detail
         and not any(f"skipped: {why}:" in detail for why in ("data", "duplicate"))
+        and not ("skipped: positions:" in detail and " open on " in detail)  # already in that market
     )
 
 
