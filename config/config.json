@@ -142,7 +142,7 @@
              "risk": { "auto_trade": true },
              "backtest": { "commission_per_lot": 0.0, "swap_long": 0.0, "swap_short": 0.0, "swap_triple_day": 2, "min_spread_points": 10 } },
     "XAUUSD": { "strategy": { "name": "breakout" },
-             "risk": { "allow_min_lot_overrisk": true, "max_total_risk_percent": 6.0, "auto_trade": false },
+             "risk": { "allow_min_lot_overrisk": true, "max_total_risk_percent": 6.0, "auto_trade": true },
              "backtest": { "commission_per_lot": 0.0, "swap_long": -43.16, "swap_short": 0.0, "swap_triple_day": 2, "min_spread_points": 24 } },
     "ANT": { "strategy": { "name": "breakout", "use_trend_filter": false },
              "risk": { "auto_trade": true, "market_hours": "us_stocks" },
